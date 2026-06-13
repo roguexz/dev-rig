@@ -1,0 +1,84 @@
+# Example: Vault Secret Injection with Agent
+# This example shows how to use the Vault Agent Injector to mount a secret
+# from Vault into a pod's filesystem.
+
+# First, you need to enable the Kubernetes auth method in Vault and configure roles.
+# Run these commands after 'rd-setup vault setup' and 'rd-setup vault unseal':
+
+# 1. Login to Vault (use the root token from ~/.cache/local-dev/vault/keys.json)
+#    kubectl exec -it -n commons vault-0 -- /bin/sh
+#    vault login <root_token>
+
+# 2. Enable Kubernetes auth
+#    vault auth enable kubernetes
+
+# 3. Configure Kubernetes auth
+#    vault write auth/kubernetes/config \
+#        kubernetes_host="https://kubernetes.default.svc" \
+#        kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+# 4. Create a policy that grants read access to a secret path
+#    vault policy write myapp-policy - <<EOF
+#    path "secret/data/myapp" {
+#      capabilities = ["read"]
+#    }
+#    EOF
+
+# 5. Create a role that binds the policy to a Kubernetes service account
+#    vault write auth/kubernetes/role/myapp-role \
+#        bound_service_account_names=myapp \
+#        bound_service_account_namespaces=local \
+#        policies=myapp-policy \
+#        ttl=24h
+
+# 6. Create a secret for the application to use
+#    vault kv put secret/myapp username="static-user" password="static-password"
+
+# --- Kubernetes Manifests ---
+
+# 1. Namespace for the application
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local
+---
+# 2. Service Account for the application
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: myapp
+  namespace: local
+---
+# 3. The application deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-deployment
+  namespace: local
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+      annotations:
+        # --- Vault Agent Annotations ---
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "myapp-role"
+        vault.hashicorp.com/agent-inject-secret-database-config.txt: "secret/data/myapp"
+        vault.hashicorp.com/agent-inject-template-database-config.txt: |
+          {{- with secret "secret/data/myapp" -}}
+          export DB_USERNAME={{ .Data.data.username }}
+          export DB_PASSWORD={{ .Data.data.password }}
+          {{- end }}
+    spec:
+      serviceAccountName: myapp
+      containers:
+        - name: app
+          image: busybox
+          # The app will see the secret at /vault/secrets/database-config.txt
+          # The agent will keep it renewed.
+          command: ["sh", "-c", "while true; do cat /vault/secrets/database-config.txt; sleep 10; done"]

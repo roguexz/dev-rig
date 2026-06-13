@@ -1,0 +1,77 @@
+# Example: End-to-End TLS
+# In this scenario, the pod itself gets a TLS certificate from cert-manager.
+# Traefik will pass the encrypted traffic through to the pod (TLS Passthrough).
+# The application inside the pod is responsible for handling TLS.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoami-e2e
+  labels:
+    app: whoami-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whoami-e2e
+  template:
+    metadata:
+      labels:
+        app: whoami-e2e
+    spec:
+      containers:
+      - name: whoami
+        # This is a special version of whoami that listens on HTTPS
+        image: traefik/whoamitls
+        ports:
+        - containerPort: 443
+        volumeMounts:
+        - name: certs
+          mountPath: /certs
+          readOnly: true
+      volumes:
+      - name: certs
+        secret:
+          secretName: whoami-e2e-cert # The secret created by the Certificate object
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami-e2e
+spec:
+  selector:
+    app: whoami-e2e
+  ports:
+  - port: 443
+    targetPort: 443
+---
+# Create a Certificate object to request a cert from our issuer
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: whoami-e2e-cert
+spec:
+  secretName: whoami-e2e-cert
+  dnsNames:
+  - whoami-e2e.rd.localhost
+  issuerRef:
+    name: mkcert-issuer
+    kind: ClusterIssuer
+---
+# Use an IngressRoute for TLS Passthrough
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: whoami-e2e
+spec:
+  entryPoints:
+    - websecure
+  routes:
+  - match: Host(`whoami-e2e.rd.localhost`)
+    kind: Rule
+    services:
+    - name: whoami-e2e
+      port: 443
+      scheme: https
+  tls:
+    passthrough: true

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo ""
+    echo "Commands:"
+    echo "  install    Install the all-in-one Grafana OTel LGTM stack."
+    echo "  uninstall  Remove the OTel stack."
+}
+
+install_otel() {
+    require_command "kubectl"
+
+    local namespace="commons"
+    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+
+    log_info "Deploying Grafana OTel LGTM all-in-one image..."
+
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lgtm
+  namespace: ${namespace}
+  labels:
+    app: lgtm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lgtm
+  template:
+    metadata:
+      labels:
+        app: lgtm
+    spec:
+      containers:
+      - name: lgtm
+        image: grafana/otel-lgtm:latest
+        env:
+        # Override the default Grafana admin password
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "changeit"
+        ports:
+        - containerPort: 3000
+          name: grafana
+        - containerPort: 4317
+          name: otlp-grpc
+        - containerPort: 4318
+          name: otlp-http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: ${namespace}
+spec:
+  type: ClusterIP
+  selector:
+    app: lgtm
+  ports:
+  - port: 80
+    targetPort: 3000
+    name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: ${namespace}
+spec:
+  type: LoadBalancer
+  selector:
+    app: lgtm
+  ports:
+  - port: 4317
+    targetPort: 4317
+    name: grpc
+  - port: 4318
+    targetPort: 4318
+    name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: ${namespace}
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: otel.rd.localhost
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 80
+EOF
+
+    log_info "Waiting for LGTM pod to be ready..."
+    kubectl wait --for=condition=available deployment/lgtm -n "$namespace" --timeout=120s
+
+    log_info "OTel stack installation complete."
+    log_info "Grafana UI is accessible at: https://otel.rd.localhost"
+    log_info "OTLP endpoint for your applications: localhost:4317 (gRPC) or localhost:4318 (HTTP)"
+    log_info "Default Grafana credentials: admin / changeit"
+}
+
+uninstall_otel() {
+    require_command "kubectl"
+
+    local namespace="commons"
+
+    log_info "Uninstalling Grafana OTel LGTM stack..."
+    kubectl delete deployment lgtm -n "$namespace" --ignore-not-found
+    kubectl delete service grafana otel-collector -n "$namespace" --ignore-not-found
+    kubectl delete ingress grafana -n "$namespace" --ignore-not-found
+
+    log_info "OTel stack uninstall complete. The 'commons' namespace was not deleted."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        install)
+            install_otel
+            ;;
+        uninstall)
+            uninstall_otel
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

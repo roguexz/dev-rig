@@ -1,0 +1,64 @@
+# Example: TLS Termination at the Edge (Traefik Ingress)
+# In this scenario, Traefik handles the TLS termination using a certificate
+# requested from cert-manager via the Ingress resource annotations.
+# The traffic from Traefik to the Pod is unencrypted (HTTP).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoami-edge
+  labels:
+    app: whoami-edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whoami-edge
+  template:
+    metadata:
+      labels:
+        app: whoami-edge
+    spec:
+      containers:
+      - name: whoami
+        image: traefik/whoami
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami-edge
+spec:
+  selector:
+    app: whoami-edge
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: whoami-edge
+  annotations:
+    # Tell cert-manager to automatically create a certificate using our issuer
+    cert-manager.io/cluster-issuer: "mkcert-issuer"
+    # Force Traefik to redirect HTTP to HTTPS
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+spec:
+  rules:
+  - host: whoami-edge.rd.localhost
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: whoami-edge
+            port:
+              number: 80
+  tls:
+  # cert-manager will store the generated certificate in this secret
+  - hosts:
+    - whoami-edge.rd.localhost
+    secretName: whoami-edge-tls

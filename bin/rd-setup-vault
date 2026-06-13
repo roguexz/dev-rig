@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <setup|unseal|seal|uninstall>"
+    echo ""
+    echo "Commands:"
+    echo "  setup      Install Vault, initialize it, and store keys."
+    echo "  unseal     Unseal the Vault using stored keys."
+    echo "  seal       Seal the Vault."
+    echo "  uninstall  Remove Vault and its stored keys."
+}
+
+setup_vault() {
+    require_command "helm"
+    require_command "kubectl"
+
+    log_info "Adding HashiCorp Helm repository..."
+    helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
+    helm repo update hashicorp
+
+    local namespace="commons"
+    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+
+    log_info "Installing Vault..."
+    helm upgrade --install vault hashicorp/vault \
+        --namespace "$namespace" \
+        --set "server.dev.enabled=false" \
+        --set "server.ha.enabled=false" \
+        --set "server.standalone.enabled=true" \
+        --set "server.dataStorage.size=1Gi" \
+        --set "server.ingress.enabled=true" \
+        --set "server.ingress.ingressClassName=traefik" \
+        --set "server.ingress.hosts[0].host=vault.rd.localhost" \
+        --set "server.ingress.hosts[0].paths[0]=/" \
+        --set "server.ingress.tls[0].secretName=default-tls-secret" \
+        --set "server.ingress.tls[0].hosts[0]=vault.rd.localhost" \
+        --wait
+
+    log_info "Waiting for Vault pod to be created and running..."
+    while [[ $(kubectl get pods vault-0 -n "$namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) != "Running" ]]; do
+        echo -n "."
+        sleep 2
+    done
+    echo ""
+
+    sleep 5
+
+    log_info "Initializing Vault..."
+    if [ -f "${VAULT_DIR}/keys.json" ]; then
+        log_warn "Vault keys already exist at ${VAULT_DIR}/keys.json. Skipping initialization."
+        log_info "If you need to re-initialize, please remove the file and run setup again."
+    else
+        init_dirs
+        kubectl exec -n "$namespace" vault-0 -- vault operator init -format=json > "${VAULT_DIR}/keys.json"
+        log_info "Vault initialized. Unseal keys and root token saved to ${VAULT_DIR}/keys.json"
+    fi
+
+    unseal_vault
+
+    configure_default_user
+
+    log_info "Vault UI and API are accessible at: https://vault.rd.localhost"
+    log_info "You can login with Username: admin, Password: changeit"
+}
+
+unseal_vault() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local namespace="commons"
+
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        fatal "Vault keys not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
+    fi
+
+    log_info "Unsealing Vault..."
+
+    jq -r .unseal_keys_b64[] "${VAULT_DIR}/keys.json" | while read -r key; do
+        kubectl exec -n "$namespace" vault-0 -- vault operator unseal "$key"
+    done
+
+    log_info "Vault unseal process complete."
+}
+
+configure_default_user() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local namespace="commons"
+    log_info "Configuring default admin user..."
+
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        log_warn "Root token not found. Skipping user configuration."
+        return
+    fi
+
+    local root_token
+    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+
+    # We use a temporary shell script executed inside the pod to keep things clean
+    cat <<EOF | kubectl exec -i -n "$namespace" vault-0 -- sh
+        export VAULT_TOKEN="${root_token}"
+
+        # Check if userpass is enabled, if not enable it
+        if ! vault auth list | grep -q "userpass/"; then
+            vault auth enable userpass
+        fi
+
+        # Create an admin policy that has full permissions
+        vault policy write admin - <<POLICY
+path "*" {
+  capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+POLICY
+
+        # Create or update the admin user with the password 'changeit' and assign the admin policy
+        vault write auth/userpass/users/admin password=changeit policies=admin
+EOF
+    log_info "Default admin user configured successfully."
+}
+
+seal_vault() {
+    require_command "kubectl"
+
+    local namespace="commons"
+    log_info "Sealing Vault..."
+    kubectl exec -n "$namespace" vault-0 -- vault operator seal
+    log_info "Vault is now sealed."
+}
+
+uninstall_vault() {
+    require_command "helm"
+    require_command "kubectl"
+
+    local namespace="commons"
+
+    log_info "Uninstalling Vault Helm release..."
+    helm uninstall vault -n "$namespace" || true
+
+    log_info "Removing MutatingWebhookConfiguration..."
+    kubectl delete mutatingwebhookconfiguration vault-agent-injector-cfg --ignore-not-found
+
+    log_info "Removing Vault PVC to ensure clean re-install..."
+    kubectl delete pvc -n "$namespace" data-vault-0 --ignore-not-found
+
+    log_info "Removing local Vault keys..."
+    rm -rf "${VAULT_DIR}"
+
+    log_info "Vault uninstall complete. The 'commons' namespace was not deleted."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        setup)
+            setup_vault
+            ;;
+        unseal)
+            unseal_vault
+            ;;
+        seal)
+            seal_vault
+            ;;
+        uninstall)
+            uninstall_vault
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

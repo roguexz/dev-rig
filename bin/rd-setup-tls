@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall|keystore>"
+    echo ""
+    echo "Commands:"
+    echo "  install    Generate certs, install into OS, and configure Traefik."
+    echo "  uninstall  Remove certs and Traefik configuration."
+    echo "  keystore   Create a Java keystore with the root CA."
+}
+
+install_certs() {
+    require_command "mkcert"
+    require_command "kubectl"
+
+    init_dirs
+
+    log_info "Installing mkcert local CA..."
+    mkcert -install
+
+    local cert_file="${CERTS_DIR}/localhost.pem"
+    local key_file="${CERTS_DIR}/localhost-key.pem"
+
+    if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
+        log_info "Certificates already exist in ${CERTS_DIR}. Skipping generation."
+    else
+        log_info "Generating certificates..."
+        mkcert -cert-file "$cert_file" -key-file "$key_file" \
+            "localhost" "127.0.0.1" "::1" \
+            "*.rancher.localhost" \
+            "*.rd.localhost" \
+            "localhost.rogue.io" \
+            "*.localhost.rogue.io"
+        log_info "Certificates generated successfully."
+    fi
+
+    log_info "Configuring Kubernetes and Traefik..."
+
+    # Ensure kube-system namespace exists (it should, but just in case)
+    kubectl create namespace kube-system --dry-run=client -o yaml | kubectl apply -f -
+
+    # Create or update TLS Secret
+    kubectl create secret tls default-tls-secret \
+        --namespace=kube-system \
+        --cert="$cert_file" \
+        --key="$key_file" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    log_info "Creating Traefik TLSStore..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: kube-system
+spec:
+  defaultCertificate:
+    secretName: default-tls-secret
+EOF
+
+    log_info "TLS setup complete."
+}
+
+uninstall_certs() {
+    require_command "kubectl"
+
+    log_info "Removing Traefik TLSStore..."
+    kubectl delete tlsstore default -n kube-system --ignore-not-found
+
+    log_info "Removing Kubernetes Secret..."
+    kubectl delete secret default-tls-secret -n kube-system --ignore-not-found
+
+    log_info "Removing local certificates..."
+    rm -f "${CERTS_DIR}/localhost.pem" "${CERTS_DIR}/localhost-key.pem"
+
+    log_info "Uninstall complete."
+}
+
+create_keystore() {
+    require_command "mkcert"
+    require_command "keytool"
+
+    init_dirs
+
+    local ca_root
+    ca_root=$(mkcert -CAROOT)
+    local root_cert="${ca_root}/rootCA.pem"
+    local dest_keystore="${CERTS_DIR}/cacerts"
+
+    if [ ! -f "$root_cert" ]; then
+        fatal "mkcert root CA not found at $root_cert. Run 'mkcert -install' first."
+    fi
+
+    local java_home_path=""
+    if [ -n "${JAVA_HOME:-}" ]; then
+        java_home_path="${JAVA_HOME}"
+    elif command -v /usr/libexec/java_home &> /dev/null; then
+        java_home_path=$(/usr/libexec/java_home)
+    else
+        fatal "JAVA_HOME is not set and /usr/libexec/java_home not found. Cannot locate source keystore."
+    fi
+
+    local src_keystore="${java_home_path}/lib/security/cacerts"
+
+    if [ ! -f "$src_keystore" ]; then
+        # Check older JDK path just in case
+        src_keystore="${java_home_path}/jre/lib/security/cacerts"
+        if [ ! -f "$src_keystore" ]; then
+            fatal "Could not find cacerts in $java_home_path"
+        fi
+    fi
+
+    log_info "Copying keystore from $src_keystore to $dest_keystore"
+    cp "$src_keystore" "$dest_keystore"
+    # Ensure it's writable
+    chmod u+w "$dest_keystore"
+
+    log_info "Importing mkcert root CA into local keystore..."
+
+    # Check if alias already exists
+    if keytool -list -keystore "$dest_keystore" -storepass changeit -alias mkcert &> /dev/null; then
+        log_info "Alias 'mkcert' already exists in keystore. Replacing..."
+        keytool -delete -alias mkcert -keystore "$dest_keystore" -storepass changeit -noprompt
+    fi
+
+    keytool -importcert -alias mkcert -file "$root_cert" -keystore "$dest_keystore" -storepass changeit -noprompt
+
+    log_info "Keystore updated successfully at $dest_keystore"
+    log_info "See examples/java-keystore.md for usage instructions."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        install)
+            install_certs
+            ;;
+        uninstall)
+            uninstall_certs
+            ;;
+        keystore)
+            create_keystore
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

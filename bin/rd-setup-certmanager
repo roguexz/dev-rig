@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo ""
+    echo "Commands:"
+    echo "  install    Install cert-manager via Helm and configure local ClusterIssuer."
+    echo "  uninstall  Remove cert-manager and its configurations."
+}
+
+install_certmanager() {
+    require_command "helm"
+    require_command "kubectl"
+    require_command "mkcert"
+
+    log_info "Adding Jetstack Helm repository..."
+    helm repo add jetstack https://charts.jetstack.io --force-update
+    helm repo update jetstack
+
+    log_info "Installing cert-manager..."
+    helm upgrade --install cert-manager jetstack/cert-manager \
+        --namespace cert-manager \
+        --create-namespace \
+        --set crds.enabled=true \
+        --wait
+
+    log_info "Waiting for cert-manager deployments to be ready..."
+    kubectl rollout status deployment/cert-manager -n cert-manager --timeout=90s
+    kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout=90s
+    kubectl rollout status deployment/cert-manager-cainjector -n cert-manager --timeout=90s
+
+    log_info "Configuring Local ClusterIssuer with mkcert CA..."
+
+    local ca_root
+    ca_root=$(mkcert -CAROOT)
+    local root_cert="${ca_root}/rootCA.pem"
+    local root_key="${ca_root}/rootCA-key.pem"
+
+    if [ ! -f "$root_cert" ] || [ ! -f "$root_key" ]; then
+        fatal "mkcert root CA not found at $ca_root. Run 'mkcert -install' first."
+    fi
+
+    # Create secret with the root CA
+    kubectl create secret tls mkcert-root-ca \
+        --namespace cert-manager \
+        --cert="$root_cert" \
+        --key="$root_key" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    # Create ClusterIssuer
+    cat <<EOF | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: mkcert-issuer
+spec:
+  ca:
+    secretName: mkcert-root-ca
+EOF
+
+    log_info "cert-manager installation and configuration complete."
+}
+
+uninstall_certmanager() {
+    require_command "helm"
+    require_command "kubectl"
+
+    log_info "Removing ClusterIssuer..."
+    kubectl delete clusterissuer mkcert-issuer --ignore-not-found
+
+    log_info "Removing cert-manager Helm release..."
+    helm uninstall cert-manager -n cert-manager || true
+
+    log_info "Removing namespace (may take a moment)..."
+    kubectl delete namespace cert-manager --ignore-not-found
+
+    log_info "cert-manager uninstall complete."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        install)
+            install_certmanager
+            ;;
+        uninstall)
+            uninstall_certmanager
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
