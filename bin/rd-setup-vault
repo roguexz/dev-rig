@@ -6,13 +6,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <setup|unseal|seal|uninstall>"
+    echo "Usage: $(basename "$0") <setup|unseal|seal|uninstall> [options]"
     echo ""
     echo "Commands:"
     echo "  setup      Install Vault, initialize it, and store keys."
     echo "  unseal     Unseal the Vault using stored keys."
     echo "  seal       Seal the Vault."
     echo "  uninstall  Remove Vault and its stored keys."
+    echo ""
+    echo "Options for setup:"
+    echo "  --oidc-client-id <id>          Google OIDC Client ID (enables OIDC login with WebAuthn/Passkeys)"
+    echo "  --oidc-client-secret <secret>  Google OIDC Client Secret"
+    echo "  --disable-userpass             Disable the default 'admin' userpass login (useful if relying purely on OIDC)"
+    echo ""
+    echo "Alternatively, you can set OIDC_CLIENT_ID and OIDC_CLIENT_SECRET environment variables."
 }
 
 setup_vault() {
@@ -35,10 +42,10 @@ setup_vault() {
         --set "server.dataStorage.size=1Gi" \
         --set "server.ingress.enabled=true" \
         --set "server.ingress.ingressClassName=traefik" \
-        --set "server.ingress.hosts[0].host=vault.rd.localhost" \
+        --set "server.ingress.hosts[0].host=vault.rogue.io" \
         --set "server.ingress.hosts[0].paths[0]=/" \
         --set "server.ingress.tls[0].secretName=default-tls-secret" \
-        --set "server.ingress.tls[0].hosts[0]=vault.rd.localhost" \
+        --set "server.ingress.tls[0].hosts[0]=vault.rogue.io" \
         --wait
 
     log_info "Waiting for Vault pod to be created and running..."
@@ -64,8 +71,13 @@ setup_vault() {
 
     configure_default_user
 
-    log_info "Vault UI and API are accessible at: https://vault.rd.localhost"
-    log_info "You can login with Username: admin, Password: changeit"
+    log_info "Vault UI and API are accessible at: https://vault.rogue.io"
+    if [ "${DISABLE_USERPASS:-false}" != "true" ]; then
+        log_info "You can login with Username: admin, Password: changeit"
+    fi
+    if [ -n "${OIDC_CLIENT_ID:-}" ] && [ -n "${OIDC_CLIENT_SECRET:-}" ]; then
+        log_info "OIDC authentication is enabled. You can log in via your Identity Provider (e.g. Google)."
+    fi
 }
 
 unseal_vault() {
@@ -92,7 +104,7 @@ configure_default_user() {
     require_command "jq"
 
     local namespace="commons"
-    log_info "Configuring default admin user..."
+    log_info "Configuring admin user and authentication methods..."
 
     if [ ! -f "${VAULT_DIR}/keys.json" ]; then
         log_warn "Root token not found. Skipping user configuration."
@@ -106,11 +118,6 @@ configure_default_user() {
     cat <<EOF | kubectl exec -i -n "$namespace" vault-0 -- sh
         export VAULT_TOKEN="${root_token}"
 
-        # Check if userpass is enabled, if not enable it
-        if ! vault auth list | grep -q "userpass/"; then
-            vault auth enable userpass
-        fi
-
         # Create an admin policy that has full permissions
         vault policy write admin - <<POLICY
 path "*" {
@@ -118,10 +125,55 @@ path "*" {
 }
 POLICY
 
-        # Create or update the admin user with the password 'changeit' and assign the admin policy
-        vault write auth/userpass/users/admin password=changeit policies=admin
+        # Always configure userpass unless DISABLE_USERPASS is true
+        if [ "${DISABLE_USERPASS:-false}" != "true" ]; then
+            if ! vault auth list | grep -q "userpass/"; then
+                vault auth enable userpass
+            fi
+            # Create or update the admin user with the password 'changeit' and assign the admin policy
+            vault write auth/userpass/users/admin password=changeit policies=admin
+        else
+            # If someone explicitly disables it later, we could optionally disable the auth path,
+            # but for a dev script, it's safer to just skip creating/updating it.
+            if vault auth list | grep -q "userpass/"; then
+                vault auth disable userpass || true
+            fi
+        fi
+
+        # Configure OIDC if credentials are provided
+        if [ -n "${OIDC_CLIENT_ID:-}" ] && [ -n "${OIDC_CLIENT_SECRET:-}" ]; then
+            if ! vault auth list | grep -q "oidc/"; then
+                vault auth enable oidc
+            fi
+
+            vault write auth/oidc/config \\
+                oidc_discovery_url="https://accounts.google.com" \\
+                oidc_client_id="${OIDC_CLIENT_ID:-}" \\
+                oidc_client_secret="${OIDC_CLIENT_SECRET:-}" \\
+                default_role="admin"
+
+            vault write auth/oidc/role/admin \\
+                bound_audiences="${OIDC_CLIENT_ID:-}" \\
+                allowed_redirect_uris="https://vault.rogue.io/ui/vault/auth/oidc/oidc/callback" \\
+                allowed_redirect_uris="http://localhost:8250/oidc/callback" \\
+                user_claim="sub" \\
+                policies="admin"
+        fi
 EOF
-    log_info "Default admin user configured successfully."
+
+    local auth_methods=""
+    if [ "${DISABLE_USERPASS:-false}" != "true" ]; then
+        auth_methods="Username/Password"
+    fi
+    if [ -n "${OIDC_CLIENT_ID:-}" ] && [ -n "${OIDC_CLIENT_SECRET:-}" ]; then
+        if [ -n "$auth_methods" ]; then
+            auth_methods="$auth_methods and OIDC"
+        else
+            auth_methods="OIDC"
+        fi
+    fi
+
+    log_info "Vault configured successfully with ${auth_methods:-No} authentication."
 }
 
 seal_vault() {
@@ -165,6 +217,29 @@ main() {
 
     case "$subcommand" in
         setup)
+            export DISABLE_USERPASS=false
+            # Parse additional arguments for setup
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --oidc-client-id)
+                        export OIDC_CLIENT_ID="$2"
+                        shift 2
+                        ;;
+                    --oidc-client-secret)
+                        export OIDC_CLIENT_SECRET="$2"
+                        shift 2
+                        ;;
+                    --disable-userpass)
+                        export DISABLE_USERPASS=true
+                        shift 1
+                        ;;
+                    *)
+                        log_error "Unknown option: $1"
+                        show_help
+                        exit 1
+                        ;;
+                esac
+            done
             setup_vault
             ;;
         unseal)

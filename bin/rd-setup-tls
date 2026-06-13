@@ -6,15 +6,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|keystore>"
+    echo "Usage: $(basename "$0") <install|uninstall|keystore> [--force]"
     echo ""
     echo "Commands:"
     echo "  install    Generate certs, install into OS, and configure Traefik."
+    echo "             --force  Force regeneration of certificates if they exist."
     echo "  uninstall  Remove certs and Traefik configuration."
     echo "  keystore   Create a Java keystore with the root CA."
 }
 
 install_certs() {
+    local force_regeneration=false
+    if [[ "$1" == "--force" ]]; then
+        force_regeneration=true
+    fi
+
     require_command "mkcert"
     require_command "kubectl"
 
@@ -26,14 +32,20 @@ install_certs() {
     local cert_file="${CERTS_DIR}/localhost.pem"
     local key_file="${CERTS_DIR}/localhost-key.pem"
 
+    if [ "$force_regeneration" = true ] && [ -f "$cert_file" ]; then
+        log_info "Forcing certificate regeneration..."
+        rm -f "$cert_file" "$key_file"
+    fi
+
     if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
-        log_info "Certificates already exist in ${CERTS_DIR}. Skipping generation."
+        log_info "Certificates already exist in ${CERTS_DIR}. Skipping generation. Use --force to override."
     else
         log_info "Generating certificates..."
         mkcert -cert-file "$cert_file" -key-file "$key_file" \
             "localhost" "127.0.0.1" "::1" \
             "*.rancher.localhost" \
             "*.rd.localhost" \
+            "*.rogue.io" \
             "localhost.rogue.io" \
             "*.localhost.rogue.io"
         log_info "Certificates generated successfully."
@@ -145,7 +157,7 @@ main() {
 
     case "$subcommand" in
         install)
-            install_certs
+            install_certs "${1:-}"
             ;;
         uninstall)
             uninstall_certs
