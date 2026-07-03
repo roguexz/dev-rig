@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo ""
+    echo "Commands:"
+    echo "  install    Install PostgreSQL using Helm and expose port 5432 to the host."
+    echo "  uninstall  Remove the PostgreSQL deployment and stored data."
+}
+
+install_postgres() {
+    require_command "helm"
+    require_command "kubectl"
+
+    # Check if we have docker CLI available to build the local image
+    if ! command -v docker &> /dev/null; then
+        fatal "Required command 'docker' is not installed or not in PATH. Docker is needed to build the local pgvector image."
+    fi
+
+    # Check if the local pgvector image exists in the Rancher Desktop Docker daemon
+    local local_image="local/bitnami-postgresql-pgvector:18"
+    if ! DOCKER_HOST="" docker --context rancher-desktop image inspect "$local_image" &>/dev/null; then
+        log_info "Local pgvector image '$local_image' not found. Building it now..."
+        
+        local tmp_dir="${SCRIPT_DIR}/.tmp-postgres-build"
+        mkdir -p "$tmp_dir"
+        
+        cat <<'EOF' > "${tmp_dir}/Dockerfile"
+FROM pgvector/pgvector:pg18 AS builder
+FROM registry-1.docker.io/bitnami/postgresql:latest
+USER root
+COPY --from=builder /usr/lib/postgresql/18/lib/vector.so /opt/bitnami/postgresql/lib/
+COPY --from=builder /usr/share/postgresql/18/extension/vector* /opt/bitnami/postgresql/share/extension/
+USER 1001
+EOF
+
+        log_info "Building image in Rancher Desktop Docker context..."
+        DOCKER_HOST="" docker --context rancher-desktop build -t "$local_image" "${tmp_dir}"
+        
+        rm -rf "$tmp_dir"
+        log_info "Local pgvector image built successfully."
+    else
+        log_info "Found existing local pgvector image '$local_image'."
+    fi
+
+    log_info "Adding Bitnami Helm repository..."
+    helm repo add bitnami https://charts.bitnami.com/bitnami --force-update
+    helm repo update bitnami
+
+    local namespace="commons"
+    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+
+    log_info "Installing PostgreSQL with pgvector..."
+    helm upgrade --install postgresql bitnami/postgresql \
+        --namespace "$namespace" \
+        --values - --wait <<EOF
+architecture: standalone
+global:
+  security:
+    allowInsecureImages: true
+auth:
+  postgresPassword: changeit
+image:
+  registry: ""
+  repository: local/bitnami-postgresql-pgvector
+  tag: "18"
+  pullPolicy: IfNotPresent
+primary:
+  initdb:
+    scripts:
+      init-pgvector.sql: |
+        -- Enable pgvector on template1 so any new database created inherits it
+        \connect template1
+        CREATE EXTENSION IF NOT EXISTS vector;
+        -- Also enable it on the default postgres database
+        \connect postgres
+        CREATE EXTENSION IF NOT EXISTS vector;
+EOF
+
+    log_info "Exposing PostgreSQL via NodePort (Host Port 30432)..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-host-access
+  namespace: commons
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/instance: postgresql
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/component: primary
+  ports:
+    - port: 5432
+      targetPort: 5432
+      nodePort: 30432
+EOF
+
+    log_info "Exposing PostgreSQL via LoadBalancer (Host Port 5432)..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-lb
+  namespace: commons
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/instance: postgresql
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/component: primary
+  ports:
+    - port: 5432
+      targetPort: 5432
+EOF
+
+    log_info "PostgreSQL installation complete."
+    log_info "PostgreSQL should now be accessible at localhost:5432 from your host machine."
+}
+
+uninstall_postgres() {
+    require_command "helm"
+    require_command "kubectl"
+
+    local namespace="commons"
+
+    log_info "Uninstalling PostgreSQL..."
+    kubectl delete service postgres-host-access -n "$namespace" --ignore-not-found
+    kubectl delete service postgres-lb -n "$namespace" --ignore-not-found
+    helm uninstall postgresql -n "$namespace" || true
+
+    log_info "Removing PostgreSQL PVC to ensure clean re-install..."
+    kubectl delete pvc data-postgresql-0 -n "$namespace" --ignore-not-found
+
+    log_info "PostgreSQL uninstall complete. The 'commons' namespace was not deleted."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        install)
+            install_postgres
+            ;;
+        uninstall)
+            uninstall_postgres
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

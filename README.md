@@ -1,8 +1,10 @@
 # Local Development Environment Setup for Rancher Desktop
 
-This repository contains a set of scripts to automate the setup and configuration of a local development environment using Rancher Desktop on macOS.
+This repository contains a set of scripts to automate the setup and configuration of a local development environment
+using Rancher Desktop on macOS.
 
-The primary script is `rd-setup`, which acts as a dispatcher for various sub-commands, each managing a specific piece of the infrastructure.
+The primary script is `rd-setup`, which acts as a dispatcher for various sub-commands, each managing a specific piece of
+the infrastructure.
 
 ## Prerequisites
 
@@ -17,24 +19,24 @@ Before using these scripts, ensure you have the following command-line tools ins
 
 ## Installation
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <repo-url> dev-setup
-    cd dev-setup
-    ```
+1. **Clone the repository:**
+   ```bash
+   git clone <repo-url> dev-setup
+   cd dev-setup
+   ```
 
-2.  **Make the scripts executable:**
-    ```bash
-    chmod +x bin/*
-    ```
+2. **Make the scripts executable:**
+   ```bash
+   chmod +x bin/*
+   ```
 
-3.  **Add the `bin` directory to your shell's `PATH`:**
-    Add the following line to your `~/.zshrc`, `~/.bash_profile`, or equivalent shell configuration file:
+3. **Add the `bin` directory to your shell's `PATH`:**
+   Add the following line to your `~/.zshrc`, `~/.bash_profile`, or equivalent shell configuration file:
 
-    ```bash
-    export PATH="/path/to/your/dev-setup/bin:$PATH"
-    ```
-    Reload your shell for the changes to take effect. You can now run `rd-setup` from any directory.
+   ```bash
+   export PATH="/path/to/your/dev-setup/bin:$PATH"
+   ```
+   Reload your shell for the changes to take effect. You can now run `rd-setup` from any directory.
 
 ## Available Commands
 
@@ -46,6 +48,7 @@ The `rd-setup` tool is modular, with each command handling a specific capability
 | `rd-setup certmanager <subcommand>`   | Installs and configures `cert-manager` for in-cluster certificates.      |
 | `rd-setup otel <subcommand>`          | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).            |
 | `rd-setup redis <subcommand>`         | Deploys a Redis instance accessible from the host.                       |
+| `rd-setup postgres <subcommand>`      | Deploys a PostgreSQL instance with pgvector extension.                   |
 | `rd-setup vault <subcommand>`         | Manages a local HashiCorp Vault deployment for secrets management.       |
 
 For detailed usage of each command, see the documentation below.
@@ -56,6 +59,8 @@ For detailed usage of each command, see the documentation below.
 - [**Cert-Manager (`certmanager`)**](./docs/cert-manager.md)
 - [**OpenTelemetry LGTM Stack (`otel`)**](./docs/otel.md)
 - [**Redis (`redis`)**](./docs/redis.md)
+- [**PostgreSQL (`postgres`)**](./docs/postgres.md)
 - [**Vault (`vault`)**](./docs/vault.md)
 
-All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each capability also includes an `uninstall` command to cleanly remove all resources.
+All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each
+capability also includes an `uninstall` command to cleanly remove all resources.

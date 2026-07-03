@@ -16,6 +16,7 @@ show_help() {
     echo "  certmanager   Install and configure cert-manager"
     echo "  otel          Deploy and configure OpenTelemetry LGTM stack"
     echo "  redis         Deploy Redis stack"
+    echo "  postgres      Deploy PostgreSQL with pgvector extension"
     echo "  vault         Manage local Vault deployment"
     echo ""
     echo "Run '$(basename "$0") <command> help' for more information on a specific command."
