@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo ""
+    echo "Commands:"
+    echo "  install    Deploy LiteLLM proxy connected to PostgreSQL."
+    echo "  uninstall  Remove LiteLLM proxy deployment and services."
+}
+
+ensure_database() {
+    local namespace="commons"
+    log_info "Ensuring PostgreSQL is running and LiteLLM database exists..."
+
+    # Check if postgres pod is present in commons namespace
+    if ! kubectl get pods -n "$namespace" -l app.kubernetes.io/name=postgresql &> /dev/null; then
+        fatal "PostgreSQL pod not found in namespace '$namespace'. Please run 'rd-setup postgres install' first."
+    fi
+
+    # Find the primary postgres pod
+    local pod_name
+    pod_name=$(kubectl get pods -n "$namespace" -l app.kubernetes.io/name=postgresql,app.kubernetes.io/component=primary -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+    if [ -z "$pod_name" ]; then
+        pod_name="postgresql-0"
+    fi
+
+    local pg_pass="${POSTGRES_PASSWORD:-changeit}"
+
+    # Check if database 'litellm' exists, create if missing
+    log_info "Checking database 'litellm' on ${pod_name}..."
+    if kubectl exec -n "$namespace" "$pod_name" -- env PGPASSWORD="$pg_pass" psql -U postgres -lqt | cut -d \| -f 1 | grep -qw litellm; then
+        log_info "Database 'litellm' already exists."
+    else
+        log_info "Creating database 'litellm'..."
+        kubectl exec -n "$namespace" "$pod_name" -- env PGPASSWORD="$pg_pass" psql -U postgres -c "CREATE DATABASE litellm;"
+        kubectl exec -n "$namespace" "$pod_name" -- env PGPASSWORD="$pg_pass" psql -U postgres -d litellm -c "CREATE EXTENSION IF NOT EXISTS vector;"
+        log_info "Database 'litellm' created successfully."
+    fi
+}
+
+install_litellm() {
+    require_command "kubectl"
+
+    local namespace="commons"
+    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+
+    ensure_database
+
+    log_info "Deploying LiteLLM Proxy..."
+
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: ${namespace}
+  labels:
+    app: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+      - name: litellm
+        image: ghcr.io/berriai/litellm:main-latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://postgres:changeit@postgresql.commons.svc.cluster.local:5432/litellm"
+        - name: LITELLM_MASTER_KEY
+          value: "sk-changeit"
+        - name: STORE_MODEL_IN_DB
+          value: "True"
+        - name: LITELLM_SALT_KEY
+          value: "changeit"
+        ports:
+        - containerPort: 4000
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /health/readiness
+            port: 4000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health/liveness
+            port: 4000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: ${namespace}
+spec:
+  type: ClusterIP
+  selector:
+    app: litellm
+  ports:
+  - port: 4000
+    targetPort: 4000
+    name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-host-access
+  namespace: ${namespace}
+spec:
+  type: NodePort
+  selector:
+    app: litellm
+  ports:
+  - port: 4000
+    targetPort: 4000
+    nodePort: 30400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-lb
+  namespace: ${namespace}
+spec:
+  type: LoadBalancer
+  selector:
+    app: litellm
+  ports:
+  - port: 4000
+    targetPort: 4000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: litellm
+  namespace: ${namespace}
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: litellm.rd.localhost
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: litellm
+            port:
+              number: 4000
+EOF
+
+    log_info "Waiting for LiteLLM deployment to be ready..."
+    kubectl wait --for=condition=available deployment/litellm -n "$namespace" --timeout=120s
+
+    log_info "LiteLLM Proxy installation complete."
+    log_info "LiteLLM UI and API are accessible at: https://litellm.rd.localhost or http://localhost:4000"
+    log_info "In-cluster DNS: http://litellm.commons.svc.cluster.local:4000"
+    log_info "Admin Master Key: sk-changeit"
+}
+
+uninstall_litellm() {
+    require_command "kubectl"
+
+    local namespace="commons"
+
+    log_info "Uninstalling LiteLLM Proxy..."
+    kubectl delete deployment litellm -n "$namespace" --ignore-not-found
+    kubectl delete service litellm litellm-host-access litellm-lb -n "$namespace" --ignore-not-found
+    kubectl delete ingress litellm -n "$namespace" --ignore-not-found
+
+    log_info "LiteLLM uninstall complete. The 'commons' namespace and PostgreSQL database were not deleted."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        install)
+            install_litellm
+            ;;
+        uninstall)
+            uninstall_litellm
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

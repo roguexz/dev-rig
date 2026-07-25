@@ -18,6 +18,7 @@ show_help() {
     echo "  redis         Deploy Redis stack"
     echo "  postgres      Deploy PostgreSQL with pgvector extension"
     echo "  vault         Manage local Vault deployment"
+    echo "  litellm       Deploy LiteLLM proxy"
     echo ""
     echo "Run '$(basename "$0") <command> help' for more information on a specific command."
 }

@@ -50,6 +50,7 @@ The `rd-setup` tool is modular, with each command handling a specific capability
 | `rd-setup redis <subcommand>`         | Deploys a Redis instance accessible from the host.                       |
 | `rd-setup postgres <subcommand>`      | Deploys a PostgreSQL instance with pgvector extension.                   |
 | `rd-setup vault <subcommand>`         | Manages a local HashiCorp Vault deployment for secrets management.       |
+| `rd-setup litellm <subcommand>`       | Deploys a LiteLLM proxy instance backed by PostgreSQL.                   |
 
 For detailed usage of each command, see the documentation below.
 
@@ -61,6 +62,7 @@ For detailed usage of each command, see the documentation below.
 - [**Redis (`redis`)**](./docs/redis.md)
 - [**PostgreSQL (`postgres`)**](./docs/postgres.md)
 - [**Vault (`vault`)**](./docs/vault.md)
+- [**LiteLLM Proxy (`litellm`)**](./docs/litellm.md)
 
 All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each
 capability also includes an `uninstall` command to cleanly remove all resources.

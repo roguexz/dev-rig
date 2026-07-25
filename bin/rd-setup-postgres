@@ -80,6 +80,10 @@ primary:
         -- Also enable it on the default postgres database
         \connect postgres
         CREATE EXTENSION IF NOT EXISTS vector;
+        -- Create litellm database for LiteLLM proxy
+        CREATE DATABASE litellm;
+        \connect litellm
+        CREATE EXTENSION IF NOT EXISTS vector;
 EOF
 
     log_info "Exposing PostgreSQL via NodePort (Host Port 30432)..."
