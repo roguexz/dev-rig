@@ -9,7 +9,7 @@ The primary entrypoint CLI is `ldx`, acting as a unified dispatcher for sub-comm
 Before using these scripts, ensure you have the following command-line tools installed:
 
 - [Grype](https://github.com/anchore/grype) (for `cvescan` vulnerability scanner)
-- [terminal-notifier](https://github.com/julien Blanchard/terminal-notifier) (optional, for `cvescan` desktop notifications)
+- [terminal-notifier](https://formulae.brew.sh/formula/terminal-notifier) (optional, for `cvescan` desktop notifications)
 - [Rancher Desktop](https://rancherdesktop.io/) (for local k8s infrastructure)
 - [mkcert](https://github.com/FiloSottile/mkcert)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
