@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cvescan Vulnerability Report</title>
+  <style>
+    :root {
+      --bg-color: #0d1117;
+      --card-bg: #161b22;
+      --border-color: #30363d;
+      --text-color: #c9d1d9;
+      --text-dim: #8b949e;
+      --accent-blue: #58a6ff;
+      --critical-color: #f85149;
+      --high-color: #ff7b72;
+      --medium-color: #d29922;
+      --low-color: #3fb950;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      margin: 0;
+      padding: 24px;
+    }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 24px;
+    }
+    h1 {
+      font-size: 24px;
+      margin: 0;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .meta-tag {
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .stat-card .label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+    }
+    .stat-card .value {
+      font-size: 28px;
+      font-weight: 700;
+      margin-top: 8px;
+    }
+    .controls-bar {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 16px;
+      align-items: center;
+    }
+    .search-input {
+      flex: 1;
+      box-sizing: border-box;
+      padding: 10px 14px;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.15s ease-in-out;
+    }
+    .search-input:focus {
+      border-color: var(--accent-blue);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 12px 16px;
+      text-align: left;
+      font-size: 13px;
+    }
+    th {
+      background-color: #21262d;
+      color: var(--text-dim);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      user-select: none;
+      border-bottom: 1px solid var(--border-color);
+      transition: background-color 0.15s ease-in-out, color 0.15s ease-in-out;
+    }
+    th:hover {
+      background-color: #30363d;
+      color: #fff;
+    }
+    .sort-icon {
+      margin-left: 4px;
+      opacity: 0.6;
+    }
+    
+    /* Main Row Styles */
+    .main-row td {
+      border-bottom: none;
+      background-color: var(--card-bg);
+    }
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .badge-critical { background: rgba(248, 81, 73, 0.2); color: var(--critical-color); border: 1px solid var(--critical-color); }
+    .badge-high { background: rgba(255, 123, 114, 0.2); color: var(--high-color); border: 1px solid var(--high-color); }
+    .badge-medium { background: rgba(210, 153, 34, 0.2); color: var(--medium-color); border: 1px solid var(--medium-color); }
+    .badge-low { background: rgba(63, 185, 80, 0.2); color: var(--low-color); border: 1px solid var(--low-color); }
+    
+    .cve-container {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .cve-count-pill {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-dim);
+    }
+    .cve-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .cve-tag {
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+      text-decoration: none;
+      transition: opacity 0.15s ease-in-out;
+    }
+    .cve-tag:hover {
+      opacity: 0.8;
+    }
+    .cve-critical { background: rgba(248, 81, 73, 0.15); color: var(--critical-color); border: 1px solid rgba(248, 81, 73, 0.4); }
+    .cve-high { background: rgba(255, 123, 114, 0.15); color: var(--high-color); border: 1px solid rgba(255, 123, 114, 0.4); }
+    .cve-medium { background: rgba(210, 153, 34, 0.15); color: var(--medium-color); border: 1px solid rgba(210, 153, 34, 0.4); }
+    .cve-low { background: rgba(63, 185, 80, 0.15); color: var(--low-color); border: 1px solid rgba(63, 185, 80, 0.4); }
+    
+    /* Secondary Location Row Styles */
+    .location-row td {
+      padding: 4px 16px 14px 16px;
+      background-color: var(--card-bg);
+      border-bottom: 1px solid var(--border-color);
+    }
+    .location-container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #0d1117;
+      border: 1px solid rgba(48, 54, 61, 0.8);
+      border-radius: 6px;
+      padding: 6px 12px;
+      gap: 12px;
+    }
+    .location-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+    .location-icon {
+      color: var(--accent-blue);
+      flex-shrink: 0;
+    }
+    .location-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      flex-shrink: 0;
+      text-transform: uppercase;
+    }
+    .location-path {
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--text-color);
+      word-break: break-all;
+      white-space: normal;
+      line-height: 1.4;
+    }
+    .copy-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      flex-shrink: 0;
+      background: #21262d;
+      color: var(--text-color);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease-in-out;
+    }
+    .copy-btn:hover {
+      background: #30363d;
+      color: #fff;
+      border-color: #8b949e;
+    }
+    .copy-btn.copied {
+      background: #238636;
+      color: #fff;
+      border-color: #2e9d42;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+      background: rgba(110, 118, 129, 0.2);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    a { color: var(--accent-blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .type-tag { color: var(--text-dim); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <h1>🛡️ cvescan Vulnerability Report</h1>
+        <div class="meta-tag">Execution: {{TIMESTAMP}} &bull; Mode: {{SCAN_MODE}}</div>
+      </div>
+    </div>
+    
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="label">Total Affected Packages</div>
+        <div class="value" style="color: #fff;">{{TOTAL_COUNT}}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Critical</div>
+        <div class="value" style="color: var(--critical-color);">{{CRIT_COUNT}}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">High</div>
+        <div class="value" style="color: var(--high-color);">{{HIGH_COUNT}}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Medium / Low</div>
+        <div class="value" style="color: var(--medium-color);">{{MED_LOW_COUNT}}</div>
+      </div>
+    </div>
+
+    <div class="controls-bar">
+      <input type="text" id="searchInput" class="search-input" placeholder="Search vulnerabilities by package, CVE ID, or location path..." onkeyup="filterTable()">
+    </div>
+
+    <table id="vulnTable">
+      <thead>
+        <tr>
+          <th data-sort-key="severity" onclick="sortTable('severity', this)">Severity <span class="sort-icon">↕</span></th>
+          <th data-sort-key="package" onclick="sortTable('package', this)">Package <span class="sort-icon">↕</span></th>
+          <th data-sort-key="installed" onclick="sortTable('installed', this)">Installed <span class="sort-icon">↕</span></th>
+          <th data-sort-key="fixed" onclick="sortTable('fixed', this)">Fixed In <span class="sort-icon">↕</span></th>
+          <th data-sort-key="vulnerabilities" onclick="sortTable('vulnerabilities', this)">Vulnerabilities <span class="sort-icon">↕</span></th>
+          <th data-sort-key="type" onclick="sortTable('type', this)">Type <span class="sort-icon">↕</span></th>
+          <th data-sort-key="location" onclick="sortTable('location', this)">Location Path <span class="sort-icon">↕</span></th>
+        </tr>
+      </thead>
+      {{TABLE_BODY}}
+    </table>
+  </div>
+
+  <script>
+    function filterTable() {
+      const input = document.getElementById('searchInput').value.toLowerCase().trim();
+      const groups = document.querySelectorAll('#vulnTable tbody.vuln-group');
+      groups.forEach(group => {
+        const text = group.textContent.toLowerCase();
+        group.style.display = text.includes(input) ? '' : 'none';
+      });
+    }
+
+    function copyToClipboard(elementId, btn) {
+      const el = document.getElementById(elementId);
+      if (!el) return;
+      const text = el.innerText || el.textContent;
+      
+      const setCopiedUI = () => {
+        const origContent = btn.innerHTML;
+        btn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Copied!</span>';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.innerHTML = origContent;
+          btn.classList.remove('copied');
+        }, 2000);
+      };
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(setCopiedUI).catch(err => {
+          fallbackCopy(text, setCopiedUI);
+        });
+      } else {
+        fallbackCopy(text, setCopiedUI);
+      }
+    }
+
+    function fallbackCopy(text, callback) {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        callback();
+      } catch (err) {
+        console.error('Fallback copy failed', err);
+      }
+      document.body.removeChild(textArea);
+    }
+
+    let currentSortKey = null;
+    let currentSortDir = 'desc';
+
+    function sortTable(sortKey, thElement) {
+      const table = document.getElementById('vulnTable');
+      const groups = Array.from(table.querySelectorAll('tbody.vuln-group'));
+      
+      if (currentSortKey === sortKey) {
+        currentSortDir = currentSortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        currentSortKey = sortKey;
+        currentSortDir = (sortKey === 'severity' || sortKey === 'vulnerabilities') ? 'desc' : 'asc';
+      }
+
+      const isNumeric = sortKey === 'severity' || sortKey === 'vulnerabilities';
+
+      groups.sort((a, b) => {
+        let aVal = a.getAttribute('data-' + sortKey) || '';
+        let bVal = b.getAttribute('data-' + sortKey) || '';
+
+        if (isNumeric) {
+          let aNum = parseFloat(aVal) || 0;
+          let bNum = parseFloat(bVal) || 0;
+          return currentSortDir === 'asc' ? aNum - bNum : bNum - aNum;
+        } else {
+          return currentSortDir === 'asc'
+            ? aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' })
+            : bVal.localeCompare(aVal, undefined, { numeric: true, sensitivity: 'base' });
+        }
+      });
+
+      groups.forEach(group => table.appendChild(group));
+
+      // Update header sort icons
+      const headers = table.querySelectorAll('th');
+      headers.forEach(th => {
+        const icon = th.querySelector('.sort-icon');
+        const key = th.getAttribute('data-sort-key');
+        if (key === sortKey) {
+          icon.innerText = currentSortDir === 'asc' ? '▲' : '▼';
+        } else {
+          icon.innerText = '↕';
+        }
+      });
+    }
+  </script>
+</body>
+</html>

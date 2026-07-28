@@ -49,6 +49,7 @@ fi
 IS_FULL_SCAN=false
 IS_FORCE=false
 IS_DRY_RUN=false
+IS_REPORT_ONLY=false
 CUSTOM_TARGETS=()
 
 while [ $# -gt 0 ]; do
@@ -65,6 +66,10 @@ while [ $# -gt 0 ]; do
       IS_DRY_RUN=true
       shift 1
       ;;
+    --report-only|--regenerate)
+      IS_REPORT_ONLY=true
+      shift 1
+      ;;
     --target|-t)
       if [ -n "${2:-}" ]; then
         CUSTOM_TARGETS+=("$2")
@@ -75,11 +80,12 @@ while [ $# -gt 0 ]; do
       fi
       ;;
     --help|-h)
-      echo "Usage: $(basename "$0") [--target <folder>] [--full] [--force] [--dry-run]"
+      echo "Usage: $(basename "$0") [--target <folder>] [--full] [--force] [--dry-run] [--regenerate]"
       echo "  --target, -t <folder>  Specify a custom directory to scan (can be repeated)"
       echo "  --full                 Force a complete vulnerability scan (bypasses change detection)"
       echo "  --force                Bypass directory fingerprint change check"
       echo "  --dry-run              Perform binary checks and list target scan folders without executing scan"
+      echo "  --regenerate           Regenerate HTML report from existing JSON scan output without re-scanning"
       exit 0
       ;;
     *)
@@ -236,7 +242,7 @@ generate_html_report() {
     return 0
   fi
 
-  "$PYTHON_BIN" - "$json_file" "$html_file" "$ts" "$mode" "$targets_str" << 'PYEOF'
+  "$PYTHON_BIN" - "$json_file" "$html_file" "$ts" "$mode" "$targets_str" "$0" << 'PYEOF'
 import json, sys, os, html
 
 json_file = sys.argv[1]
@@ -244,6 +250,7 @@ html_file = sys.argv[2]
 timestamp = sys.argv[3]
 scan_mode = sys.argv[4]
 target_dirs = [t.strip() for t in sys.argv[5].split(',') if t.strip()]
+script_path = sys.argv[6] if len(sys.argv) > 6 else ''
 
 try:
     with open(json_file, 'r') as f:
@@ -258,8 +265,15 @@ SEVERITY_WEIGHTS = {'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1, 'UNKNOWN': 
 def resolve_abs_path(raw_path):
     if not raw_path or raw_path == 'N/A':
         return 'N/A'
-    if os.path.isabs(raw_path) and os.path.exists(raw_path):
-        return os.path.abspath(raw_path)
+    if os.path.isabs(raw_path):
+        if os.path.exists(raw_path):
+            return os.path.abspath(raw_path)
+        clean_rel = raw_path.lstrip('/')
+        for tdir in target_dirs:
+            cand = os.path.join(tdir, clean_rel)
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+        return raw_path
     clean_rel = raw_path.lstrip('/')
     for tdir in target_dirs:
         cand = os.path.join(tdir, clean_rel)
@@ -326,7 +340,7 @@ high_count = sum(1 for m in matches if str(m.get('vulnerability', {}).get('sever
 med_count = sum(1 for m in matches if str(m.get('vulnerability', {}).get('severity', '')).upper() == 'MEDIUM')
 low_count = sum(1 for m in matches if str(m.get('vulnerability', {}).get('severity', '')).upper() not in ['CRITICAL', 'HIGH', 'MEDIUM'])
 
-rows_html = []
+groups_html = []
 for idx, ((loc_path, pkg_name, pkg_ver), group) in enumerate(grouped.items()):
     sev = group['max_severity']
     badge_cls = f"badge-{sev.lower()}"
@@ -347,345 +361,78 @@ for idx, ((loc_path, pkg_name, pkg_ver), group) in enumerate(grouped.items()):
     safe_ver = html.escape(pkg_ver)
     safe_type = html.escape(group['pkg_type'])
     
-    rows_html.append(f"""
-    <tr data-severity-weight="{group['max_weight']}">
-      <td data-sort-val="{group['max_weight']}"><span class="badge {badge_cls}">{sev}</span></td>
-      <td data-sort-val="{safe_pkg}"><strong>{safe_pkg}</strong></td>
-      <td data-sort-val="{safe_ver}"><code>{safe_ver}</code></td>
-      <td data-sort-val="{fix_str}"><code>{fix_str}</code></td>
-      <td data-sort-val="{cve_count}">
-        <div class="cve-container">
-          <span class="cve-count-pill">{cve_count} CVE{"s" if cve_count > 1 else ""}</span>
-          <div class="cve-tags">{cve_tags_html}</div>
-        </div>
-      </td>
-      <td data-sort-val="{safe_type}"><span class="type-tag">{safe_type}</span></td>
-      <td data-sort-val="{safe_path}">
-        <div class="path-container">
-          <span class="path-text" id="path-val-{idx}">{safe_path}</span>
-          <button class="copy-btn" onclick="copyToClipboard('path-val-{idx}', this)">Copy Path</button>
-        </div>
-      </td>
-    </tr>
+    groups_html.append(f"""
+    <tbody class="vuln-group" data-severity="{group['max_weight']}" data-package="{safe_pkg}" data-installed="{safe_ver}" data-fixed="{fix_str}" data-vulnerabilities="{cve_count}" data-type="{safe_type}" data-location="{safe_path}">
+      <tr class="main-row">
+        <td><span class="badge {badge_cls}">{sev}</span></td>
+        <td><strong>{safe_pkg}</strong></td>
+        <td><code>{safe_ver}</code></td>
+        <td><code>{fix_str}</code></td>
+        <td>
+          <div class="cve-container">
+            <span class="cve-count-pill">{cve_count} CVE{"s" if cve_count > 1 else ""}</span>
+            <div class="cve-tags">{cve_tags_html}</div>
+          </div>
+        </td>
+        <td colspan="2"><span class="type-tag">{safe_type}</span></td>
+      </tr>
+      <tr class="location-row">
+        <td colspan="7">
+          <div class="location-container">
+            <div class="location-info">
+              <svg class="location-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+              <span class="location-label">LOCATION</span>
+              <span class="location-path" id="path-val-{idx}">{safe_path}</span>
+            </div>
+            <button class="copy-btn" onclick="copyToClipboard('path-val-{idx}', this)">
+              <svg class="copy-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span>Copy Path</span>
+            </button>
+          </div>
+        </td>
+      </tr>
+    </tbody>
     """)
 
-table_body = "\n".join(rows_html) if rows_html else "<tr><td colspan='7' style='text-align:center; padding: 24px; color: #8b949e;'>No vulnerabilities detected in scanned directories. 🎉</td></tr>"
-
-html_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>cvescan Vulnerability Report</title>
-  <style>
-    :root {{
-      --bg-color: #0d1117;
-      --card-bg: #161b22;
-      --border-color: #30363d;
-      --text-color: #c9d1d9;
-      --text-dim: #8b949e;
-      --accent-blue: #58a6ff;
-      --critical-color: #f85149;
-      --high-color: #ff7b72;
-      --medium-color: #d29922;
-      --low-color: #3fb950;
-    }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: var(--bg-color);
-      color: var(--text-color);
-      margin: 0;
-      padding: 24px;
-    }}
-    .container {{
-      max-width: 1400px;
-      margin: 0 auto;
-    }}
-    .header {{
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding-bottom: 16px;
-      border-bottom: 1px solid var(--border-color);
-      margin-bottom: 24px;
-    }}
-    h1 {{
-      font-size: 24px;
-      margin: 0;
-      color: #fff;
-    }}
-    .meta-tag {{
-      font-size: 13px;
-      color: var(--text-dim);
-    }}
-    .stats-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 16px;
-      margin-bottom: 24px;
-    }}
-    .stat-card {{
-      background-color: var(--card-bg);
-      border: 1px solid var(--border-color);
-      border-radius: 8px;
-      padding: 16px;
-    }}
-    .stat-card .label {{
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--text-dim);
-    }}
-    .stat-card .value {{
-      font-size: 28px;
-      font-weight: 700;
-      margin-top: 8px;
-    }}
-    .search-bar {{
-      margin-bottom: 16px;
-    }}
-    .search-input {{
-      width: 100%;
-      box-sizing: border-box;
-      padding: 10px 14px;
-      background-color: var(--card-bg);
-      border: 1px solid var(--border-color);
-      border-radius: 6px;
-      color: #fff;
-      font-size: 14px;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      background-color: var(--card-bg);
-      border: 1px solid var(--border-color);
-      border-radius: 8px;
-      overflow: hidden;
-    }}
-    th, td {{
-      padding: 12px 16px;
-      text-align: left;
-      border-bottom: 1px solid var(--border-color);
-      font-size: 13px;
-    }}
-    th {{
-      background-color: #21262d;
-      color: var(--text-dim);
-      font-weight: 600;
-      text-transform: uppercase;
-      font-size: 11px;
-      letter-spacing: 0.5px;
-      cursor: pointer;
-      user-select: none;
-    }}
-    th:hover {{
-      background-color: #30363d;
-      color: #fff;
-    }}
-    .sort-icon {{
-      margin-left: 6px;
-      opacity: 0.5;
-    }}
-    .badge {{
-      display: inline-block;
-      padding: 3px 8px;
-      border-radius: 12px;
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-    }}
-    .badge-critical {{ background: rgba(248, 81, 73, 0.2); color: var(--critical-color); border: 1px solid var(--critical-color); }}
-    .badge-high {{ background: rgba(255, 123, 114, 0.2); color: var(--high-color); border: 1px solid var(--high-color); }}
-    .badge-medium {{ background: rgba(210, 153, 34, 0.2); color: var(--medium-color); border: 1px solid var(--medium-color); }}
-    .badge-low {{ background: rgba(63, 185, 80, 0.2); color: var(--low-color); border: 1px solid var(--low-color); }}
-    
-    .cve-container {{
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }}
-    .cve-count-pill {{
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-dim);
-    }}
-    .cve-tags {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }}
-    .cve-tag {{
-      font-size: 11px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
-      text-decoration: none;
-    }}
-    .cve-critical {{ background: rgba(248, 81, 73, 0.15); color: var(--critical-color); border: 1px solid rgba(248, 81, 73, 0.4); }}
-    .cve-high {{ background: rgba(255, 123, 114, 0.15); color: var(--high-color); border: 1px solid rgba(255, 123, 114, 0.4); }}
-    .cve-medium {{ background: rgba(210, 153, 34, 0.15); color: var(--medium-color); border: 1px solid rgba(210, 153, 34, 0.4); }}
-    .cve-low {{ background: rgba(63, 185, 80, 0.15); color: var(--low-color); border: 1px solid rgba(63, 185, 80, 0.4); }}
-    
-    .path-container {{
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-    }}
-    .path-text {{
-      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
-      font-size: 12px;
-      color: var(--text-color);
-      word-break: break-all;
-      line-height: 1.4;
-    }}
-    .copy-btn {{
-      flex-shrink: 0;
-      background: #21262d;
-      color: var(--text-color);
-      border: 1px solid var(--border-color);
-      border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 11px;
-      cursor: pointer;
-      transition: background 0.15s ease-in-out;
-    }}
-    .copy-btn:hover {{
-      background: #30363d;
-      color: #fff;
-    }}
-    .copy-btn.copied {{
-      background: #238636;
-      color: #fff;
-      border-color: #2e9d42;
-    }}
-    code {{
-      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
-      background: rgba(110, 118, 129, 0.2);
-      padding: 2px 6px;
-      border-radius: 4px;
-    }}
-    a {{ color: var(--accent-blue); text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-    .type-tag {{ color: var(--text-dim); font-size: 12px; }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <div>
-        <h1>🛡️ cvescan Vulnerability Report</h1>
-        <div class="meta-tag">Execution: {timestamp} &bull; Mode: {scan_mode}</div>
-      </div>
-    </div>
-    
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="label">Total Affected Packages</div>
-        <div class="value" style="color: #fff;">{len(grouped)}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Critical</div>
-        <div class="value" style="color: var(--critical-color);">{crit_count}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">High</div>
-        <div class="value" style="color: var(--high-color);">{high_count}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Medium / Low</div>
-        <div class="value" style="color: var(--medium-color);">{med_count + low_count}</div>
-      </div>
-    </div>
-
-    <div class="search-bar">
-      <input type="text" id="searchInput" class="search-input" placeholder="Search vulnerabilities by package, CVE ID, or path..." onkeyup="filterTable()">
-    </div>
-
-    <table id="vulnTable">
-      <thead>
-        <tr>
-          <th onclick="sortTable(0, 'number')">Severity <span class="sort-icon">↕</span></th>
-          <th onclick="sortTable(1, 'string')">Package <span class="sort-icon">↕</span></th>
-          <th onclick="sortTable(2, 'string')">Installed <span class="sort-icon">↕</span></th>
-          <th onclick="sortTable(3, 'string')">Fixed In <span class="sort-icon">↕</span></th>
-          <th onclick="sortTable(4, 'number')">Vulnerabilities <span class="sort-icon">↕</span></th>
-          <th onclick="sortTable(5, 'string')">Type <span class="sort-icon">↕</span></th>
-          <th onclick="sortTable(6, 'string')">Location Path <span class="sort-icon">↕</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        {table_body}
-      </tbody>
-    </table>
-  </div>
-
-  <script>
-    function filterTable() {{
-      const input = document.getElementById('searchInput').value.toLowerCase();
-      const rows = document.querySelectorAll('#vulnTable tbody tr');
-      rows.forEach(row => {{
-        const text = row.textContent.toLowerCase();
-        row.style.display = text.includes(input) ? '' : 'none';
-      }});
-    }}
-
-    function copyToClipboard(elementId, btn) {{
-      const text = document.getElementById(elementId).innerText;
-      navigator.clipboard.writeText(text).then(() => {{
-        const origText = btn.innerText;
-        btn.innerText = 'Copied!';
-        btn.classList.add('copied');
-        setTimeout(() => {{
-          btn.innerText = origText;
-          btn.classList.remove('copied');
-        }}, 2000);
-      }}).catch(err => {{
-        console.error('Failed to copy: ', err);
-      }});
-    }}
-
-    let sortDirections = {{}};
-    function sortTable(colIndex, type) {{
-      const table = document.getElementById('vulnTable');
-      const tbody = table.querySelector('tbody');
-      const rows = Array.from(tbody.querySelectorAll('tr'));
-      
-      const currentDir = sortDirections[colIndex] === 'asc' ? 'desc' : 'asc';
-      sortDirections[colIndex] = currentDir;
-      
-      rows.sort((a, b) => {{
-        let aVal = a.children[colIndex].getAttribute('data-sort-val') || a.children[colIndex].innerText.trim();
-        let bVal = b.children[colIndex].getAttribute('data-sort-val') || b.children[colIndex].innerText.trim();
-        
-        if (type === 'number') {{
-          aVal = parseFloat(aVal) || 0;
-          bVal = parseFloat(bVal) || 0;
-          return currentDir === 'asc' ? aVal - bVal : bVal - aVal;
-        }} else {{
-          return currentDir === 'asc' 
-            ? aVal.localeCompare(bVal, undefined, {{numeric: true, sensitivity: 'base'}}) 
-            : bVal.localeCompare(aVal, undefined, {{numeric: true, sensitivity: 'base'}});
-        }}
-      }});
-
-      rows.forEach(row => tbody.appendChild(row));
-
-      // Update sort icons
-      const headers = table.querySelectorAll('th');
-      headers.forEach((th, idx) => {{
-        const icon = th.querySelector('.sort-icon');
-        if (idx === colIndex) {{
-          icon.innerText = currentDir === 'asc' ? '▲' : '▼';
-        }} else {{
-          icon.innerText = '↕';
-        }}
-      }});
-    }}
-  </script>
-</body>
-</html>
+table_body = "\n".join(groups_html) if groups_html else """
+<tbody class="vuln-group">
+  <tr>
+    <td colspan="7" style="text-align:center; padding: 32px; color: #8b949e;">
+      No vulnerabilities detected in scanned directories. 🎉
+    </td>
+  </tr>
+</tbody>
 """
+
+script_dir = os.path.dirname(os.path.abspath(script_path)) if script_path else ''
+template_candidates = [
+    os.path.join(script_dir, 'report_template.html'),
+    '/usr/local/bin/report_template.html',
+    '/usr/local/share/ldx/cvescan/report_template.html',
+    os.path.expanduser('~/.local/share/ldx/cvescan/report_template.html')
+]
+
+template_content = None
+for cand in template_candidates:
+    if os.path.isfile(cand):
+        try:
+            with open(cand, 'r') as tf:
+                template_content = tf.read()
+            break
+        except Exception:
+            pass
+
+if not template_content:
+    sys.exit(0)
+
+html_content = template_content \
+    .replace('{{TIMESTAMP}}', html.escape(timestamp)) \
+    .replace('{{SCAN_MODE}}', html.escape(scan_mode)) \
+    .replace('{{TOTAL_COUNT}}', str(len(grouped))) \
+    .replace('{{CRIT_COUNT}}', str(crit_count)) \
+    .replace('{{HIGH_COUNT}}', str(high_count)) \
+    .replace('{{MED_LOW_COUNT}}', str(med_count + low_count)) \
+    .replace('{{TABLE_BODY}}', table_body)
 
 with open(html_file, 'w') as f:
     f.write(html_content)
@@ -752,6 +499,20 @@ calculate_fingerprint() {
 CURRENT_TIME="$(date '+%Y-%m-%d %H:%M:%S')"
 CURRENT_EPOCH="$(date '+%s')"
 TS_STAMP="$(date '+%Y%m%d_%H%M%S')"
+
+if [ "$IS_REPORT_ONLY" = true ]; then
+  LATEST_JSON="${LOG_DIR}/grype_report_latest.json"
+  LATEST_HTML="${LOG_DIR}/grype_report_latest.html"
+  if [ ! -f "$LATEST_JSON" ]; then
+    log_message "[ERROR] No JSON report found at ${LATEST_JSON} to regenerate HTML report."
+    exit 1
+  fi
+  TARGETS_CSV="$(IFS=,; echo "${SCAN_TARGETS[*]}")"
+  log_message "[INFO] Regenerating visual HTML report from ${LATEST_JSON}..."
+  generate_html_report "$LATEST_JSON" "$LATEST_HTML" "$CURRENT_TIME" "Report Regenerated" "$TARGETS_CSV"
+  log_message "[INFO] HTML report regenerated successfully: ${LATEST_HTML}"
+  exit 0
+fi
 
 LAST_FULL_TS="$(read_state_field "last_full_scan_timestamp")"
 LAST_FP_HASH="$(read_state_field "last_fingerprint_hash")"

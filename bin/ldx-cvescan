@@ -63,7 +63,7 @@ show_help() {
   echo "  logs         Tail or view recent scan execution logs"
   echo "               Flags: --run 1 (default), --run 2, --run 3"
   echo "  report       Open the visual HTML report in your default browser"
-  echo "               Flags: --run 1 (default), --run 2, --run 3"
+  echo "               Flags: --regenerate (-r), --run 1 (default), --run 2, --run 3"
   echo "  config       Show current configuration from /usr/local/etc/cvescan.conf"
   echo ""
 }
@@ -99,6 +99,13 @@ cmd_install() {
   sudo chown root:wheel "${SCRIPT_DEST}"
   sudo chmod 755 "${SCRIPT_DEST}"
 
+  if [ -f "${CVESCAN_SRC_DIR}/report_template.html" ]; then
+    log_info "Deploying HTML report template to $(dirname "${SCRIPT_DEST}")/report_template.html..."
+    sudo cp "${CVESCAN_SRC_DIR}/report_template.html" "$(dirname "${SCRIPT_DEST}")/report_template.html"
+    sudo chown root:wheel "$(dirname "${SCRIPT_DEST}")/report_template.html"
+    sudo chmod 644 "$(dirname "${SCRIPT_DEST}")/report_template.html"
+  fi
+
   log_info "Deploying LaunchDaemon plist to ${PLIST_DEST}..."
   sudo mkdir -p "$(dirname "${PLIST_DEST}")"
   sudo cp "${CVESCAN_SRC_DIR}/com.system.cvescan.plist" "${PLIST_DEST}"
@@ -133,6 +140,7 @@ cmd_uninstall() {
 
   log_info "Removing system files..."
   sudo rm -f "${SCRIPT_DEST}"
+  sudo rm -f "$(dirname "${SCRIPT_DEST}")/report_template.html"
   sudo rm -f "${PLIST_DEST}"
 
   log_info "cvescan system files removed. Configuration (${CONF_DEST}) and logs (${LOG_DIR}) were preserved."
@@ -219,9 +227,59 @@ cmd_logs() {
 }
 
 cmd_report() {
-  local target_html="${LOG_DIR}/grype_report_latest.html"
-  if [ ! -f "$target_html" ] && [ -f "${HOME}/.cache/cvescan/grype_report_latest.html" ]; then
-    target_html="${HOME}/.cache/cvescan/grype_report_latest.html"
+  local do_regenerate=false
+  local run_num=1
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --regenerate|-r)
+        do_regenerate=true
+        shift 1
+        ;;
+      --run)
+        if [ -n "${2:-}" ]; then
+          run_num="$2"
+          shift 2
+        else
+          shift 1
+        fi
+        ;;
+      *)
+        shift 1
+        ;;
+    esac
+  done
+
+  local log_dir="${LOG_DIR}"
+  if [ ! -d "$log_dir" ] || [ ! -w "$log_dir" ]; then
+    if [ -d "${HOME}/.cache/cvescan" ]; then
+      log_dir="${HOME}/.cache/cvescan"
+    fi
+  fi
+
+  local target_html="${log_dir}/grype_report_latest.html"
+  local target_json="${log_dir}/grype_report_latest.json"
+
+  if [ "$run_num" -gt 1 ]; then
+    local json_files=()
+    while IFS= read -r f; do
+      [ -n "$f" ] && json_files+=("$f")
+    done < <(ls -1t "${log_dir}"/grype_report_20*.json 2>/dev/null || true)
+    
+    local idx=$(( run_num - 1 ))
+    if [ "$idx" -lt "${#json_files[@]}" ]; then
+      target_json="${json_files[$idx]}"
+      target_html="${target_json%.json}.html"
+    fi
+  fi
+
+  if [ "$do_regenerate" = true ]; then
+    log_info "Regenerating visual HTML report from existing scan data..."
+    if [ -x "${SCRIPT_DEST}" ]; then
+      "${SCRIPT_DEST}" --regenerate
+    elif [ -n "${CVESCAN_SRC_DIR}" ] && [ -f "${CVESCAN_SRC_DIR}/cvescan.sh" ]; then
+      "${CVESCAN_SRC_DIR}/cvescan.sh" --regenerate
+    fi
   fi
 
   if [ -f "$target_html" ]; then

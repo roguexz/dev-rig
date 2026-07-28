@@ -86,6 +86,10 @@ ldx cvescan trigger --full
 # Open the interactive visual HTML report in your default browser
 ldx cvescan report
 
+# Regenerate the HTML report from existing JSON scan output without re-running Grype
+ldx cvescan report --regenerate
+ldx cvescan report -r
+
 # Open report from previous run #2 or #3
 ldx cvescan report --run 2
 
