@@ -1,4 +1,4 @@
-# Cert-Manager (`rd-setup certmanager`)
+# Cert-Manager (`ldx certmanager`)
 
 This command automates the installation and configuration of `cert-manager`, a powerful tool for managing TLS
 certificates within Kubernetes.
@@ -9,7 +9,7 @@ your applications that are automatically trusted by your browser.
 
 ## Commands
 
-### `rd-setup certmanager install`
+### `ldx certmanager install`
 
 This command performs the following actions:
 
@@ -29,7 +29,7 @@ resources.
 > - [`cert-manager-edge.yaml`](../examples/cert-manager-edge.yaml)
 > - [`cert-manager-e2e.yaml`](../examples/cert-manager-e2e.yaml)
 
-### `rd-setup certmanager uninstall`
+### `ldx certmanager uninstall`
 
 This command cleanly removes all `cert-manager` components:
 

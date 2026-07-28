@@ -1,16 +1,16 @@
-# PostgreSQL with pgvector (`rd-setup postgres`)
+# PostgreSQL with pgvector (`ldx postgres`)
 
 This command deploys a standalone PostgreSQL instance in the Kubernetes cluster with the `pgvector` extension enabled
 and exposes it so that it is accessible directly from your host machine.
 
 ## Commands
 
-### `rd-setup postgres install`
+### `ldx postgres install`
 
 This command installs a standalone PostgreSQL instance into the `commons` namespace, sets the default password to
 `changeit`, and runs initialization SQL scripts to enable the `vector` extension.
 
-### `rd-setup postgres uninstall`
+### `ldx postgres uninstall`
 
 This command cleans up the PostgreSQL deployment, including the persistent storage PVC, leaving the `commons` namespace
 intact.

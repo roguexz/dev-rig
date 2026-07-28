@@ -1,14 +1,14 @@
-# Redis Stack (`rd-setup redis`)
+# Redis Stack (`ldx redis`)
 
 This command deploys a standalone Redis instance in the Kubernetes cluster and exposes it so that it is accessible directly from your host machine.
 
 ## Commands
 
-### `rd-setup redis install`
+### `ldx redis install`
 
 This command installs a standalone, unauthenticated Redis instance into the `commons` namespace.
 
-### `rd-setup redis uninstall`
+### `ldx redis uninstall`
 
 This command cleans up the Redis deployment, leaving the `commons` namespace intact.
 

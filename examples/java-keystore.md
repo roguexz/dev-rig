@@ -1,6 +1,6 @@
 # Using the Custom Java Keystore
 
-The `rd-setup tls keystore` command creates a custom Java keystore at `~/.cache/local-dev/certs/cacerts`. This keystore is a copy of your system's default `cacerts` file, with the addition of the `mkcert` root CA. This allows Java applications to trust the locally generated TLS certificates.
+The `ldx tls keystore` command creates a custom Java keystore at `~/.cache/local-dev/certs/cacerts`. This keystore is a copy of your system's default `cacerts` file, with the addition of the `mkcert` root CA. This allows Java applications to trust the locally generated TLS certificates.
 
 ## For Quarkus Applications
 

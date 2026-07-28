@@ -1,8 +1,8 @@
-# Local Development Environment & Host Utilities Setup (`dev-setup`)
+# Local Development Experience CLI (`ldx`)
 
-This repository contains a set of modular scripts to automate local development infrastructure (Rancher Desktop) and host system security tools on macOS.
+This repository contains a set of modular scripts (`ldx-*`) to automate local development infrastructure (Rancher Desktop) and host system security tools on macOS.
 
-The primary entrypoint CLI is `dev-setup`, acting as a unified dispatcher for sub-commands managing specific tools, security utilities, and local infrastructure services.
+The primary entrypoint CLI is `ldx`, acting as a unified dispatcher for sub-commands managing specific tools, security utilities, and local infrastructure services. Direct usage of individual binaries (`ldx-vault`, `ldx-postgres`, etc.) is also fully supported.
 
 ## Prerequisites
 
@@ -15,50 +15,90 @@ Before using these scripts, ensure you have the following command-line tools ins
 - [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
 - [helm](https://helm.sh/docs/intro/install/)
 - [jq](https://stedolan.github.io/jq/download/)
-- A Java Development Kit (JDK) for the `tls keystore` command.
+- A Java Development Kit (JDK) for the `ldx tls keystore` command.
 
-## Installation
+## Quick Start & Installation
+
+### Option 1: Remote One-Liner Installation (Recommended)
+
+Run the following command to download the latest release tarball to a temporary directory, run `ldx install` (which copies all executables into `$HOME/.local/bin`), and automatically clean up temporary files:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/roguexz/dev-setup/main/install.sh | bash
+```
+
+Or using GitHub CLI (`gh`):
+
+```bash
+gh api repos/roguexz/dev-setup/tarball/main | tar -xz -C /tmp && \
+  /tmp/roguexz-dev-setup-*/bin/ldx install && \
+  rm -rf /tmp/roguexz-dev-setup-*
+```
+
+---
+
+### Option 2: Local Repository Installation
 
 1. **Clone the repository:**
    ```bash
-   git clone <repo-url> dev-setup
+   git clone https://github.com/roguexz/dev-setup.git
    cd dev-setup
    ```
 
 2. **Make the scripts executable:**
    ```bash
-   chmod +x bin/* cvescan/*.sh
+   chmod +x bin/* install.sh cvescan/*.sh
    ```
 
-3. **Add the `bin` directory to your shell's `PATH`:**
-   Add the following line to your `~/.zshrc`, `~/.bash_profile`, or equivalent shell configuration file:
-
+3. **Install `ldx` binaries to your local PATH:**
    ```bash
-   export PATH="/path/to/your/dev-setup/bin:$PATH"
+   ./bin/ldx install
    ```
-   Reload your shell for the changes to take effect. You can now run `dev-setup` from any directory.
+   By default, this copies `ldx` and all `ldx-*` binaries to `$HOME/.local/bin` (or `$HOME/bin`).
+
+   - **Symlink option**: To keep installed binaries in sync with `git pull`, pass `--link`:
+     ```bash
+     ./bin/ldx install --link
+     ```
+   - **Custom target directory**:
+     ```bash
+     ./bin/ldx install --dir /custom/path/bin
+     ```
+
+---
+
+### Shell PATH Configuration
+
+Ensure `$HOME/.local/bin` (or your chosen install directory) is present in your shell configuration (`~/.zshrc` or `~/.bashrc`):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+After reloading your shell (`source ~/.zshrc`), `ldx` commands will be accessible from anywhere (e.g., `ldx-vault unseal`, `ldx postgres install`).
 
 ## Available Commands
 
-The `dev-setup` tool is modular, with each command managing a specific capability.
+The `ldx` CLI is modular, with each command managing a specific capability.
 
-| Command                                | Description                                                              |
-| -------------------------------------- | ------------------------------------------------------------------------ |
-| `dev-setup cvescan <subcommand>`       | System-wide automated Grype vulnerability scanner LaunchDaemon.          |
-| `dev-setup tls <subcommand>`           | Manages local TLS certificates and Java keystores.                       |
-| `dev-setup certmanager <subcommand>`   | Installs and configures `cert-manager` for in-cluster certificates.      |
-| `dev-setup otel <subcommand>`          | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).            |
-| `dev-setup redis <subcommand>`         | Deploys a Redis instance accessible from the host.                       |
-| `dev-setup postgres <subcommand>`      | Deploys a PostgreSQL instance with pgvector extension.                   |
-| `dev-setup vault <subcommand>`         | Manages a local HashiCorp Vault deployment for secrets management.       |
-| `dev-setup litellm <subcommand>`       | Deploys a LiteLLM proxy instance backed by PostgreSQL.                   |
+| Command                            | Description                                                              | Direct Binary    |
+| ---------------------------------- | ------------------------------------------------------------------------ | ---------------- |
+| `ldx install [flags]`              | Installs `ldx` commands into `$HOME/.local/bin` (`--copy` default, `--link` flag). | `ldx install` |
+| `ldx cvescan <subcommand>`         | System-wide automated Grype vulnerability scanner LaunchDaemon.          | `ldx-cvescan`    |
+| `ldx tls <subcommand>`             | Manages local TLS certificates and Java keystores.                       | `ldx-tls`        |
+| `ldx certmanager <subcommand>`     | Installs and configures `cert-manager` for in-cluster certificates.      | `ldx-certmanager` |
+| `ldx otel <subcommand>`            | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).            | `ldx-otel`       |
+| `ldx redis <subcommand>`           | Deploys a Redis instance accessible from the host.                       | `ldx-redis`      |
+| `ldx postgres <subcommand>`        | Deploys a PostgreSQL instance with pgvector extension.                   | `ldx-postgres`   |
+| `ldx vault <subcommand>`           | Manages a local HashiCorp Vault deployment for secrets management.       | `ldx-vault`      |
+| `ldx litellm <subcommand>`         | Deploys a LiteLLM proxy instance backed by PostgreSQL.                   | `ldx-litellm`    |
 
 For detailed usage of each command, see the documentation below.
 
 ## Documentation
 
+- [**CLI Reference (`ldx`)**](./docs/ldx.md)
 - [**System CVE Scanner (`cvescan`)**](./docs/cvescan.md)
-- [**CLI Reference (`dev-setup`)**](./docs/dev-setup.md)
 - [**TLS & Traefik (`tls`)**](./docs/tls.md)
 - [**Cert-Manager (`certmanager`)**](./docs/cert-manager.md)
 - [**OpenTelemetry LGTM Stack (`otel`)**](./docs/otel.md)

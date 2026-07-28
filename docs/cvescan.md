@@ -36,10 +36,10 @@ brew install terminal-notifier
 
 ### Automated CLI Installation (Recommended)
 
-Run the following command from the `dev-setup` repository:
+Run the following command from the repository:
 
 ```bash
-sudo ./bin/dev-setup cvescan install
+sudo ldx cvescan install
 ```
 
 **What this command does:**
@@ -52,56 +52,56 @@ sudo ./bin/dev-setup cvescan install
 
 ## CLI Management
 
-The `dev-setup cvescan` tool provides full lifecycle management:
+The `ldx cvescan` tool provides full lifecycle management:
 
 ### Check Status & Dry-Run Verification
 ```bash
 # Display service status, state JSON, and binary paths
-dev-setup cvescan status
+ldx cvescan status
 
 # Perform a dry-run check (verifies binaries, lists target scan folders & exclusions)
-dev-setup cvescan dry-run
+ldx cvescan dry-run
 
 # Perform a dry-run check on a specific folder without running Grype
-dev-setup cvescan dry-run -t /Users/rogue/code/my-project
+ldx cvescan dry-run -t /Users/rogue/code/my-project
 ```
 
 ### Trigger Manual Scan & Target Specific Folders
 ```bash
 # Trigger standard quick scan (uses default /Applications and /Users)
-dev-setup cvescan trigger
+ldx cvescan trigger
 
 # Scan a specific custom target folder
-dev-setup cvescan trigger --target /Users/rogue/code/my-project
+ldx cvescan trigger --target /Users/rogue/code/my-project
 
 # Scan multiple specific target folders
-dev-setup cvescan trigger -t /Applications -t /Users/rogue/projects
+ldx cvescan trigger -t /Applications -t /Users/rogue/projects
 
 # Force a full deep scan (bypasses change detection)
-dev-setup cvescan trigger --full
+ldx cvescan trigger --full
 ```
 
 ### View Scan Logs & HTML Visual Reports
 ```bash
 # Open the interactive visual HTML report in your default browser
-dev-setup cvescan report
+ldx cvescan report
 
 # Open report from previous run #2 or #3
-dev-setup cvescan report --run 2
+ldx cvescan report --run 2
 
 # View formatted text log in terminal
-dev-setup cvescan logs
-dev-setup cvescan logs --run 2
+ldx cvescan logs
+ldx cvescan logs --run 2
 ```
 
 ### View Configuration
 ```bash
-dev-setup cvescan config
+ldx cvescan config
 ```
 
 ### Uninstall
 ```bash
-sudo dev-setup cvescan uninstall
+sudo ldx cvescan uninstall
 ```
 
 ---

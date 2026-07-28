@@ -1,4 +1,4 @@
-# OpenTelemetry Stack (`rd-setup otel`)
+# OpenTelemetry Stack (`ldx otel`)
 
 This command deploys a complete, push-based observability stack based on the `docker-otel-lgtm` model. It allows you to send logs, traces, and metrics from your applications to a single endpoint and visualize them in Grafana.
 
@@ -12,11 +12,11 @@ All components are deployed into the shared `commons` namespace.
 
 ## Commands
 
-### `rd-setup otel install`
+### `ldx otel install`
 
 This command installs and configures the entire stack.
 
-### `rd-setup otel uninstall`
+### `ldx otel uninstall`
 
 This command removes all components related to the OTel stack, but leaves the `commons` namespace intact.
 

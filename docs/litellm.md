@@ -1,10 +1,10 @@
-# LiteLLM Proxy (`rd-setup litellm`)
+# LiteLLM Proxy (`ldx litellm`)
 
 This command deploys a LiteLLM proxy instance in the Kubernetes cluster backed by the PostgreSQL database deployment and exposes it so that it is accessible directly from your host machine and from pods inside the cluster.
 
 ## Commands
 
-### `rd-setup litellm install`
+### `ldx litellm install`
 
 This command installs LiteLLM proxy into the `commons` namespace:
 
@@ -13,7 +13,7 @@ This command installs LiteLLM proxy into the `commons` namespace:
 3. **Master Key Configuration**: Sets the admin master key `LITELLM_MASTER_KEY` to `sk-changeit` and enables database model storage (`STORE_MODEL_IN_DB=True`).
 4. **Service & Ingress Exposure**: Exposes the proxy via Traefik Ingress (`https://litellm.rd.localhost`), LoadBalancer/NodePort (`localhost:4000`), and internal ClusterIP.
 
-### `rd-setup litellm uninstall`
+### `ldx litellm uninstall`
 
 This command cleans up the LiteLLM deployment, services, and ingress, leaving the `commons` namespace and PostgreSQL database intact.
 

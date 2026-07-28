@@ -1,11 +1,11 @@
-# TLS & Traefik (`rd-setup tls`)
+# TLS & Traefik (`ldx tls`)
 
 This command manages the creation of locally trusted TLS certificates using `mkcert` and configures Rancher Desktop's
 built-in Traefik Ingress Controller to use them for HTTPS traffic.
 
 ## Commands
 
-### `rd-setup tls install`
+### `ldx tls install`
 
 This is the main setup command. It performs the following actions idempotently:
 
@@ -23,7 +23,7 @@ This is the main setup command. It performs the following actions idempotently:
 4. **Configures Traefik:** Deploys a Traefik `TLSStore` resource that configures Traefik to use the `default-tls-secret`
    as the default certificate for any TLS-enabled Ingress that does not specify its own.
 
-### `rd-setup tls keystore`
+### `ldx tls keystore`
 
 This command creates a custom Java keystore for use in Java-based applications (like Quarkus).
 
@@ -37,7 +37,7 @@ This allows Java applications configured to use this keystore to trust the local
 > **See:** [`examples/java-keystore.md`](../examples/java-keystore.md) for instructions on how to use this keystore in
 > your application.
 
-### `rd-setup tls uninstall`
+### `ldx tls uninstall`
 
 This command cleans up all resources created by `install`:
 

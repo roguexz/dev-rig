@@ -3,7 +3,7 @@
 # from Vault into a pod's filesystem.
 
 # First, you need to enable the Kubernetes auth method in Vault and configure roles.
-# Run these commands after 'rd-setup vault setup' and 'rd-setup vault unseal':
+# Run these commands after 'ldx vault setup' and 'ldx vault unseal':
 
 # 1. Login to Vault (use the root token from ~/.cache/local-dev/vault/keys.json)
 #    kubectl exec -it -n commons vault-0 -- /bin/sh

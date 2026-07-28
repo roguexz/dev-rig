@@ -2,7 +2,17 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+get_script_dir() {
+  local SOURCE="${BASH_SOURCE[0]}"
+  while [ -L "$SOURCE" ]; do
+    local DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+  done
+  cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd
+}
+
+SCRIPT_DIR="$(get_script_dir)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
@@ -19,7 +29,7 @@ ensure_database() {
 
     # Check if postgres pod is present in commons namespace
     if ! kubectl get pods -n "$namespace" -l app.kubernetes.io/name=postgresql &> /dev/null; then
-        fatal "PostgreSQL pod not found in namespace '$namespace'. Please run 'dev-setup postgres install' first."
+        fatal "PostgreSQL pod not found in namespace '$namespace'. Please run 'ldx postgres install' first."
     fi
 
     # Find the primary postgres pod
