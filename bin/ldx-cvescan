@@ -94,11 +94,13 @@ cmd_install() {
   check_sudo
 
   log_info "Deploying scanner script to ${SCRIPT_DEST}..."
+  sudo mkdir -p "$(dirname "${SCRIPT_DEST}")"
   sudo cp "${CVESCAN_SRC_DIR}/cvescan.sh" "${SCRIPT_DEST}"
   sudo chown root:wheel "${SCRIPT_DEST}"
   sudo chmod 755 "${SCRIPT_DEST}"
 
   log_info "Deploying LaunchDaemon plist to ${PLIST_DEST}..."
+  sudo mkdir -p "$(dirname "${PLIST_DEST}")"
   sudo cp "${CVESCAN_SRC_DIR}/com.system.cvescan.plist" "${PLIST_DEST}"
   sudo chown root:wheel "${PLIST_DEST}"
   sudo chmod 644 "${PLIST_DEST}"
