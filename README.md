@@ -21,19 +21,19 @@ Before using these scripts, ensure you have the following command-line tools ins
 
 ### Option 1: Remote One-Liner Installation (Recommended)
 
-Run the following command to download the latest release tarball to a temporary directory, run `ldx install` (which copies all executables into `$HOME/.local/bin`), and automatically clean up temporary files:
+Because this is a private GitHub repository, `raw.githubusercontent.com` requires authentication. You can install directly via the `gh` CLI:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/roguexz/dev-setup/main/install.sh | bash
+gh api repos/roguexz/dev-setup/contents/install.sh --jq '.content' | base64 -d | bash
 ```
 
-Or using GitHub CLI (`gh`):
+Or using `curl` with a GitHub access token:
 
 ```bash
-gh api repos/roguexz/dev-setup/tarball/main | tar -xz -C /tmp && \
-  /tmp/roguexz-dev-setup-*/bin/ldx install && \
-  rm -rf /tmp/roguexz-dev-setup-*
+curl -fsSL -H "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/roguexz/dev-setup/main/install.sh | bash
 ```
+
+This downloads the latest release tarball to a temporary directory, executes `ldx install` (copying executables into `$HOME/.local/bin`), and automatically cleans up temporary files.
 
 ---
 
