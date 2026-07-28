@@ -4,13 +4,41 @@ The `rd-setup tls keystore` command creates a custom Java keystore at `~/.cache/
 
 ## For Quarkus Applications
 
-You can configure your Quarkus application to use this keystore by setting the following properties in your `application.properties` file:
+### Serving Content over TLS
+
+Configure the server to use the generated certificates for serving content over TLS. Add the
+following entries to your `application.properties` file:
 
 ```properties
-# Path to the custom keystore
-quarkus.http.ssl.certificate.key-store-file=${user.home}/.cache/local-dev/certs/cacerts
-# Password for the keystore
-quarkus.http.ssl.certificate.key-store-password=changeit
+# Configure HTTPS for all locally run Quarkus apps
+quarkus.tls.key-store.pem.0.cert=$HOME/.cache/local-dev/certs/localhost.pem
+quarkus.tls.key-store.pem.0.key=$HOME/.cache/local-dev/certs/localhost-key.pem
+# Reject HTTP requests
+quarkus.http.insecure-requests=disabled
+```
+
+Alternatively, add the following configuration to your shell profile (`~/.zshrc`, `~/.bashrc`, etc):
+
+```bash
+# Configure HTTPS for Quarkus apps running locally
+export QUARKUS_HTTP_INSECURE_REQUESTS=disabled
+export QUARKUS_TLS_KEY_STORE_PEM__0__CERT=$HOME/.cache/local-dev/certs/localhost.pem
+export QUARKUS_TLS_KEY_STORE_PEM__0__KEY=$HOME/.cache/local-dev/certs/localhost-key.pem
+```
+
+### Configure Client Truststore
+
+When you need to consume HTTPS endpoints that use locally generated certificates, you need to
+configure the client truststore. Add the following entries to your
+`application.properties` file:
+
+```properties
+# Configure client truststore for local development
+quarkus.tls.trust-store.pem.certs=${HOME}/.cache/local-dev/certs/localhost.pem
+
+# Create an additional "named" truststore for use with Quarkiverse extensions, e.g., Langchain4j
+quarkus.tls.local-dev.trust-store.pem.certs=${HOME}/.cache/local-dev/certs/localhost.pem
+quarkus.langchain4j.openai.tls-configuration-name=local-dev
 ```
 
 ## For Other Java Applications
