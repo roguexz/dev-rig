@@ -13,7 +13,26 @@ get_script_dir() {
 }
 
 SCRIPT_DIR="$(get_script_dir)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." &> /dev/null && pwd)"
+
+find_cvescan_dir() {
+  local candidates=(
+    "$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)/cvescan"
+    "$(cd "${SCRIPT_DIR}/../share/ldx" &>/dev/null && pwd)/cvescan"
+    "$(cd "${SCRIPT_DIR}/share/ldx" &>/dev/null && pwd)/cvescan"
+    "${SCRIPT_DIR}/cvescan"
+    "${HOME}/.local/share/ldx/cvescan"
+    "/usr/local/share/ldx/cvescan"
+  )
+  for dir in "${candidates[@]}"; do
+    if [ -n "$dir" ] && [ -f "${dir}/cvescan.sh" ]; then
+      echo "$dir"
+      return 0
+    fi
+  done
+  return 1
+}
+
+CVESCAN_SRC_DIR="$(find_cvescan_dir || true)"
 
 # Source common utilities if available
 if [ -f "${SCRIPT_DIR}/lib/common.sh" ]; then
@@ -58,6 +77,10 @@ check_sudo() {
 cmd_install() {
   log_info "Verifying prerequisites..."
 
+  if [ -z "${CVESCAN_SRC_DIR}" ] || [ ! -f "${CVESCAN_SRC_DIR}/cvescan.sh" ]; then
+    fatal "Could not locate cvescan source assets (cvescan.sh). Please reinstall ldx using 'ldx install'."
+  fi
+
   # Check grype
   if ! command -v grype &>/dev/null && [ ! -x "/opt/homebrew/bin/grype" ] && [ ! -x "/usr/local/bin/grype" ]; then
     log_warn "Grype binary not found. Please install it using: brew install grype"
@@ -71,19 +94,19 @@ cmd_install() {
   check_sudo
 
   log_info "Deploying scanner script to ${SCRIPT_DEST}..."
-  sudo cp "${REPO_ROOT}/cvescan/cvescan.sh" "${SCRIPT_DEST}"
+  sudo cp "${CVESCAN_SRC_DIR}/cvescan.sh" "${SCRIPT_DEST}"
   sudo chown root:wheel "${SCRIPT_DEST}"
   sudo chmod 755 "${SCRIPT_DEST}"
 
   log_info "Deploying LaunchDaemon plist to ${PLIST_DEST}..."
-  sudo cp "${REPO_ROOT}/cvescan/com.system.cvescan.plist" "${PLIST_DEST}"
+  sudo cp "${CVESCAN_SRC_DIR}/com.system.cvescan.plist" "${PLIST_DEST}"
   sudo chown root:wheel "${PLIST_DEST}"
   sudo chmod 644 "${PLIST_DEST}"
 
   if [ ! -f "${CONF_DEST}" ]; then
     log_info "Installing default configuration to ${CONF_DEST}..."
     sudo mkdir -p "$(dirname "${CONF_DEST}")"
-    sudo cp "${REPO_ROOT}/cvescan/cvescan.conf" "${CONF_DEST}"
+    sudo cp "${CVESCAN_SRC_DIR}/cvescan.conf" "${CONF_DEST}"
     sudo chown root:wheel "${CONF_DEST}"
     sudo chmod 644 "${CONF_DEST}"
   fi
@@ -162,8 +185,11 @@ cmd_trigger() {
   done
 
   if [ "$is_dry_run" = true ] || [ ! -x "${SCRIPT_DEST}" ]; then
-    log_info "Executing scanner script (${REPO_ROOT}/cvescan/cvescan.sh)..."
-    "${REPO_ROOT}/cvescan/cvescan.sh" "${extra_args[@]}"
+    if [ -z "${CVESCAN_SRC_DIR}" ] || [ ! -f "${CVESCAN_SRC_DIR}/cvescan.sh" ]; then
+      fatal "Could not locate scanner script at ${SCRIPT_DEST} or in source assets."
+    fi
+    log_info "Executing scanner script (${CVESCAN_SRC_DIR}/cvescan.sh)..."
+    "${CVESCAN_SRC_DIR}/cvescan.sh" "${extra_args[@]}"
   else
     log_info "Triggering scanner script at ${SCRIPT_DEST}..."
     if [ "$EUID" -ne 0 ]; then
@@ -208,9 +234,11 @@ cmd_config() {
   if [ -f "${CONF_DEST}" ]; then
     echo "=== Configuration File: ${CONF_DEST} ==="
     cat "${CONF_DEST}"
+  elif [ -n "${CVESCAN_SRC_DIR}" ] && [ -f "${CVESCAN_SRC_DIR}/cvescan.conf" ]; then
+    log_warn "Configuration file '${CONF_DEST}' does not exist. Default template (${CVESCAN_SRC_DIR}/cvescan.conf):"
+    cat "${CVESCAN_SRC_DIR}/cvescan.conf"
   else
-    log_warn "Configuration file '${CONF_DEST}' does not exist. Default repository template:"
-    cat "${REPO_ROOT}/cvescan/cvescan.conf"
+    log_warn "Configuration file '${CONF_DEST}' does not exist."
   fi
 }
 

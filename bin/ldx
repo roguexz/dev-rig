@@ -97,6 +97,9 @@ install_binaries() {
   log_info "Installing ldx commands into '${target_dir}' using ${mode} mode..."
 
   local scripts=("ldx" "ldx-cvescan" "ldx-certmanager" "ldx-litellm" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault")
+  local repo_dir="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
+  local share_dir="$(cd "${target_dir}/.." &>/dev/null && pwd)/share/ldx"
+  [ -z "$share_dir" ] && share_dir="${target_dir}/share/ldx"
 
   if [ "$mode" = "copy" ]; then
     for script in "${scripts[@]}"; do
@@ -110,6 +113,11 @@ install_binaries() {
       mkdir -p "${target_dir}/lib"
       cp -R "${SCRIPT_DIR}/lib/"* "${target_dir}/lib/"
       log_info "Copied lib/ utilities -> ${target_dir}/lib/"
+    fi
+    if [ -d "${repo_dir}/cvescan" ]; then
+      mkdir -p "${share_dir}/cvescan"
+      cp -R "${repo_dir}/cvescan/"* "${share_dir}/cvescan/"
+      log_info "Copied cvescan/ assets -> ${share_dir}/cvescan/"
     fi
   else
     for script in "${scripts[@]}"; do
@@ -126,6 +134,11 @@ install_binaries() {
         ln -sf "$libfile" "${target_dir}/lib/${libname}"
       done
       log_info "Linked lib/ utilities -> ${target_dir}/lib/"
+    fi
+    if [ -d "${repo_dir}/cvescan" ]; then
+      mkdir -p "${share_dir}"
+      ln -snf "${repo_dir}/cvescan" "${share_dir}/cvescan"
+      log_info "Linked cvescan/ assets -> ${share_dir}/cvescan/"
     fi
   fi
 
