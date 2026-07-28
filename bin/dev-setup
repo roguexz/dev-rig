@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#
+# dev-setup - Top-level CLI dispatcher for development environment & system tools
+#
+
+set -euo pipefail
+
+# Get the directory of the current script to locate library and subcommands
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+
+# Source common utilities if available
+if [ -f "${SCRIPT_DIR}/lib/common.sh" ]; then
+  source "${SCRIPT_DIR}/lib/common.sh"
+else
+  log_info() { echo -e "\033[0;32m[INFO]\033[0m $1"; }
+  log_warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
+  log_error() { echo -e "\033[0;31m[ERROR]\033[0m $1"; }
+  fatal() { log_error "$1"; exit 1; }
+fi
+
+show_help() {
+  echo "dev-setup - Developer Environment & System Utilities CLI"
+  echo ""
+  echo "Usage: $(basename "$0") <command> [subcommand] [flags]"
+  echo ""
+  echo "System & Security Utilities:"
+  echo "  cvescan       Manage system-wide automated Grype vulnerability scanner"
+  echo ""
+  echo "Local Kubernetes & Infrastructure Setup (Rancher Desktop):"
+  echo "  tls           Manage TLS certificates and Traefik configuration"
+  echo "  certmanager   Install and configure cert-manager"
+  echo "  otel          Deploy and configure OpenTelemetry LGTM stack"
+  echo "  redis         Deploy Redis stack"
+  echo "  postgres      Deploy PostgreSQL with pgvector extension"
+  echo "  vault         Manage local Vault deployment"
+  echo "  litellm       Deploy LiteLLM proxy"
+  echo ""
+  echo "Run '$(basename "$0") <command> help' for detailed usage of a specific command."
+}
+
+if [ $# -lt 1 ]; then
+  show_help
+  exit 0
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+  cvescan)
+    EXEC_SCRIPT="${SCRIPT_DIR}/dev-setup-cvescan"
+    ;;
+  tls|certmanager|otel|redis|postgres|vault|litellm)
+    EXEC_SCRIPT="${SCRIPT_DIR}/rd-setup-${COMMAND}"
+    ;;
+  help|-h|--help)
+    show_help
+    exit 0
+    ;;
+  *)
+    log_error "Unknown command: ${COMMAND}"
+    show_help
+    exit 1
+    ;;
+esac
+
+if [ ! -x "${EXEC_SCRIPT}" ]; then
+  if [ -f "${EXEC_SCRIPT}" ]; then
+    log_warn "Script '${EXEC_SCRIPT}' exists but is not executable. Run 'chmod +x ${EXEC_SCRIPT}'."
+    exit 1
+  else
+    log_error "Command handler '${EXEC_SCRIPT}' was not found."
+    exit 1
+  fi
+fi
+
+exec "${EXEC_SCRIPT}" "$@"

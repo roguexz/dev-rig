@@ -19,7 +19,7 @@ ensure_database() {
 
     # Check if postgres pod is present in commons namespace
     if ! kubectl get pods -n "$namespace" -l app.kubernetes.io/name=postgresql &> /dev/null; then
-        fatal "PostgreSQL pod not found in namespace '$namespace'. Please run 'rd-setup postgres install' first."
+        fatal "PostgreSQL pod not found in namespace '$namespace'. Please run 'dev-setup postgres install' first."
     fi
 
     # Find the primary postgres pod
