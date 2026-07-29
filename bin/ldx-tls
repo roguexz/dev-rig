@@ -62,8 +62,14 @@ install_certs() {
 
     init_dirs
 
-    log_info "Installing mkcert local CA..."
-    mkcert -install
+    local ca_root
+    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
+    if [ -n "$ca_root" ] && [ -f "${ca_root}/rootCA.pem" ]; then
+        log_info "mkcert local CA is already installed at ${ca_root}/rootCA.pem."
+    else
+        log_info "Installing mkcert local CA..."
+        TRUST_STORES="${TRUST_STORES:-system}" mkcert -install
+    fi
 
     local cert_file="${CERTS_DIR}/localhost.pem"
     local key_file="${CERTS_DIR}/localhost-key.pem"
