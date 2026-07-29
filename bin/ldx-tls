@@ -16,20 +16,46 @@ SCRIPT_DIR="$(get_script_dir)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|keystore> [--force]"
+    echo "Usage: $(basename "$0") <install|uninstall|keystore> [options]"
     echo ""
     echo "Commands:"
-    echo "  install    Generate certs, install into OS, and configure Traefik."
-    echo "             --force  Force regeneration of certificates if they exist."
-    echo "  uninstall  Remove certs and Traefik configuration."
-    echo "  keystore   Create a Java keystore with the root CA."
+    echo "  install [options]  Generate certs, install into OS, and configure Traefik."
+    echo "                     Options:"
+    echo "                       --force             Force regeneration of certificates if they exist."
+    echo "                       --domain, -d <name> Specify additional domain name(s) to include in certificate."
+    echo "                                           Can be specified multiple times, or comma/space separated."
+    echo "  uninstall          Remove certs and Traefik configuration."
+    echo "  keystore           Create a Java keystore with the root CA."
 }
 
 install_certs() {
     local force_regeneration=false
-    if [[ "${1:-}" == "--force" ]]; then
-        force_regeneration=true
-    fi
+    local extra_domains=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force)
+                force_regeneration=true
+                shift
+                ;;
+            --domain|-d)
+                if [[ -n "${2:-}" && ! "$2" =~ ^-- ]]; then
+                    local input_str="$2"
+                    shift 2
+                    input_str="${input_str//,/ }"
+                    read -r -a parsed_domains <<< "$input_str"
+                    extra_domains+=("${parsed_domains[@]}")
+                else
+                    fatal "Option $1 requires a domain name argument."
+                fi
+                ;;
+            *)
+                log_error "Unknown flag for install: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
 
     require_command "mkcert"
     require_command "kubectl"
@@ -50,14 +76,21 @@ install_certs() {
     if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
         log_info "Certificates already exist in ${CERTS_DIR}. Skipping generation. Use --force to override."
     else
-        log_info "Generating certificates..."
-        mkcert -cert-file "$cert_file" -key-file "$key_file" \
-            "localhost" "127.0.0.1" "::1" \
-            "*.rancher.localhost" \
-            "*.rd.localhost" \
-            "*.rogue.io" \
-            "localhost.rogue.io" \
-            "*.localhost.rogue.io"
+        local domains=(
+            "localhost"
+            "127.0.0.1"
+            "::1"
+            "*.rancher.localhost"
+            "*.rd.localhost"
+            "localtest.me"
+            "*.localtest.me"
+        )
+        if [ ${#extra_domains[@]} -gt 0 ]; then
+            domains+=("${extra_domains[@]}")
+        fi
+
+        log_info "Generating certificates for domains: ${domains[*]}..."
+        mkcert -cert-file "$cert_file" -key-file "$key_file" "${domains[@]}"
         log_info "Certificates generated successfully."
     fi
 
@@ -167,13 +200,17 @@ main() {
 
     case "$subcommand" in
         install)
-            install_certs "${1:-}"
+            install_certs "$@"
             ;;
         uninstall)
             uninstall_certs
             ;;
         keystore)
             create_keystore
+            ;;
+        help|-h|--help)
+            show_help
+            exit 0
             ;;
         *)
             log_error "Unknown subcommand: $subcommand"
