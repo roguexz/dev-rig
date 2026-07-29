@@ -21,6 +21,7 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 # Fallback default values if not specified in config file
+HOME="${HOME:-/var/root}"
 LOG_DIR="${LOG_DIR:-/var/log/cvescan}"
 STATE_FILE="${LOG_DIR}/state.json"
 PID_FILE="/var/run/cvescan.pid"
