@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-REPO="roguexz/dev-setup"
+REPO="roguexz/dev-rig"
 
 log_info() { echo -e "\033[0;32m[INFO]\033[0m $1"; }
 log_warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
@@ -46,7 +46,7 @@ else
 fi
 
 # Locate unpacked executable
-INSTALL_CMD="$(find "$TMP_DIR" -type f \( -name "ldx" -o -name "dev-setup" \) 2>/dev/null | head -n 1 || true)"
+INSTALL_CMD="$(find "$TMP_DIR" -type f \( -name "ldx" -o -name "dev-rig" -o -name "dev-setup" \) 2>/dev/null | head -n 1 || true)"
 
 if [ -z "$INSTALL_CMD" ]; then
   fatal "Could not locate 'ldx' binary in extracted source files."

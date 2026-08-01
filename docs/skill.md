@@ -1,6 +1,6 @@
 # `ldx skill` Documentation
 
-The `ldx skill` command provides management for Agent Skills bundled with `dev-setup`. Agent Skills are packaged in accordance with the Agent Skills specification and installed into `$HOME/.agents/skills/`.
+The `ldx skill` command provides management for Agent Skills bundled with `dev-rig`. Agent Skills are packaged in accordance with the Agent Skills specification and installed into `$HOME/.agents/skills/`.
 
 ---
 
@@ -59,7 +59,7 @@ Lifecycle scripts receive the following environment variables:
 | Variable | Description |
 | :--- | :--- |
 | `SKILL_NAME` | The folder name of the skill |
-| `SKILL_SOURCE_DIR` | Absolute path to source skill folder in `dev-setup` |
+| `SKILL_SOURCE_DIR` | Absolute path to source skill folder in `dev-rig` |
 | `SKILL_TARGET_DIR` | Absolute path to `$HOME/.agents/skills/<skill-name>` |
 | `INSTALL_MODE` | `copy` or `link` |
 

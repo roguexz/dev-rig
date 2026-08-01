@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ldx-skill - Manage Agent Skills bundled with dev-setup
+# ldx-skill - Manage Agent Skills bundled with dev-rig
 #
 
 set -euo pipefail
@@ -45,7 +45,7 @@ find_source_skills_dir() {
 SOURCE_SKILLS_DIR="$(find_source_skills_dir)"
 
 show_help() {
-  echo "ldx skill - Manage Agent Skills bundled in dev-setup"
+  echo "ldx skill - Manage Agent Skills bundled in dev-rig"
   echo ""
   echo "Usage: $(basename "$0") <command> [options]"
   echo ""

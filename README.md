@@ -26,17 +26,16 @@ Before using these scripts, ensure you have the following command-line tools ins
 
 ### Option 1: Remote One-Liner Installation (Recommended)
 
-Because this is a private GitHub repository, `raw.githubusercontent.com` requires authentication. You can install
-directly via the `gh` CLI:
+Install directly via `curl`:
 
 ```bash
-gh api repos/roguexz/dev-setup/contents/install.sh --jq '.content' | base64 -d | bash
+curl -fsSL https://raw.githubusercontent.com/roguexz/dev-rig/main/install.sh | bash
 ```
 
-Or using `curl` with a GitHub access token:
+Or via GitHub CLI (`gh`):
 
 ```bash
-curl -fsSL -H "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/roguexz/dev-setup/main/install.sh | bash
+gh api repos/roguexz/dev-rig/contents/install.sh --jq '.content' | base64 -d | bash
 ```
 
 This downloads the latest release tarball to a temporary directory, executes `ldx install` (copying executables into
@@ -48,8 +47,8 @@ This downloads the latest release tarball to a temporary directory, executes `ld
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/roguexz/dev-setup.git
-   cd dev-setup
+   git clone https://github.com/roguexz/dev-rig.git
+   cd dev-rig
    ```
 
 2. **Make the scripts executable:**
