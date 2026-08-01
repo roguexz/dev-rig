@@ -36,7 +36,8 @@ show_help() {
   echo "CLI Management:"
   echo "  install       Install ldx binaries into local bin directory (default: copy mode, use --link for symlinks)"
   echo ""
-  echo "System & Security Utilities:"
+  echo "Agent Skills & Utilities:"
+  echo "  skill         Manage agent skills (install, uninstall, list, info)"
   echo "  cvescan       Manage system-wide automated Grype vulnerability scanner"
   echo ""
   echo "Local Kubernetes & Infrastructure Setup (Rancher Desktop):"
@@ -96,7 +97,7 @@ install_binaries() {
 
   log_info "Installing ldx commands into '${target_dir}' using ${mode} mode..."
 
-  local scripts=("ldx" "ldx-cvescan" "ldx-certmanager" "ldx-litellm" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault")
+  local scripts=("ldx" "ldx-skill" "ldx-cvescan" "ldx-certmanager" "ldx-litellm" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault")
   local repo_dir="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
   local share_dir="$(cd "${target_dir}/.." &>/dev/null && pwd)/share/ldx"
   [ -z "$share_dir" ] && share_dir="${target_dir}/share/ldx"
@@ -119,6 +120,11 @@ install_binaries() {
       cp -R "${repo_dir}/cvescan/"* "${share_dir}/cvescan/"
       log_info "Copied cvescan/ assets -> ${share_dir}/cvescan/"
     fi
+    if [ -d "${repo_dir}/skills" ]; then
+      mkdir -p "${share_dir}/skills"
+      cp -R "${repo_dir}/skills/"* "${share_dir}/skills/"
+      log_info "Copied skills/ assets -> ${share_dir}/skills/"
+    fi
   else
     for script in "${scripts[@]}"; do
       if [ -f "${SCRIPT_DIR}/${script}" ]; then
@@ -139,6 +145,11 @@ install_binaries() {
       mkdir -p "${share_dir}"
       ln -snf "${repo_dir}/cvescan" "${share_dir}/cvescan"
       log_info "Linked cvescan/ assets -> ${share_dir}/cvescan/"
+    fi
+    if [ -d "${repo_dir}/skills" ]; then
+      mkdir -p "${share_dir}"
+      ln -snf "${repo_dir}/skills" "${share_dir}/skills"
+      log_info "Linked skills/ assets -> ${share_dir}/skills/"
     fi
   fi
 
@@ -170,7 +181,7 @@ case "$COMMAND" in
     install_binaries "$@"
     exit 0
     ;;
-  cvescan|tls|certmanager|otel|redis|postgres|vault|litellm)
+  skill|cvescan|tls|certmanager|otel|redis|postgres|vault|litellm)
     EXEC_SCRIPT="${SCRIPT_DIR}/ldx-${COMMAND}"
     ;;
   help|-h|--help)
