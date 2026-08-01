@@ -1,8 +1,13 @@
 # Local Development Experience CLI (`ldx`)
 
-This repository contains a set of modular scripts (`ldx-*`) to automate local development infrastructure (Rancher Desktop) and host system security tools on macOS.
+**`ldx` (Local Development Experience)** is a lightweight CLI toolkit designed to streamline local infrastructure and
+system security workflows on macOS. Powered by modular scripts (`ldx-*`), it provides a unified command line to spin up
+local Kubernetes environments, manage developer services (PostgreSQL, Vault), and execute security checks effortlessly.
+Direct usage of individual binaries (`ldx-vault`, `ldx-postgres`, etc.) is also fully supported.
 
-The primary entrypoint CLI is `ldx`, acting as a unified dispatcher for sub-commands managing specific tools, security utilities, and local infrastructure services. Direct usage of individual binaries (`ldx-vault`, `ldx-postgres`, etc.) is also fully supported.
+> [!NOTE]
+> This repository reflects my personal development preferences and opinions, built to maintain a consistent workflow
+when working across multiple laptops.
 
 ## Prerequisites
 
@@ -21,7 +26,8 @@ Before using these scripts, ensure you have the following command-line tools ins
 
 ### Option 1: Remote One-Liner Installation (Recommended)
 
-Because this is a private GitHub repository, `raw.githubusercontent.com` requires authentication. You can install directly via the `gh` CLI:
+Because this is a private GitHub repository, `raw.githubusercontent.com` requires authentication. You can install
+directly via the `gh` CLI:
 
 ```bash
 gh api repos/roguexz/dev-setup/contents/install.sh --jq '.content' | base64 -d | bash
@@ -33,7 +39,8 @@ Or using `curl` with a GitHub access token:
 curl -fsSL -H "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/roguexz/dev-setup/main/install.sh | bash
 ```
 
-This downloads the latest release tarball to a temporary directory, executes `ldx install` (copying executables into `$HOME/.local/bin`), and automatically cleans up temporary files.
+This downloads the latest release tarball to a temporary directory, executes `ldx install` (copying executables into
+`$HOME/.local/bin`), and automatically cleans up temporary files.
 
 ---
 
@@ -56,42 +63,44 @@ This downloads the latest release tarball to a temporary directory, executes `ld
    ```
    By default, this copies `ldx` and all `ldx-*` binaries to `$HOME/.local/bin` (or `$HOME/bin`).
 
-   - **Symlink option**: To keep installed binaries in sync with `git pull`, pass `--link`:
-     ```bash
-     ./bin/ldx install --link
-     ```
-   - **Custom target directory**:
-     ```bash
-     ./bin/ldx install --dir /custom/path/bin
-     ```
+    - **Symlink option**: To keep installed binaries in sync with `git pull`, pass `--link`:
+      ```bash
+      ./bin/ldx install --link
+      ```
+    - **Custom target directory**:
+      ```bash
+      ./bin/ldx install --dir /custom/path/bin
+      ```
 
 ---
 
 ### Shell PATH Configuration
 
-Ensure `$HOME/.local/bin` (or your chosen install directory) is present in your shell configuration (`~/.zshrc` or `~/.bashrc`):
+Ensure `$HOME/.local/bin` (or your chosen install directory) is present in your shell configuration (`~/.zshrc` or
+`~/.bashrc`):
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-After reloading your shell (`source ~/.zshrc`), `ldx` commands will be accessible from anywhere (e.g., `ldx-vault unseal`, `ldx postgres install`).
+After reloading your shell (`source ~/.zshrc`), `ldx` commands will be accessible from anywhere (e.g.,
+`ldx-vault unseal`, `ldx postgres install`).
 
 ## Available Commands
 
 The `ldx` CLI is modular, with each command managing a specific capability.
 
-| Command                            | Description                                                              | Direct Binary    |
-| ---------------------------------- | ------------------------------------------------------------------------ | ---------------- |
-| `ldx install [flags]`              | Installs `ldx` commands into `$HOME/.local/bin` (`--copy` default, `--link` flag). | `ldx install` |
-| `ldx cvescan <subcommand>`         | System-wide automated Grype vulnerability scanner LaunchDaemon.          | `ldx-cvescan`    |
-| `ldx tls <subcommand>`             | Manages local TLS certificates and Java keystores.                       | `ldx-tls`        |
-| `ldx certmanager <subcommand>`     | Installs and configures `cert-manager` for in-cluster certificates.      | `ldx-certmanager` |
-| `ldx otel <subcommand>`            | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).            | `ldx-otel`       |
-| `ldx redis <subcommand>`           | Deploys a Redis instance accessible from the host.                       | `ldx-redis`      |
-| `ldx postgres <subcommand>`        | Deploys a PostgreSQL instance with pgvector extension.                   | `ldx-postgres`   |
-| `ldx vault <subcommand>`           | Manages a local HashiCorp Vault deployment for secrets management.       | `ldx-vault`      |
-| `ldx litellm <subcommand>`         | Deploys a LiteLLM proxy instance backed by PostgreSQL.                   | `ldx-litellm`    |
+| Command                        | Description                                                                        | Direct Binary     |
+|--------------------------------|------------------------------------------------------------------------------------|-------------------|
+| `ldx install [flags]`          | Installs `ldx` commands into `$HOME/.local/bin` (`--copy` default, `--link` flag). | `ldx install`     |
+| `ldx cvescan <subcommand>`     | System-wide automated Grype vulnerability scanner LaunchDaemon.                    | `ldx-cvescan`     |
+| `ldx tls <subcommand>`         | Manages local TLS certificates and Java keystores.                                 | `ldx-tls`         |
+| `ldx certmanager <subcommand>` | Installs and configures `cert-manager` for in-cluster certificates.                | `ldx-certmanager` |
+| `ldx otel <subcommand>`        | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).                      | `ldx-otel`        |
+| `ldx redis <subcommand>`       | Deploys a Redis instance accessible from the host.                                 | `ldx-redis`       |
+| `ldx postgres <subcommand>`    | Deploys a PostgreSQL instance with pgvector extension.                             | `ldx-postgres`    |
+| `ldx vault <subcommand>`       | Manages a local HashiCorp Vault deployment for secrets management.                 | `ldx-vault`       |
+| `ldx litellm <subcommand>`     | Deploys a LiteLLM proxy instance backed by PostgreSQL.                             | `ldx-litellm`     |
 
 For detailed usage of each command, see the documentation below.
 
@@ -107,4 +116,5 @@ For detailed usage of each command, see the documentation below.
 - [**Vault (`vault`)**](./docs/vault.md)
 - [**LiteLLM Proxy (`litellm`)**](./docs/litellm.md)
 
-All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each capability also includes an `uninstall` command to cleanly remove all resources.
+All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each
+capability also includes an `uninstall` command to cleanly remove all resources.
