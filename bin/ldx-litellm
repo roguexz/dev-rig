@@ -16,11 +16,13 @@ SCRIPT_DIR="$(get_script_dir)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo "Usage: $(basename "$0") <install|uninstall|sync-omlx>"
     echo ""
     echo "Commands:"
-    echo "  install    Deploy LiteLLM proxy connected to PostgreSQL."
-    echo "  uninstall  Remove LiteLLM proxy deployment and services."
+    echo "  install       Deploy LiteLLM proxy connected to PostgreSQL."
+    echo "  uninstall     Remove LiteLLM proxy deployment and services."
+    echo "  sync-omlx     Sync omlx models to LiteLLM proxy (requires STORE_MODEL_IN_DB)."
+    echo "                  Use --dry-run to preview changes without applying them."
 }
 
 ensure_database() {
@@ -181,6 +183,291 @@ EOF
     log_info "Admin Master Key: sk-changeit"
 }
 
+sync_omlx_models() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local dry_run=false
+    if [ "${1:-}" = "--dry-run" ]; then
+        dry_run=true
+    fi
+
+    local namespace="commons"
+    local settings_file="${HOME}/.omlx/settings.json"
+
+    if [ ! -f "$settings_file" ]; then
+        fatal "omlx settings file not found at: $settings_file"
+    fi
+
+    # --- Read omlx port from settings.json ---
+    local omlx_port
+    omlx_port=$(jq -r '.server.port // 5033' "$settings_file")
+    log_info "omlx server port: $omlx_port"
+
+    # --- Read omlx API key from settings.json (skip verification if needed) ---
+    local omlx_api_key
+    omlx_api_key=$(jq -r '.auth.api_key // ""' "$settings_file")
+    local omlx_skip_verify
+    omlx_skip_verify=$(jq -r '.auth.skip_api_key_verification // false' "$settings_file")
+
+    local omlx_base="http://localhost:${omlx_port}"
+    log_info "omlx base URL: $omlx_base"
+
+    # --- Determine LiteLLM endpoint (try ingress first, then NodePort) ---
+    local litellm_url=""
+    if command -v kubectl &> /dev/null; then
+        # Try ingress host
+        litellm_url=$(kubectl get ingress -n "$namespace" litellm -o jsonpath='{.spec.rules[0].host}' 2>/dev/null || true)
+        if [ -n "$litellm_url" ]; then
+            litellm_url="https://${litellm_url}"
+        else
+            # Fallback to NodePort on localhost
+            local node_port
+            node_port=$(kubectl get svc -n "$namespace" litellm-host-access -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || true)
+            if [ -n "$node_port" ]; then
+                litellm_url="http://localhost:${node_port}"
+            fi
+        fi
+    fi
+
+    # Fallback to localhost:4000 if we couldn't determine the URL
+    if [ -z "$litellm_url" ]; then
+        litellm_url="http://localhost:4000"
+    fi
+    log_info "LiteLLM URL: $litellm_url"
+
+    local litellm_master_key="sk-changeit"
+    local auth_header="Authorization: Bearer ${litellm_master_key}"
+
+    # --- Fetch omlx models ---
+    log_info "Fetching models from omlx..."
+    local omlx_models_raw
+    if [ "$omlx_skip_verify" = "true" ]; then
+        omlx_models_raw=$(curl -sS "${omlx_base}/v1/models" 2>&1) || fatal "Failed to fetch models from omlx at ${omlx_base}/v1/models: ${omlx_models_raw}"
+    else
+        omlx_models_raw=$(curl -sS -H "Authorization: Bearer ${omlx_api_key}" "${omlx_base}/v1/models" 2>&1) || fatal "Failed to fetch models from omlx at ${omlx_base}/v1/models: ${omlx_models_raw}"
+    fi
+
+    if [ -z "$omlx_models_raw" ]; then
+        fatal "Failed to fetch models from omlx at ${omlx_base}/v1/models (empty response)"
+    fi
+
+    # Extract model IDs (exclude helper models like MarkItDown)
+    local omlx_models=()
+    while IFS= read -r model_id; do
+        # Skip helper/non-LLM models
+        case "$model_id" in
+            MarkItDown|nomicai-modernbert) continue ;;
+        esac
+        omlx_models+=("$model_id")
+    done < <(echo "$omlx_models_raw" | jq -r '.data[].id')
+
+    log_info "Found ${#omlx_models[@]} omlx models"
+
+    # --- Fetch existing LiteLLM models that use the omlx credential ---
+    log_info "Fetching existing omlx models from LiteLLM..."
+    local litellm_models_raw
+    litellm_models_raw=$(curl -sS -H "$auth_header" "${litellm_url}/model/info" 2>&1) || fatal "Failed to fetch models from LiteLLM at ${litellm_url}/model/info: ${litellm_models_raw}"
+
+    if [ -z "$litellm_models_raw" ]; then
+        fatal "Failed to fetch models from LiteLLM at ${litellm_url}/model/info (empty response)"
+    fi
+
+    # Build associative array of existing omlx models: model_name -> litellm_model_id
+    declare -A existing_models
+    while IFS='|' read -r model_name litellm_model_id; do
+        existing_models["$model_name"]="$litellm_model_id"
+    done < <(echo "$litellm_models_raw" | jq -r '.data[] | select(.litellm_params.litellm_credential_name == "omlx") | "\(.model_name)|\(.model_info.id)"')
+
+    log_info "Found ${#existing_models[@]} existing omlx models in LiteLLM"
+
+    # --- Determine to-create and to-delete sets ---
+    local -a to_create=()
+    local -a to_delete=()
+
+    # Models in omlx that are not yet in litellm
+    for model_id in "${omlx_models[@]}"; do
+        local proposed_name="omlx-${model_id}"
+        if [ -z "${existing_models[$proposed_name]+x}" ]; then
+            to_create+=("$model_id")
+        fi
+    done
+
+    # Models in litellm (omlx-credentialed) that are not in omlx
+    for model_name in "${!existing_models[@]}"; do
+        # Strip the "omlx-" prefix to get the underlying model id
+        local underlying_model="${model_name#omlx-}"
+        if [[ ! " ${omlx_models[*]} " =~ " ${underlying_model} " ]]; then
+            to_delete+=("${existing_models[$model_name]}")
+        fi
+    done
+
+    log_info "Models to create: ${#to_create[@]}"
+    log_info "Models to delete: ${#to_delete[@]}"
+
+    # --- Interactive approval ---
+    if [ ${#to_create[@]} -gt 0 ]; then
+        echo ""
+        echo "Models to ADD to LiteLLM:"
+        for i in "${!to_create[@]}"; do
+            local model_id="${to_create[$i]}"
+            echo "  [$((i+1))] ${model_id}"
+        done
+
+        # Prompt for custom names or accept defaults
+        declare -A model_names
+        for i in "${!to_create[@]}"; do
+            local model_id="${to_create[$i]}"
+            local default_name="omlx-${model_id}"
+
+            if [ "$dry_run" = "true" ]; then
+                echo ""
+                echo "  Would add '${model_id}' as '${default_name}'"
+                model_names["$model_id"]="$default_name"
+                continue
+            fi
+
+            echo ""
+            read -r -p "  Enter name for '${model_id}' [${default_name}]: " custom_name
+            if [ -z "$custom_name" ]; then
+                custom_name="$default_name"
+            fi
+
+            # Handle naming conflicts with existing litellm models
+            if [ -n "${existing_models[$custom_name]+x}" ]; then
+                echo "  WARNING: Name '${custom_name}' already exists in LiteLLM (ID: ${existing_models[$custom_name]})"
+                read -r -p "  Overwrite? (y/N): " overwrite
+                if [ "$overwrite" != "y" ] && [ "$overwrite" != "Y" ]; then
+                    echo "  Skipping '${model_id}'"
+                    unset 'to_create[i]'
+                    continue
+                fi
+                # Mark for deletion of the old one
+                to_delete+=("${existing_models[$custom_name]}")
+            fi
+
+            model_names["$model_id"]="$custom_name"
+        done
+    else
+        echo ""
+        log_info "No new models to add."
+    fi
+
+    if [ ${#to_delete[@]} -gt 0 ]; then
+        echo ""
+        echo "Models to DELETE from LiteLLM:"
+        for model_id in "${to_delete[@]}"; do
+            echo "  [ID: ${model_id}]"
+        done
+    fi
+
+    if [ ${#to_create[@]} -eq 0 ] && [ ${#to_delete[@]} -eq 0 ]; then
+        log_info "Nothing to do. omlx and LiteLLM models are in sync."
+        return 0
+    fi
+
+    if [ "$dry_run" = "true" ]; then
+        echo ""
+        log_info "[DRY RUN] No changes will be made. Run without --dry-run to apply."
+        return 0
+    fi
+
+    echo ""
+    read -r -p "Proceed with these changes? (y/N): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        log_info "Aborted by user."
+        return 0
+    fi
+
+    # --- Ensure omlx credential exists ---
+    log_info "Checking for 'omlx' credential..."
+    local cred_exists
+    cred_exists=$(curl -sS -H "$auth_header" "${litellm_url}/credentials" 2>&1 | jq -r '.credentials[] | select(.credential_name == "omlx") | .credential_name' 2>/dev/null || true)
+
+    if [ -z "$cred_exists" ]; then
+        log_info "Creating 'omlx' credential..."
+        local cred_payload
+        if [ "$omlx_skip_verify" = "true" ]; then
+            cred_payload=$(jq -n --arg base "${omlx_base}" '{
+                credential_name: "omlx",
+                credential_values: { api_base: $base }
+            }')
+        else
+            cred_payload=$(jq -n --arg base "${omlx_base}" --arg key "${omlx_api_key}" '{
+                credential_name: "omlx",
+                credential_values: { api_base: $base, api_key: $key }
+            }')
+        fi
+
+        local cred_resp
+        cred_resp=$(curl -sS -X POST "${litellm_url}/credentials" \
+            -H "$auth_header" \
+            -H "Content-Type: application/json" \
+            -d "$cred_payload" 2>&1) || fatal "Failed to create omlx credential: ${cred_resp}"
+
+        log_info "Created 'omlx' credential."
+    else
+        log_info "'omlx' credential already exists."
+    fi
+
+    # --- Create new models ---
+    local created=0
+    for model_id in "${to_create[@]}"; do
+        [ -z "$model_id" ] && continue
+
+        local model_name="${model_names[$model_id]}"
+        [ -z "$model_name" ] && model_name="omlx-${model_id}"
+
+        log_info "Adding model '${model_name}' -> ${model_id}..."
+
+        local payload
+        payload=$(jq -n --arg name "$model_name" --arg model "$model_id" '{
+            model_name: $name,
+            litellm_params: {
+                model: $model,
+                custom_llm_provider: "openai",
+                litellm_credential_name: "omlx"
+            }
+        }')
+
+        local resp
+        resp=$(curl -sS -X POST "${litellm_url}/model/new" \
+            -H "$auth_header" \
+            -H "Content-Type: application/json" \
+            -d "$payload" 2>&1) || { log_warn "Failed to create '${model_name}': ${resp}"; continue; }
+
+        if [ -n "$resp" ]; then
+            log_info "Created '${model_name}'."
+            created=$((created + 1))
+        else
+            log_warn "Failed to create '${model_name}' (empty response)."
+        fi
+    done
+
+    # --- Delete obsolete models ---
+    local deleted=0
+    for model_id in "${to_delete[@]}"; do
+        [ -z "$model_id" ] && continue
+
+        log_info "Deleting model ID '${model_id}'..."
+        local resp
+        resp=$(curl -sS -X POST "${litellm_url}/model/delete" \
+            -H "$auth_header" \
+            -H "Content-Type: application/json" \
+            -d "{\"id\": \"${model_id}\"}" 2>&1) || { log_warn "Failed to delete model ID '${model_id}': ${resp}"; continue; }
+
+        if [ -n "$resp" ]; then
+            log_info "Deleted model ID '${model_id}'."
+            deleted=$((deleted + 1))
+        else
+            log_warn "Failed to delete model ID '${model_id}' (empty response)."
+        fi
+    done
+
+    echo ""
+    log_info "Sync complete: ${created} created, ${deleted} deleted."
+}
+
 uninstall_litellm() {
     require_command "kubectl"
 
@@ -195,20 +482,52 @@ uninstall_litellm() {
 }
 
 main() {
+    # Handle --help / -h before any subcommand
     if [ $# -eq 0 ]; then
         show_help
         exit 1
     fi
+
+    case "$1" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+    esac
 
     local subcommand="$1"
     shift
 
     case "$subcommand" in
         install)
+            if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+                echo "Usage: $(basename "$0") install"
+                echo ""
+                echo "Deploy LiteLLM proxy connected to PostgreSQL."
+                exit 0
+            fi
             install_litellm
             ;;
         uninstall)
+            if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+                echo "Usage: $(basename "$0") uninstall"
+                echo ""
+                echo "Remove LiteLLM proxy deployment and services."
+                exit 0
+            fi
             uninstall_litellm
+            ;;
+        sync-omlx)
+            if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+                echo "Usage: $(basename "$0") sync-omlx [--dry-run]"
+                echo ""
+                echo "Sync omlx models to LiteLLM proxy."
+                echo ""
+                echo "Options:"
+                echo "  --dry-run   Preview changes without applying them."
+                exit 0
+            fi
+            sync_omlx_models "$@"
             ;;
         *)
             log_error "Unknown subcommand: $subcommand"
