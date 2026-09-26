@@ -18,7 +18,8 @@ This is the main setup command. It performs the following actions idempotently:
     - `::1`
     - `*.rancher.localhost`
     - `*.rd.localhost`
-    - `localtest.me` (points to `127.0.0.1`, see [localtest.me](https://github.com/localtest-dot-me/localtest-dot-me.github.com))
+    - `localtest.me` (points to `127.0.0.1`,
+      see [localtest.me](https://github.com/localtest-dot-me/localtest-dot-me.github.com))
     - `*.localtest.me`
 3. **Creates a Kubernetes Secret:** Creates a `Secret` named `default-tls-secret` in the `kube-system` namespace
    containing the generated certificate and key.
@@ -28,7 +29,8 @@ This is the main setup command. It performs the following actions idempotently:
 #### Options & Custom Domains
 
 - `--force`: Force certificate regeneration even if certificates already exist in `~/.cache/local-dev/certs/`.
-- `--domain <domain>` or `-d <domain>`: Include additional domain names in the generated certificate. Can be specified multiple times, or as comma/space-separated values.
+- `--domain <domain>` or `-d <domain>`: Include additional domain names in the generated certificate. Can be specified
+  multiple times, or as comma/space-separated values.
 
 **Examples:**
 
@@ -45,13 +47,17 @@ ldx tls install --force -d "myproject.local,*.myproject.local"
 
 ## Amending Existing Certificates
 
-If you already have generated certificates and want to add or modify domain names (such as adding custom internal domain names like `localhost.rogue.io`):
+If you already have generated certificates and want to add or modify domain names (such as adding custom internal domain
+names like `localhost.rogue.io`):
 
 1. You **do not** need to manually delete your existing certificate files or uninstall the Kubernetes secrets first.
-2. Run `ldx tls install` with `--force` and pass your desired `--domain` flags. `mkcert` will overwrite the local `.pem` files with a newly generated certificate containing both default domains and your specified additional domains.
-3. `kubectl apply` will seamlessly update the Kubernetes Secret (`default-tls-secret`), and Traefik will automatically pick up the updated certificate.
+2. Run `ldx tls install` with `--force` and pass your desired `--domain` flags. `mkcert` will overwrite the local `.pem`
+   files with a newly generated certificate containing both default domains and your specified additional domains.
+3. `kubectl apply` will seamlessly update the Kubernetes Secret (`default-tls-secret`), and Traefik will automatically
+   pick up the updated certificate.
 
 **Example:**
+
 ```bash
 ldx tls install --force --domain "localhost.rogue.io" --domain "*.localhost.rogue.io"
 ```

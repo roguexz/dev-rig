@@ -1,19 +1,28 @@
 # System-Wide Automated Vulnerability Scanner (`cvescan`)
 
-The `cvescan` module configures a system-wide daily vulnerability scanner on macOS using Anchore **Grype**, macOS **LaunchDaemon** (`launchd`), and **terminal-notifier**.
+The `cvescan` module configures a system-wide daily vulnerability scanner on macOS using Anchore **Grype**, macOS
+**LaunchDaemon** (`launchd`), and **terminal-notifier**.
 
 ---
 
 ## Capabilities & Features
 
 - **Anchore Grype Scanner Engine:**
-  - Natively indexes and scans compiled `.jar` files in Gradle/Maven caches (`~/.gradle/caches/`), Python packages inside `uv tool` app bundles (`~/.local/share/uv/tools/`), macOS applications (`/Applications`), and project repositories (`/Users/.../code`).
-- **Daily Scheduled Scans:** Scheduled via `launchd` (`/Library/LaunchDaemons/com.system.cvescan.plist`) to execute daily at 02:00 AM.
-- **Sleep & Power Catch-Up:** Uses `<key>RunAtLoad</key><true/>` to automatically run missed scans when your Mac wakes up or boots.
-- **Fast Fingerprint Change Detection:** Calculates directory `mtime` metadata fingerprints across target directories before invoking Grype. If no application or dependency files have changed, the scan completes in **under 1 second**.
-- **Monthly Deep Scan:** Automatically performs a complete vulnerability scan on the 1st of every month (or if >30 days have passed), bypassing fingerprint caches.
-- **Desktop Notifications:** Sends macOS desktop alerts via `terminal-notifier` on scan completion (`⚠️ Alert` vs `✅ Clean`). Clicking notification opens log.
-- **Rolling Log History:** Retains the last 3 scan execution logs and JSON reports in `/var/log/cvescan/` (or `~/.cache/cvescan/` in user mode).
+    - Natively indexes and scans compiled `.jar` files in Gradle/Maven caches (`~/.gradle/caches/`), Python packages
+      inside `uv tool` app bundles (`~/.local/share/uv/tools/`), macOS applications (`/Applications`), and project
+      repositories (`/Users/.../code`).
+- **Daily Scheduled Scans:** Scheduled via `launchd` (`/Library/LaunchDaemons/com.system.cvescan.plist`) to execute
+  daily at 02:00 AM.
+- **Sleep & Power Catch-Up:** Uses `<key>RunAtLoad</key><true/>` to automatically run missed scans when your Mac wakes
+  up or boots.
+- **Fast Fingerprint Change Detection:** Calculates directory `mtime` metadata fingerprints across target directories
+  before invoking Grype. If no application or dependency files have changed, the scan completes in **under 1 second**.
+- **Monthly Deep Scan:** Automatically performs a complete vulnerability scan on the 1st of every month (or if >30 days
+  have passed), bypassing fingerprint caches.
+- **Desktop Notifications:** Sends macOS desktop alerts via `terminal-notifier` on scan completion (`⚠️ Alert` vs
+  `✅ Clean`). Clicking notification opens log.
+- **Rolling Log History:** Retains the last 3 scan execution logs and JSON reports in `/var/log/cvescan/` (or
+  `~/.cache/cvescan/` in user mode).
 - **User-Space & Root Protection:** Automatically falls back to `~/.cache/cvescan/` when run as a regular non-root user.
 
 ---
@@ -43,6 +52,7 @@ sudo ldx cvescan install
 ```
 
 **What this command does:**
+
 1. Copies `cvescan/cvescan.sh` to `/usr/local/bin/cvescan.sh` (`root:wheel`, `755`).
 2. Copies `cvescan/com.system.cvescan.plist` to `/Library/LaunchDaemons/com.system.cvescan.plist` (`root:wheel`, `644`).
 3. Installs default configuration to `/usr/local/etc/cvescan.conf` if not already present.
@@ -55,6 +65,7 @@ sudo ldx cvescan install
 The `ldx cvescan` tool provides full lifecycle management:
 
 ### Check Status & Dry-Run Verification
+
 ```bash
 # Display service status, state JSON, and binary paths
 ldx cvescan status
@@ -67,6 +78,7 @@ ldx cvescan dry-run -t /Users/rogue/code/my-project
 ```
 
 ### Trigger Manual Scan & Target Specific Folders
+
 ```bash
 # Trigger standard quick scan (uses default /Applications and /Users)
 ldx cvescan trigger
@@ -82,6 +94,7 @@ ldx cvescan trigger --full
 ```
 
 ### View Scan Logs & HTML Visual Reports
+
 ```bash
 # Open the interactive visual HTML report in your default browser
 ldx cvescan report
@@ -99,11 +112,13 @@ ldx cvescan logs --run 2
 ```
 
 ### View Configuration
+
 ```bash
 ldx cvescan config
 ```
 
 ### Uninstall
+
 ```bash
 sudo ldx cvescan uninstall
 ```
@@ -143,11 +158,12 @@ EXCLUDE_PATTERNS=(
 
 ## System vs User-Space Log Locations
 
-- **System Daemon Mode (`sudo` / `launchctl`):**  
-  - Log Directory: `/var/log/cvescan/`
-  - Scan Log: `/var/log/cvescan/grype_scan_1.log`
-  - State File: `/var/log/cvescan/state.json`
+- **System Daemon Mode (`sudo` / `launchctl`):**
+    - Log Directory: `/var/log/cvescan/`
+    - Scan Log: `/var/log/cvescan/grype_scan_1.log`
+    - State File: `/var/log/cvescan/state.json`
 
-- **Standalone User Mode (Non-root standalone execution):**  
-  - If `/var/log/cvescan` is not writable, the script automatically falls back to user space: `~/.cache/cvescan/` (e.g. `~/.cache/cvescan/grype_scan_1.log` & `~/.cache/cvescan/state.json`).
-  - Supports path expansion for tilde paths (`~/.gradle/caches/`, etc.).
+- **Standalone User Mode (Non-root standalone execution):**
+    - If `/var/log/cvescan` is not writable, the script automatically falls back to user space: `~/.cache/cvescan/`
+      (e.g. `~/.cache/cvescan/grype_scan_1.log` & `~/.cache/cvescan/state.json`).
+    - Supports path expansion for tilde paths (`~/.gradle/caches/`, etc.).
