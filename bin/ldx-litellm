@@ -284,6 +284,8 @@ sync_omlx_models() {
     # --- Determine to-create and to-delete sets ---
     local -a to_create=()
     local -a to_delete=()
+    # litellm_model_id -> model_name as registered on LiteLLM (for readable output)
+    declare -A delete_names=()
 
     # Models in omlx that are not yet in litellm
     for model_id in "${omlx_models[@]}"; do
@@ -299,6 +301,7 @@ sync_omlx_models() {
         local underlying_model="${model_name#omlx-}"
         if [[ ! " ${omlx_models[*]} " =~ " ${underlying_model} " ]]; then
             to_delete+=("${existing_models[$model_name]}")
+            delete_names["${existing_models[$model_name]}"]="$model_name"
         fi
     done
 
@@ -344,6 +347,7 @@ sync_omlx_models() {
                 fi
                 # Mark for deletion of the old one
                 to_delete+=("${existing_models[$custom_name]}")
+                delete_names["${existing_models[$custom_name]}"]="$custom_name"
             fi
 
             model_names["$model_id"]="$custom_name"
@@ -357,7 +361,13 @@ sync_omlx_models() {
         echo ""
         echo "Models to DELETE from LiteLLM:"
         for model_id in "${to_delete[@]}"; do
-            echo "  [ID: ${model_id}]"
+            [ -z "$model_id" ] && continue
+            local model_name="${delete_names[$model_id]:-}"
+            if [ -n "$model_name" ]; then
+                echo "  ${model_name}  [ID: ${model_id}]"
+            else
+                echo "  [ID: ${model_id}]"
+            fi
         done
     fi
 
@@ -449,18 +459,20 @@ sync_omlx_models() {
     for model_id in "${to_delete[@]}"; do
         [ -z "$model_id" ] && continue
 
-        log_info "Deleting model ID '${model_id}'..."
+        local model_label="${delete_names[$model_id]:-$model_id}"
+
+        log_info "Deleting model '${model_label}' (ID: ${model_id})..."
         local resp
         resp=$(curl -sS -X POST "${litellm_url}/model/delete" \
             -H "$auth_header" \
             -H "Content-Type: application/json" \
-            -d "{\"id\": \"${model_id}\"}" 2>&1) || { log_warn "Failed to delete model ID '${model_id}': ${resp}"; continue; }
+            -d "{\"id\": \"${model_id}\"}" 2>&1) || { log_warn "Failed to delete model '${model_label}' (ID: ${model_id}): ${resp}"; continue; }
 
         if [ -n "$resp" ]; then
-            log_info "Deleted model ID '${model_id}'."
+            log_info "Deleted model '${model_label}'."
             deleted=$((deleted + 1))
         else
-            log_warn "Failed to delete model ID '${model_id}' (empty response)."
+            log_warn "Failed to delete model '${model_label}' (empty response)."
         fi
     done
 
