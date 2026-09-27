@@ -10,6 +10,11 @@ unseal process.
 
 This command installs Vault, creates a default admin user, and exposes the UI via a Traefik Ingress.
 
+### `ldx vault status`
+
+This command shows the current status of the Vault installation, including whether the pod is running,
+whether Vault is sealed or unsealed, and the URLs to access it.
+
 ### `ldx vault unseal` (or `ldx-vault unseal`)
 
 This command unseals the Vault after a restart. You can run this directly from any directory once `ldx` binaries are

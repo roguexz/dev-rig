@@ -16,10 +16,11 @@ SCRIPT_DIR="$(get_script_dir)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <setup|unseal|seal|uninstall> [options]"
+    echo "Usage: $(basename "$0") <setup|status|unseal|seal|uninstall> [options]"
     echo ""
     echo "Commands:"
     echo "  setup      Install Vault, initialize it, and store keys."
+    echo "  status     Show the current status of the Vault installation."
     echo "  unseal     Unseal the Vault using stored keys."
     echo "  seal       Seal the Vault."
     echo "  uninstall  Remove Vault and its stored keys."
@@ -30,6 +31,42 @@ show_help() {
     echo "  --disable-userpass             Disable the default 'admin' userpass login (useful if relying purely on OIDC)"
     echo ""
     echo "Alternatively, you can set OIDC_CLIENT_ID and OIDC_CLIENT_SECRET environment variables."
+}
+
+status_vault() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local namespace="commons"
+
+    # Check if pod exists
+    local phase
+    phase=$(kubectl get pods vault-0 -n "$namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+
+    if [ -z "$phase" ]; then
+        log_info "Vault is not installed. Run 'setup' to install it."
+        return
+    fi
+
+    if [ "$phase" != "Running" ]; then
+        log_warn "Vault pod is in '$phase' state (not Running)."
+        return
+    fi
+
+    # Pod is running, check sealed status
+    local sealed
+    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+
+    if [ "$sealed" = "true" ]; then
+        log_warn "Vault is running but sealed. Run 'unseal' to unseal it."
+    elif [ "$sealed" = "false" ]; then
+        log_info "Vault is running and unsealed."
+    else
+        log_warn "Vault pod is Running but could not determine seal status."
+    fi
+
+    log_info "Access URL: https://vault.rogue.io"
+    log_info "In-cluster URL: http://vault.commons.svc.cluster.local:8200"
 }
 
 setup_vault() {
@@ -251,6 +288,9 @@ main() {
                 esac
             done
             setup_vault
+            ;;
+        status)
+            status_vault
             ;;
         unseal)
             unseal_vault
