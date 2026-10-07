@@ -244,7 +244,7 @@ generate_html_report() {
   fi
 
   "$PYTHON_BIN" - "$json_file" "$html_file" "$ts" "$mode" "$targets_str" "$0" << 'PYEOF'
-import json, sys, os, html
+import json, sys, os, re, html
 
 json_file = sys.argv[1]
 html_file = sys.argv[2]
@@ -289,125 +289,133 @@ def resolve_abs_path(raw_path):
         return os.path.abspath(os.path.join(target_dirs[0], clean_rel))
     return raw_path
 
-# Group vulnerabilities by resolved file location and package
-grouped = {}
+# Bucket each finding under the application / toolchain folder that
+# contains it, so the report can be browsed per-app instead of as one
+# flat finding list. First matching pattern wins.
+APP_PATTERNS = [
+    (r'([^/]+\.app)(?:/|$)', 1),                          # /Applications/Foo.app/...
+    (r'/Library/Application Support/([^/]+)(?:/|$)', 1),   # per-app support folders
+    (r'/Library/Caches/([^/]+)(?:/|$)', 1),               # per-app caches
+    (r'/([^/]+)/Contents/(?:Library|Resources|Frameworks|MacOS)/', 1),
+    (r'(/\.cargo/)', 1),                                   # cargo registry + cache
+    (r'(/\.gradle/)', 1),                                  # gradle caches
+    (r'/\.cache/([^/]+)(?:/|$)', 1),                       # ~/.cache/<tool>
+    (r'/\.local/share/([^/]+)(?:/|$)', 1),                # ~/.local/share/<tool>
+    (r'/Users/[^/]+/([^/]+)/', 1),                         # misc folder under home
+]
+
+def app_bucket(real_path):
+    if real_path == 'N/A':
+        return 'Other'
+    for pattern, group in APP_PATTERNS:
+        m = re.search(pattern, real_path)
+        if m:
+            return m.group(group)
+    return '/'.join(real_path.split('/')[:3]) or 'Other'
+
+# Files that merely *declare* a dependency version (a pin or lockfile)
+# rather than containing the artifact itself. A `Django==5.1.5` line in a
+# requirements file proves nothing is installed — just that some tool
+# pinned that version somewhere.
+DECL_BASENAMES = {'go.mod', 'go.sum', 'Cargo.toml', 'build.gradle', 'build.gradle.kts'}
+REQ_PIN_RE = re.compile(r'(?:(?:test|dev|extra)-)?requirements(?:-\d+(?:\.\d+)*)?\.txt$')
+
+def is_declaration(path):
+    base = path.split('/')[-1]
+    if base in DECL_BASENAMES or base.endswith('.lock'):
+        return True
+    return bool(REQ_PIN_RE.match(base))
+
+# One row per (app, package, version) — a package that shows up in
+# several locations (e.g. two Cargo.lock files) stays a single row.
+rows = {}
 
 for m in matches:
     artifact = m.get('artifact', {})
     pkg_name = str(artifact.get('name', 'N/A'))
     pkg_ver = str(artifact.get('version', 'N/A'))
     pkg_type = str(artifact.get('type', 'N/A'))
-    
-    locs = artifact.get('locations', [])
-    raw_loc_path = locs[0].get('path', 'N/A') if locs else 'N/A'
-    abs_loc_path = resolve_abs_path(raw_loc_path)
-    
-    key = (abs_loc_path, pkg_name, pkg_ver)
-    
-    if key not in grouped:
-        grouped[key] = {
-            'pkg_name': pkg_name,
-            'pkg_ver': pkg_ver,
-            'pkg_type': pkg_type,
-            'loc_path': abs_loc_path,
-            'max_severity': 'UNKNOWN',
-            'max_weight': 0,
-            'cves': [],
-            'fix_versions': set()
-        }
-        
-    group = grouped[key]
+
     vuln = m.get('vulnerability', {})
     vuln_id = str(vuln.get('id', 'N/A'))
     severity = str(vuln.get('severity', 'Unknown')).upper()
     weight = SEVERITY_WEIGHTS.get(severity, 0)
-    
-    if weight > group['max_weight']:
-        group['max_weight'] = weight
-        group['max_severity'] = severity
-        
-    fix_info = vuln.get('fix', {})
-    for fver in fix_info.get('versions', []):
-        if fver:
-            group['fix_versions'].add(fver)
-            
-    group['cves'].append({
-        'id': vuln_id,
-        'severity': severity
+    fix_versions = [v for v in vuln.get('fix', {}).get('versions', []) if v]
+
+    locs = artifact.get('locations', [])
+    paths = sorted({resolve_abs_path(loc.get('path', 'N/A')) for loc in locs}) or ['N/A']
+
+    for path in paths:
+        app = app_bucket(path)
+        key = (app, pkg_name, pkg_ver, pkg_type)
+
+        row = rows.get(key)
+        if row is None:
+            row = {
+                'app': app, 'pkg': pkg_name, 'ver': pkg_ver, 'type': pkg_type,
+                'worst': 'UNKNOWN', 'weight': 0, 'cves': {}, 'fixes': set(),
+                'locs': set(), 'declared': True,
+            }
+            rows[key] = row
+
+        if weight > row['weight']:
+            row['weight'] = weight
+            row['worst'] = severity
+
+        row['cves'].setdefault(vuln_id, severity)
+        row['fixes'].update(fix_versions)
+        row['locs'].update(paths)
+        if not is_declaration(path):
+            row['declared'] = False
+
+row_list = []
+for (app, pkg, ver, typ), row in rows.items():
+    row_list.append({
+        'app': app, 'pkg': pkg, 'ver': ver, 'type': typ,
+        'worst': row['worst'], 'weight': row['weight'],
+        'cves': sorted(row['cves'].items()),
+        'fixes': sorted(row['fixes']),
+        'locs': sorted(row['locs']),
+        'evidence': 'declared' if row['declared'] else 'installed',
     })
 
-crit_count = sum(1 for m in matches if str(m.get('vulnerability', {}).get('severity', '')).upper() == 'CRITICAL')
-high_count = sum(1 for m in matches if str(m.get('vulnerability', {}).get('severity', '')).upper() == 'HIGH')
-med_count = sum(1 for m in matches if str(m.get('vulnerability', {}).get('severity', '')).upper() == 'MEDIUM')
-low_count = sum(1 for m in matches if str(m.get('vulnerability', {}).get('severity', '')).upper() not in ['CRITICAL', 'HIGH', 'MEDIUM'])
+# Sidebar entries: apps sorted by worst severity, then by finding count
+app_rows = {}
+for (app, pkg, ver, typ), row in rows.items():
+    app_rows.setdefault(app, []).append(row)
 
-groups_html = []
-for idx, ((loc_path, pkg_name, pkg_ver), group) in enumerate(grouped.items()):
-    sev = group['max_severity']
-    badge_cls = f"badge-{sev.lower()}"
-    
-    fix_str = html.escape(', '.join(sorted(group['fix_versions'])) if group['fix_versions'] else 'N/A')
-    
-    cve_links = []
-    for cve in group['cves']:
-        cid = html.escape(cve['id'])
-        csev = cve['severity'].lower()
-        cve_links.append(f'<a href="https://nvd.nist.gov/vuln/detail/{cid}" target="_blank" class="cve-tag cve-{csev}">{cid}</a>')
-    
-    cve_tags_html = " ".join(cve_links)
-    cve_count = len(group['cves'])
-    
-    safe_path = html.escape(loc_path)
-    safe_pkg = html.escape(pkg_name)
-    safe_ver = html.escape(pkg_ver)
-    safe_type = html.escape(group['pkg_type'])
-    
-    groups_html.append(f"""
-    <tbody class="vuln-group" data-severity="{group['max_weight']}" data-package="{safe_pkg}" data-installed="{safe_ver}" data-fixed="{fix_str}" data-vulnerabilities="{cve_count}" data-type="{safe_type}" data-location="{safe_path}">
-      <tr class="main-row">
-        <td><span class="badge {badge_cls}">{sev}</span></td>
-        <td><strong>{safe_pkg}</strong></td>
-        <td><code>{safe_ver}</code></td>
-        <td><code>{fix_str}</code></td>
-        <td>
-          <div class="cve-container">
-            <span class="cve-count-pill">{cve_count} CVE{"s" if cve_count > 1 else ""}</span>
-            <div class="cve-tags">{cve_tags_html}</div>
-          </div>
-        </td>
-        <td colspan="2"><span class="type-tag">{safe_type}</span></td>
-      </tr>
-      <tr class="location-row">
-        <td colspan="7">
-          <div class="location-container">
-            <div class="location-info">
-              <svg class="location-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
-              <span class="location-label">LOCATION</span>
-              <span class="location-path" id="path-val-{idx}">{safe_path}</span>
-            </div>
-            <button class="copy-btn" onclick="copyToClipboard('path-val-{idx}', this)">
-              <svg class="copy-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-              <span>Copy Path</span>
-            </button>
-          </div>
-        </td>
-      </tr>
-    </tbody>
-    """)
+apps = []
+for app, app_rows in app_rows.items():
+    worst_weight = max(r['weight'] for r in app_rows)
+    worst_sev = next(k for k, v in SEVERITY_WEIGHTS.items() if v == worst_weight)
+    apps.append({'id': html.escape(app), 'label': html.escape(app),
+                 'count': len(app_rows), 'worst': worst_sev})
+apps.sort(key=lambda a: (SEVERITY_WEIGHTS[a['worst']], a['count']), reverse=True)
 
-table_body = "\n".join(groups_html) if groups_html else """
-<tbody class="vuln-group">
-  <tr>
-    <td colspan="7" style="text-align:center; padding: 32px; color: #8b949e;">
-      No vulnerabilities detected in scanned directories. 🎉
-    </td>
-  </tr>
-</tbody>
-"""
+for r in row_list:
+    r['locs'] = [html.escape(p) for p in r['locs']]
+    r['fixes'] = [html.escape(v) for v in r['fixes']]
+    r['cves'] = [[html.escape(c), s] for c, s in r['cves']]
+    r['app'] = html.escape(r['app'])
+    r['pkg'] = html.escape(r['pkg'])
+    r['ver'] = html.escape(r['ver'])
+    r['type'] = html.escape(r['type'])
 
-script_dir = os.path.dirname(os.path.abspath(script_path)) if script_path else ''
+def sev_count(label):
+    return sum(1 for m in matches
+               if str(m.get('vulnerability', {}).get('severity', 'Unknown')).upper() == label)
+
+stats = {
+    'total': len(row_list),
+    'critical': sev_count('CRITICAL'),
+    'high': sev_count('HIGH'),
+    'medium': sev_count('MEDIUM'),
+    'low': len(matches) - sev_count('CRITICAL') - sev_count('HIGH') - sev_count('MEDIUM'),
+}
+
+template_dir = os.path.dirname(os.path.abspath(script_path)) if script_path else ''
 template_candidates = [
-    os.path.join(script_dir, 'report_template.html'),
+    os.path.join(template_dir, 'report_template.html'),
     '/usr/local/bin/report_template.html',
     '/usr/local/share/ldx/cvescan/report_template.html',
     os.path.expanduser('~/.local/share/ldx/cvescan/report_template.html')
@@ -426,14 +434,16 @@ for cand in template_candidates:
 if not template_content:
     sys.exit(0)
 
+payload = json.dumps({'apps': apps, 'rows': row_list, 'stats': stats}).replace('</', '<\\/')
+
 html_content = template_content \
     .replace('{{TIMESTAMP}}', html.escape(timestamp)) \
     .replace('{{SCAN_MODE}}', html.escape(scan_mode)) \
-    .replace('{{TOTAL_COUNT}}', str(len(grouped))) \
-    .replace('{{CRIT_COUNT}}', str(crit_count)) \
-    .replace('{{HIGH_COUNT}}', str(high_count)) \
-    .replace('{{MED_LOW_COUNT}}', str(med_count + low_count)) \
-    .replace('{{TABLE_BODY}}', table_body)
+    .replace('{{TOTAL_COUNT}}', str(stats['total'])) \
+    .replace('{{CRIT_COUNT}}', str(stats['critical'])) \
+    .replace('{{HIGH_COUNT}}', str(stats['high'])) \
+    .replace('{{MED_LOW_COUNT}}', str(stats['medium'] + stats['low'])) \
+    .replace('{{DATA_JSON}}', payload)
 
 with open(html_file, 'w') as f:
     f.write(html_content)

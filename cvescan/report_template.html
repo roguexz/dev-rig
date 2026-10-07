@@ -16,6 +16,8 @@
       --high-color: #ff7b72;
       --medium-color: #d29922;
       --low-color: #3fb950;
+      --toolbar-h: 58px;
+      --thead-h: 38px;
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -24,10 +26,7 @@
       margin: 0;
       padding: 24px;
     }
-    .container {
-      max-width: 1400px;
-      margin: 0 auto;
-    }
+    .container { max-width: 1400px; margin: 0 auto; }
     .header {
       display: flex;
       justify-content: space-between;
@@ -36,19 +35,8 @@
       border-bottom: 1px solid var(--border-color);
       margin-bottom: 24px;
     }
-    h1 {
-      font-size: 24px;
-      margin: 0;
-      color: #fff;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .meta-tag {
-      font-size: 13px;
-      color: var(--text-dim);
-      margin-top: 4px;
-    }
+    h1 { font-size: 24px; margin: 0; color: #fff; display: flex; align-items: center; gap: 10px; }
+    .meta-tag { font-size: 13px; color: var(--text-dim); margin-top: 4px; }
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
@@ -61,22 +49,56 @@
       border-radius: 8px;
       padding: 16px;
     }
-    .stat-card .label {
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--text-dim);
+    .stat-card .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
+    .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 8px; }
+
+    /* App sidebar + main pane layout */
+    .layout { display: grid; grid-template-columns: 260px 1fr; gap: 20px; align-items: start; }
+    .sidebar {
+      position: sticky;
+      top: calc(var(--toolbar-h) + var(--thead-h) + 24px);
+      max-height: calc(100vh - var(--toolbar-h) - var(--thead-h) - 48px);
+      overflow-y: auto;
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 10px;
     }
-    .stat-card .value {
-      font-size: 28px;
-      font-weight: 700;
-      margin-top: 8px;
-    }
-    .controls-bar {
+    .sidebar h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin: 4px 6px 8px; }
+    .app-item {
       display: flex;
-      gap: 16px;
-      margin-bottom: 16px;
       align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 7px 10px;
+      color: var(--text-color);
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .app-item:hover { background: #21262d; }
+    .app-item.active { background: rgba(88, 166, 255, 0.12); border-color: var(--accent-blue); }
+    .app-item .app-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .app-item .app-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .app-count { font-size: 11px; color: var(--text-dim); }
+
+    .main-pane { min-width: 0; }
+
+    /* Sticky toolbar: search + severity chips stay on screen */
+    .controls-bar {
+      position: sticky;
+      top: 0;
+      z-index: 3;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      background: var(--bg-color);
+      padding: 8px 0;
+      margin-bottom: 8px;
     }
     .search-input {
       flex: 1;
@@ -90,23 +112,38 @@
       outline: none;
       transition: border-color 0.15s ease-in-out;
     }
-    .search-input:focus {
-      border-color: var(--accent-blue);
+    .search-input:focus { border-color: var(--accent-blue); }
+    .sev-chips { display: flex; gap: 6px; }
+    .sev-chip {
+      padding: 6px 10px;
+      border-radius: 14px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      border: 1px solid;
+      background: transparent;
+      user-select: none;
     }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background-color: var(--card-bg);
+    .sev-chip:not(.on) { opacity: 0.45; }
+    .sev-chip.on { background: rgba(110, 118, 129, 0.25); }
+    .csv-btn {
+      background: #21262d;
+      color: var(--text-color);
       border: 1px solid var(--border-color);
-      border-radius: 8px;
-      overflow: hidden;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
     }
-    th, td {
-      padding: 12px 16px;
-      text-align: left;
-      font-size: 13px;
-    }
+    .csv-btn:hover { background: #30363d; color: #fff; }
+
+    table { width: 100%; border-collapse: separate; border-spacing: 0; background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; }
+    th, td { padding: 12px 16px; text-align: left; font-size: 13px; }
     th {
+      position: sticky;
+      top: var(--toolbar-h);
+      z-index: 2;
       background-color: #21262d;
       color: var(--text-dim);
       font-weight: 600;
@@ -116,51 +153,33 @@
       cursor: pointer;
       user-select: none;
       border-bottom: 1px solid var(--border-color);
-      transition: background-color 0.15s ease-in-out, color 0.15s ease-in-out;
     }
-    th:hover {
-      background-color: #30363d;
-      color: #fff;
-    }
-    .sort-icon {
-      margin-left: 4px;
-      opacity: 0.6;
-    }
-    
-    /* Main Row Styles */
-    .main-row td {
-      border-bottom: none;
-      background-color: var(--card-bg);
-    }
-    .badge {
-      display: inline-block;
-      padding: 3px 8px;
-      border-radius: 12px;
+    th:hover { color: #fff; }
+    .sort-icon { margin-left: 4px; opacity: 0.6; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .badge-CRITICAL { background: rgba(248, 81, 73, 0.2); color: var(--critical-color); border: 1px solid var(--critical-color); }
+    .badge-HIGH { background: rgba(255, 123, 114, 0.2); color: var(--high-color); border: 1px solid var(--high-color); }
+    .badge-MEDIUM { background: rgba(210, 153, 34, 0.2); color: var(--medium-color); border: 1px solid var(--medium-color); }
+    .badge-LOW { background: rgba(63, 185, 80, 0.2); color: var(--low-color); border: 1px solid var(--low-color); }
+    .badge-UNKNOWN { background: rgba(139, 148, 158, 0.2); color: var(--text-dim); border: 1px solid var(--text-dim); }
+
+    /* Parent package row vs. its nested location child rows */
+    .pkg-row td { border-bottom: none; }
+    .loc-row td { padding: 4px 16px 10px 16px; }
+    .loc-row:last-child td, .loc-row + .pkg-row td { border-top: 1px solid var(--border-color); }
+
+    .cve-container { display: flex; flex-direction: column; gap: 6px; }
+    .cve-count-pill { font-size: 11px; font-weight: 600; color: var(--text-dim); }
+    .cve-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+    .cve-tags.clip { max-height: 92px; overflow: hidden; }
+    .clip-toggle {
+      align-self: flex-start;
+      background: none;
+      border: none;
+      color: var(--accent-blue);
       font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-    }
-    .badge-critical { background: rgba(248, 81, 73, 0.2); color: var(--critical-color); border: 1px solid var(--critical-color); }
-    .badge-high { background: rgba(255, 123, 114, 0.2); color: var(--high-color); border: 1px solid var(--high-color); }
-    .badge-medium { background: rgba(210, 153, 34, 0.2); color: var(--medium-color); border: 1px solid var(--medium-color); }
-    .badge-low { background: rgba(63, 185, 80, 0.2); color: var(--low-color); border: 1px solid var(--low-color); }
-    
-    .cve-container {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .cve-count-pill {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-dim);
-    }
-    .cve-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      max-height: 120px;
-      overflow-y: auto;
+      cursor: pointer;
+      padding: 0;
     }
     .cve-tag {
       font-size: 11px;
@@ -170,49 +189,46 @@
       text-decoration: none;
       transition: opacity 0.15s ease-in-out;
     }
-    .cve-tag:hover {
-      opacity: 0.8;
+    .cve-tag:hover { opacity: 0.8; }
+    .cve-CRITICAL { background: rgba(248, 81, 73, 0.15); color: var(--critical-color); border: 1px solid rgba(248, 81, 73, 0.4); }
+    .cve-HIGH { background: rgba(255, 123, 114, 0.15); color: var(--high-color); border: 1px solid rgba(255, 123, 114, 0.4); }
+    .cve-MEDIUM { background: rgba(210, 153, 34, 0.15); color: var(--medium-color); border: 1px solid rgba(210, 153, 34, 0.4); }
+    .cve-LOW { background: rgba(63, 185, 80, 0.15); color: var(--low-color); border: 1px solid rgba(63, 185, 80, 0.4); }
+    .cve-UNKNOWN { background: rgba(139, 148, 158, 0.15); color: var(--text-dim); border: 1px solid rgba(139, 148, 158, 0.4); }
+
+    /* Evidence toggle + tags */
+    .evidence-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 12px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      color: var(--text-color);
     }
-    .cve-critical { background: rgba(248, 81, 73, 0.15); color: var(--critical-color); border: 1px solid rgba(248, 81, 73, 0.4); }
-    .cve-high { background: rgba(255, 123, 114, 0.15); color: var(--high-color); border: 1px solid rgba(255, 123, 114, 0.4); }
-    .cve-medium { background: rgba(210, 153, 34, 0.15); color: var(--medium-color); border: 1px solid rgba(210, 153, 34, 0.4); }
-    .cve-low { background: rgba(63, 185, 80, 0.15); color: var(--low-color); border: 1px solid rgba(63, 185, 80, 0.4); }
-    
-    /* Secondary Location Row Styles */
-    .location-row td {
-      padding: 4px 16px 14px 16px;
-      background-color: var(--card-bg);
-      border-bottom: 1px solid var(--border-color);
-    }
+    .evidence-toggle input { accent-color: var(--accent-blue); margin: 0; }
+    .evidence-tag { font-size: 11px; color: var(--text-dim); text-transform: capitalize; }
+    .evidence-tag.installed { color: var(--high-color); font-weight: 600; }
+
     .location-container {
       display: flex;
       align-items: center;
-      justify-content: space-between;
       background: #0d1117;
       border: 1px solid rgba(48, 54, 61, 0.8);
       border-radius: 6px;
       padding: 6px 12px;
-      gap: 12px;
+      gap: 10px;
+      margin-bottom: 6px;
     }
-    .location-info {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-      flex: 1;
-    }
-    .location-icon {
-      color: var(--accent-blue);
-      flex-shrink: 0;
-    }
-    .location-label {
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      color: var(--text-dim);
-      flex-shrink: 0;
-      text-transform: uppercase;
-    }
+    .location-container:last-child { margin-bottom: 0; }
+    .location-info { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+    .location-icon { color: var(--accent-blue); flex-shrink: 0; }
+    .location-label { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: var(--text-dim); flex-shrink: 0; text-transform: uppercase; }
     .location-path {
       font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
       font-size: 12px;
@@ -236,25 +252,14 @@
       cursor: pointer;
       transition: all 0.15s ease-in-out;
     }
-    .copy-btn:hover {
-      background: #30363d;
-      color: #fff;
-      border-color: #8b949e;
-    }
-    .copy-btn.copied {
-      background: #238636;
-      color: #fff;
-      border-color: #2e9d42;
-    }
-    code {
-      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
-      background: rgba(110, 118, 129, 0.2);
-      padding: 2px 6px;
-      border-radius: 4px;
-    }
+    .copy-btn:hover { background: #30363d; color: #fff; border-color: #8b949e; }
+    .copy-btn.copied { background: #238636; color: #fff; border-color: #2e9d42; }
+    code { font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace; background: rgba(110, 118, 129, 0.2); padding: 2px 6px; border-radius: 4px; }
     a { color: var(--accent-blue); text-decoration: none; }
     a:hover { text-decoration: underline; }
     .type-tag { color: var(--text-dim); font-size: 12px; }
+    .app-tag { font-size: 11px; color: var(--text-dim); }
+    .empty-state { text-align: center; padding: 32px; color: #8b949e; }
   </style>
 </head>
 <body>
@@ -265,10 +270,10 @@
         <div class="meta-tag">Execution: {{TIMESTAMP}} &bull; Mode: {{SCAN_MODE}}</div>
       </div>
     </div>
-    
+
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="label">Total Affected Packages</div>
+        <div class="label">Affected Packages</div>
         <div class="value" style="color: #fff;">{{TOTAL_COUNT}}</div>
       </div>
       <div class="stat-card">
@@ -285,122 +290,229 @@
       </div>
     </div>
 
-    <div class="controls-bar">
-      <input type="text" id="searchInput" class="search-input" placeholder="Search vulnerabilities by package, CVE ID, or location path..." onkeyup="filterTable()">
-    </div>
+    <div class="layout">
+      <aside class="sidebar">
+        <h2>Applications</h2>
+        <button class="app-item active" data-app="__ALL__"><span>All packages</span></button>
+        <div id="appList"></div>
+      </aside>
 
-    <table id="vulnTable">
-      <thead>
-        <tr>
-          <th data-sort-key="severity" onclick="sortTable('severity', this)">Severity <span class="sort-icon">↕</span></th>
-          <th data-sort-key="package" onclick="sortTable('package', this)">Package <span class="sort-icon">↕</span></th>
-          <th data-sort-key="installed" onclick="sortTable('installed', this)">Installed <span class="sort-icon">↕</span></th>
-          <th data-sort-key="fixed" onclick="sortTable('fixed', this)">Fixed In <span class="sort-icon">↕</span></th>
-          <th data-sort-key="vulnerabilities" onclick="sortTable('vulnerabilities', this)">Vulnerabilities <span class="sort-icon">↕</span></th>
-          <th data-sort-key="type" onclick="sortTable('type', this)">Type <span class="sort-icon">↕</span></th>
-          <th data-sort-key="location" onclick="sortTable('location', this)">Location Path <span class="sort-icon">↕</span></th>
-        </tr>
-      </thead>
-      {{TABLE_BODY}}
-    </table>
+      <div class="main-pane">
+        <div class="controls-bar">
+          <input type="text" id="searchInput" class="search-input" placeholder="Search packages, CVE IDs, or paths...">
+          <div class="sev-chips" id="sevChips">
+            <span class="sev-chip on" data-sev="CRITICAL" style="color: var(--critical-color); border-color: var(--critical-color);">Critical</span>
+            <span class="sev-chip on" data-sev="HIGH" style="color: var(--high-color); border-color: var(--high-color);">High</span>
+            <span class="sev-chip on" data-sev="MEDIUM" style="color: var(--medium-color); border-color: var(--medium-color);">Medium</span>
+            <span class="sev-chip on" data-sev="LOW" style="color: var(--low-color); border-color: var(--low-color);">Low</span>
+          </div>
+          <label class="evidence-toggle" title="Hides rows that only appear in lockfiles or requirement pins — nothing installed, just a version pin somewhere.">
+            <input type="checkbox" id="declToggle" checked>
+            <span>Hide declaration-only</span>
+          </label>
+          <button class="csv-btn" id="csvBtn">⬇ Export CSV</button>
+        </div>
+
+        <table id="vulnTable">
+          <thead>
+            <tr>
+              <th data-sort-key="weight">Severity <span class="sort-icon">↕</span></th>
+              <th data-sort-key="pkg">Package <span class="sort-icon">↕</span></th>
+              <th data-sort-key="ver">Installed <span class="sort-icon">↕</span></th>
+              <th data-sort-key="fixes">Fixed In <span class="sort-icon">↕</span></th>
+              <th data-sort-key="cves">Vulnerabilities <span class="sort-icon">↕</span></th>
+              <th data-sort-key="type">Type <span class="sort-icon">↕</span></th>
+              <th data-sort-key="app">Application <span class="sort-icon">↕</span></th>
+            </tr>
+          </thead>
+          <tbody id="tableBody">
+            <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <script>
-    function filterTable() {
-      const input = document.getElementById('searchInput').value.toLowerCase().trim();
-      const groups = document.querySelectorAll('#vulnTable tbody.vuln-group');
-      groups.forEach(group => {
-        const text = group.textContent.toLowerCase();
-        group.style.display = text.includes(input) ? '' : 'none';
+    const DATA = {{DATA_JSON}};
+
+    let sortKey = 'weight';
+    let sortDir = 'desc';
+    let activeApp = '__ALL__';
+    const activeSevs = new Set(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']);
+    let search = '';
+    let hideDeclared = true;  // matches the checked checkbox
+
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    function filteredSorted() {
+      let rows = DATA.rows;
+      if (activeApp !== '__ALL__') rows = rows.filter(r => r.app === activeApp);
+      rows = rows.filter(r => activeSevs.has(r.worst));
+      if (hideDeclared) rows = rows.filter(r => r.evidence !== 'declared');
+      if (search) {
+        const q = search.toLowerCase();
+        rows = rows.filter(r =>
+          r.pkg.toLowerCase().includes(q) ||
+          r.locs.some(p => p.toLowerCase().includes(q)) ||
+          r.cves.some(([id]) => id.toLowerCase().includes(q))
+        );
+      }
+      const numeric = sortKey === 'weight' || sortKey === 'cves';
+      const dir = sortDir === 'asc' ? 1 : -1;
+      return [...rows].sort((a, b) => {
+        const av = a[sortKey], bv = b[sortKey];
+        if (numeric) return (av - bv) * dir;
+        if (Array.isArray(av)) return String(av[0]?.[0] ?? av[0] ?? '').localeCompare(String(bv[0]?.[0] ?? bv[0] ?? '')) * dir;
+        return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' }) * dir;
       });
     }
 
-    function copyToClipboard(elementId, btn) {
-      const el = document.getElementById(elementId);
-      if (!el) return;
-      const text = el.innerText || el.textContent;
-      
-      const setCopiedUI = () => {
-        const origContent = btn.innerHTML;
+    function render() {
+      const body = document.getElementById('tableBody');
+      const rows = filteredSorted();
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="empty-state">Nothing installed to worry about — remaining hits are pins in lockfiles/requirements files. 🎉</td></tr>';
+        return;
+      }
+      const slice = rows.slice(0, 500);
+      body.innerHTML = slice.map((r, ri) => {
+        const cveHtml = r.cves.map(([id, sev]) =>
+          `<a href="https://nvd.nist.gov/vuln/detail/${esc(id)}" target="_blank" class="cve-tag cve-${esc(sev)}">${esc(id)}</a>`
+        ).join(' ');
+        const clip = r.cves.length > 6;
+        const parent = `<tr class="pkg-row">
+          <td><span class="badge badge-${esc(r.worst)}">${esc(r.worst)}</span></td>
+          <td><strong>${esc(r.pkg)}</strong></td>
+          <td><code>${esc(r.ver)}</code></td>
+          <td><code>${esc(r.fixes.join(', ') || 'N/A')}</code></td>
+          <td>
+            <div class="cve-container">
+              <span class="cve-count-pill">${r.cves.length} CVE${r.cves.length > 1 ? 's' : ''}</span>
+              <div class="cve-tags ${clip ? 'clip' : ''}" data-clip="${clip ? 'on' : ''}">${cveHtml}</div>
+              ${clip ? '<button class="clip-toggle">Show all</button>' : ''}
+            </div>
+          </td>
+          <td><span class="type-tag">${esc(r.type)}</span></td>
+          <td><span class="app-tag">${esc(r.app)}</span></td>
+        </tr>`;
+        // One child row per location so it's never ambiguous whether a
+        // path belongs to this package or the next row.
+        const children = r.locs.map((p, li) => `
+          <tr class="loc-row" data-path="p${ri}-l${li}">
+            <td></td>
+            <td colspan="6">
+              <div class="location-container">
+                <div class="location-info">
+                  <svg class="location-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+                  <span class="location-label">Location</span>
+                  <span class="location-path">${esc(p)}</span>
+                </div>
+                <button class="copy-btn">
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  <span>Copy Path</span>
+                </button>
+              </div>
+            </td>
+          </tr>`).join('');
+        return parent + children;
+      }).join('') + (rows.length > 500
+        ? `<tr><td colspan="7" class="empty-state">…and ${rows.length - 500} more rows. Filter by application or severity to narrow down.</td></tr>`
+        : '');
+
+      // Bind per-row interactions
+      body.querySelectorAll('[data-clip]').forEach(el => {
+        const toggle = el.parentElement.querySelector('.clip-toggle');
+        if (!toggle) return;
+        toggle.onclick = () => {
+          const clipped = el.classList.toggle('clip');
+          toggle.textContent = clipped ? 'Show all' : 'Show less';
+        };
+      });
+      body.querySelectorAll('.copy-btn').forEach(btn => {
+        btn.onclick = () => copyText(btn.closest('.location-container').querySelector('.location-path').innerText, btn);
+      });
+    }
+
+    function copyText(text, btn) {
+      if (!text) return;
+      const done = () => {
+        const orig = btn.innerHTML;
         btn.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Copied!</span>';
         btn.classList.add('copied');
-        setTimeout(() => {
-          btn.innerHTML = origContent;
-          btn.classList.remove('copied');
-        }, 2000);
+        setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 1500);
       };
-
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(setCopiedUI).catch(err => {
-          fallbackCopy(text, setCopiedUI);
-        });
-      } else {
-        fallbackCopy(text, setCopiedUI);
-      }
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+      else fallbackCopy(text, done);
     }
 
-    function fallbackCopy(text, callback) {
-      const textArea = document.createElement("textarea");
-      textArea.value = text;
-      textArea.style.position = "fixed";
-      textArea.style.left = "-999999px";
-      document.body.appendChild(textArea);
-      textArea.focus();
-      textArea.select();
-      try {
-        document.execCommand('copy');
-        callback();
-      } catch (err) {
-        console.error('Fallback copy failed', err);
-      }
-      document.body.removeChild(textArea);
+    function fallbackCopy(text, cb) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-999999px';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try { document.execCommand('copy'); cb(); } catch (e) { /* ignore */ }
+      document.body.removeChild(ta);
     }
 
-    let currentSortKey = null;
-    let currentSortDir = 'desc';
+    // Sidebar: app list
+    const appList = document.getElementById('appList');
+    appList.innerHTML = DATA.apps.map(a => `
+      <button class="app-item" data-app="${esc(a.id)}">
+        <span class="app-label" title="${esc(a.label)}">${esc(a.label)}</span>
+        <span class="app-meta"><span class="app-count">${a.count}</span><span class="badge badge-${esc(a.worst)}" style="transform:scale(.8)">${a.worst[0]}</span></span>
+      </button>`).join('');
+    document.querySelectorAll('.app-item').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('.app-item').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeApp = btn.dataset.app;
+        render();
+      };
+    });
 
-    function sortTable(sortKey, thElement) {
-      const table = document.getElementById('vulnTable');
-      const groups = Array.from(table.querySelectorAll('tbody.vuln-group'));
-      
-      if (currentSortKey === sortKey) {
-        currentSortDir = currentSortDir === 'asc' ? 'desc' : 'asc';
-      } else {
-        currentSortKey = sortKey;
-        currentSortDir = (sortKey === 'severity' || sortKey === 'vulnerabilities') ? 'desc' : 'asc';
-      }
+    // Sticky toolbar wiring
+    document.getElementById('searchInput').addEventListener('input', e => { search = e.target.value.trim(); render(); });
+    document.getElementById('declToggle').addEventListener('change', e => { hideDeclared = e.target.checked; render(); });
+    document.querySelectorAll('.sev-chip').forEach(chip => {
+      chip.onclick = () => {
+        const sev = chip.dataset.sev;
+        if (activeSevs.has(sev)) { activeSevs.delete(sev); chip.classList.remove('on'); }
+        else { activeSevs.add(sev); chip.classList.add('on'); }
+        render();
+      };
+    });
 
-      const isNumeric = sortKey === 'severity' || sortKey === 'vulnerabilities';
+    // Sort headers
+    document.querySelectorAll('th[data-sort-key]').forEach(th => {
+      th.onclick = () => {
+        const key = th.dataset.sortKey;
+        if (sortKey === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+        else { sortKey = key; sortDir = (key === 'weight' || key === 'cves') ? 'desc' : 'asc'; }
+        document.querySelectorAll('th[data-sort-key]').forEach(h => h.querySelector('.sort-icon').innerText = '↕');
+        th.querySelector('.sort-icon').innerText = sortDir === 'asc' ? '▲' : '▼';
+        render();
+      };
+    });
 
-      groups.sort((a, b) => {
-        let aVal = a.getAttribute('data-' + sortKey) || '';
-        let bVal = b.getAttribute('data-' + sortKey) || '';
+    // CSV export of the currently filtered view
+    document.getElementById('csvBtn').onclick = () => {
+      const rows = filteredSorted();
+      const escCsv = v => `"${String(v).replace(/"/g, '""')}"`;
+      const csv = ['Application,Package,Installed,Fixed In,CVEs,Type,Locations',
+        ...rows.map(r => [r.app, r.pkg, r.ver, r.fixes.join(' ') || 'N/A', r.cves.map(c => c[0]).join(' '), r.type, r.locs.join(' ')].map(escCsv).join(','))
+      ].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'cvescan-report.csv';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
 
-        if (isNumeric) {
-          let aNum = parseFloat(aVal) || 0;
-          let bNum = parseFloat(bVal) || 0;
-          return currentSortDir === 'asc' ? aNum - bNum : bNum - aNum;
-        } else {
-          return currentSortDir === 'asc'
-            ? aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: 'base' })
-            : bVal.localeCompare(aVal, undefined, { numeric: true, sensitivity: 'base' });
-        }
-      });
-
-      groups.forEach(group => table.appendChild(group));
-
-      // Update header sort icons
-      const headers = table.querySelectorAll('th');
-      headers.forEach(th => {
-        const icon = th.querySelector('.sort-icon');
-        const key = th.getAttribute('data-sort-key');
-        if (key === sortKey) {
-          icon.innerText = currentSortDir === 'asc' ? '▲' : '▼';
-        } else {
-          icon.innerText = '↕';
-        }
-      });
-    }
+    render();
   </script>
 </body>
 </html>
