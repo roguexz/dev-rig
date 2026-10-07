@@ -64,9 +64,45 @@ install_litellm() {
 
     ensure_database
 
-    log_info "Deploying LiteLLM Proxy..."
+    log_info "Deploying LiteLLM Proxy with Thinking Token Filter..."
 
     cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-bundle
+  namespace: ${namespace}
+data:
+  config.yaml: |
+    litellm_settings:
+      callbacks: ["strip_thinking.plugin"]
+  strip_thinking.py: |
+    import re
+    from typing import Optional, Literal
+    from litellm.integrations.custom_logger import CustomLogger
+
+    class StripThinkingFilter(CustomLogger):
+        THINK_REGEX = re.compile(r"", re.DOTALL)
+
+        async def async_pre_call_hook(
+            self,
+            user_api_key_dict: dict,
+            cache: any,
+            data: dict,
+            call_type: Literal["completion", "text_completion", "embeddings"]
+        ) -> Optional[dict]:
+            messages = data.get("messages", [])
+            for msg in messages:
+                # Strip dedicated reasoning parameter if forwarded by client
+                if "reasoning_content" in msg:
+                    del msg["reasoning_content"]
+                # Strip inline thinking tokens from prior turns
+                if isinstance(msg.get("content"), str):
+                    msg["content"] = self.THINK_REGEX.sub("", msg["content"]).strip()
+            return data
+
+    plugin = StripThinkingFilter()
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -88,6 +124,11 @@ spec:
       - name: litellm
         image: ghcr.io/berriai/litellm:main-latest
         imagePullPolicy: IfNotPresent
+        args:
+        - "--config"
+        - "/etc/litellm/config/config.yaml"
+        - "--port"
+        - "4000"
         env:
         - name: DATABASE_URL
           value: "postgresql://postgres:changeit@postgresql.commons.svc.cluster.local:5432/litellm"
@@ -97,9 +138,18 @@ spec:
           value: "True"
         - name: LITELLM_SALT_KEY
           value: "changeit"
+        - name: PYTHONPATH
+          value: "/etc/litellm/plugins"
         ports:
         - containerPort: 4000
           name: http
+        volumeMounts:
+        - name: bundle-storage
+          mountPath: /etc/litellm/config/config.yaml
+          subPath: config.yaml
+        - name: bundle-storage
+          mountPath: /etc/litellm/plugins/strip_thinking.py
+          subPath: strip_thinking.py
         readinessProbe:
           httpGet:
             path: /health/readiness
@@ -112,6 +162,10 @@ spec:
             port: 4000
           initialDelaySeconds: 15
           periodSeconds: 10
+      volumes:
+      - name: bundle-storage
+        configMap:
+          name: litellm-bundle
 ---
 apiVersion: v1
 kind: Service
