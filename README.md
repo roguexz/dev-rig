@@ -14,7 +14,8 @@ when working across multiple laptops.
 Before using these scripts, ensure you have the following command-line tools installed:
 
 - [Grype](https://github.com/anchore/grype) (for `cvescan` vulnerability scanner)
-- [terminal-notifier](https://formulae.brew.sh/formula/terminal-notifier) (optional, for `cvescan` desktop notifications)
+- [terminal-notifier](https://formulae.brew.sh/formula/terminal-notifier) (optional, for `cvescan` desktop
+  notifications)
 - [Rancher Desktop](https://rancherdesktop.io/) (for local k8s infrastructure)
 - [mkcert](https://github.com/FiloSottile/mkcert)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
@@ -117,3 +118,31 @@ For detailed usage of each command, see the documentation below.
 
 All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each
 capability also includes an `uninstall` command to cleanly remove all resources.
+
+## Recommended: AI-Assisted Development Toolkit
+
+The prerequisites above cover the `ldx` scripts themselves. For the AI-assisted side of my local workflow, these are
+the tools I keep installed on every machine — and most of them are just a `brew` command away:
+
+```bash
+brew install opencode ripgrep imagemagick gitleaks
+brew install --cask openchamber bruno ghidra
+```
+
+- **[OpenCode](https://opencode.ai)** — an AI coding agent for the terminal; the engine behind most of my agentic
+  workflows.
+- **[OpenChamber](https://openchamber.dev)** — a polished desktop and web interface for OpenCode, with a built-in
+  terminal, file browser, notes, and reusable actions right next to the chat.
+- **[ripgrep](https://github.com/BurntSushi/ripgrep)** — extremely fast code search; the backbone of how agents explore
+  a codebase.
+- **[ImageMagick](https://imagemagick.org)** — quick image conversion, resizing, and annotation from the command line;
+  handy when agents generate or compare screenshots.
+- **[Bruno](https://www.usebruno.com)** — a lightweight, Git-friendly API client for testing and documenting local
+  services; a nice companion to the `ldx` stacks.
+- **Reverse engineering with AI** — [REA](https://github.com/morluto/rea) gives your coding agent structured,
+  evidence-backed access to native binaries, powered by [Hopper](https://hopperapp.com/)
+  and [Ghidra](https://ghidra-sre.org/). REA installs via a `curl` script and Ghidra via `brew install --cask ghidra`(it
+  runs on the same JDK you already installed for `ldx tls keystore`); Hopper is a paid app.
+- **Secure your `git push` with hooks** — [gitleaks](https://github.com/gitleaks/gitleaks) catches secrets before they
+  leave your machine. Wire it into a `pre-push` hook — directly or through a hook manager
+  like [lefthook](https://github.com/evilmartians/lefthook) — so credentials never reach a remote.
