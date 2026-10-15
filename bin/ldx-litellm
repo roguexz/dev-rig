@@ -22,6 +22,8 @@ show_help() {
     echo "  install       Deploy LiteLLM proxy connected to PostgreSQL."
     echo "  uninstall     Remove LiteLLM proxy deployment and services."
     echo "  sync-omlx     Sync omlx models to LiteLLM proxy (requires STORE_MODEL_IN_DB)."
+    echo "                  Stamps per-model capabilities (vision, token limits,"
+    echo "                  reasoning efforts) and re-creates models whose caps drift."
     echo "                  Use --dry-run to preview changes without applying them."
 }
 
@@ -242,9 +244,14 @@ sync_omlx_models() {
     require_command "jq"
 
     local dry_run=false
-    if [ "${1:-}" = "--dry-run" ]; then
-        dry_run=true
-    fi
+    local check_drift=true
+    for arg in "$@"; do
+        case "$arg" in
+            --dry-run)  dry_run=true ;;
+            --no-drift) check_drift=false ;;
+            *) fatal "Unknown option for sync-omlx: $arg" ;;
+        esac
+    done
 
     local namespace="commons"
     local settings_file="${HOME}/.omlx/settings.json"
@@ -266,6 +273,11 @@ sync_omlx_models() {
 
     local omlx_base="http://localhost:${omlx_port}"
     log_info "omlx base URL: $omlx_base"
+
+    # --- Local omlx config files (source of per-model capability metadata) ---
+    local model_settings_file="${HOME}/.omlx/model_settings.json"
+    local omlx_dir
+    omlx_dir=$(jq -r '.model.model_dir // (.model.model_dirs[0]) // (env.HOME + "/.omlx/models")' "$settings_file")
 
     # --- Determine LiteLLM endpoint (try ingress first, then NodePort) ---
     local litellm_url=""
@@ -307,6 +319,7 @@ sync_omlx_models() {
     fi
 
     # Extract model IDs (exclude helper models like MarkItDown)
+    local HELPER_MODELS='["MarkItDown","nomicai-modernbert"]'
     local omlx_models=()
     while IFS= read -r model_id; do
         # Skip helper/non-LLM models
@@ -317,6 +330,106 @@ sync_omlx_models() {
     done < <(echo "$omlx_models_raw" | jq -r '.data[].id')
 
     log_info "Found ${#omlx_models[@]} omlx models"
+
+    # --- Build per-model capability metadata from local omlx config ---
+    # Resolution order for each capability:
+    #   max_input_tokens  : per-model max_context_window (model_settings.json)
+    #                       -> global sampling.max_context_window (settings.json)
+    #   max_output_tokens : global sampling.max_tokens (omlx has no per-model override)
+    #   supports_vision   : vision keys in <model_dir>/config.json (embedding arches excluded)
+    #   reasoning efforts : thinking_budget_enabled / enable_thinking per model
+    local alias_dirs_file caps_file
+    alias_dirs_file=$(mktemp)
+    caps_file=$(mktemp)
+    # Cleanup via an EXIT trap: a RETURN trap here can fire after these locals
+    # go out of scope, which trips `set -u` and leaves the temp files behind.
+    trap 'rm -f "${alias_dirs_file:-}" "${caps_file:-}"' EXIT
+
+    # Map model id -> model directory. omlx stores the per-model settings in
+    # model_settings.json keyed by the model directory's basename; the entry's
+    # model_alias is the id served on /v1/models (null => the key itself is the
+    # id). config.json for a key lives at models/<org-or-flat>/<key>/config.json.
+    if [ -d "$omlx_dir" ] && [ -f "$model_settings_file" ]; then
+        jq -r '.models // {} | to_entries[]
+            | [(.value.model_alias // .key), .key] | @tsv' "$model_settings_file" 2>/dev/null \
+        | while IFS=$'\t' read -r ms_alias ms_key; do
+            [ -n "$ms_alias" ] || continue
+            # Resolve the directory that actually holds this model's config.json.
+            local cfg_path
+            cfg_path=$(find "$omlx_dir" -maxdepth 3 -type d -name "$ms_key" 2>/dev/null | head -n1)
+            [ -n "$cfg_path" ] && printf '%s\t%s\n' "$ms_alias" "$cfg_path"
+        done > "$alias_dirs_file"
+    fi
+
+    # Global token limits from omlx settings.json
+    local g_ctx g_max_tokens
+    g_ctx=$(jq -r '.sampling.max_context_window // 98304' "$settings_file")
+    g_max_tokens=$(jq -r '.sampling.max_tokens // 16384' "$settings_file")
+
+    # Compute the desired model_info block for each omlx model:
+    # one line of JSON {"id":..., "model_info":{...}} per model.
+    : > "$caps_file"
+    for model_id in "${omlx_models[@]}"; do
+        local dir dir_key ms_entry vision reasoning ctx
+        dir=$(awk -F '\t' -v a="$model_id" '$1==a {print $2; exit}' "$alias_dirs_file")
+        dir_key=""
+        if [ -n "$dir" ]; then
+            dir_key=$(basename "$dir")
+        else
+            # No alias entry; fall back to a model_settings key equal to the id
+            if jq -e --arg k "$model_id" '.models[$k]' "$model_settings_file" >/dev/null 2>&1; then
+                dir_key="$model_id"
+            fi
+            dir="${omlx_dir}/${model_id}"
+        fi
+
+        ms_entry='{}'
+        if [ -n "$dir_key" ]; then
+            ms_entry=$(jq -c --arg k "$dir_key" '.models[$k] // {}' "$model_settings_file" 2>/dev/null || echo '{}')
+        fi
+
+        # Vision: config.json carries vision config and the model is not an embedder.
+        vision=false
+        if [ -f "${dir}/config.json" ]; then
+            if jq -e '
+                    (.architectures[0] // "") as $arch
+                    | ((($arch | test("Embedding|ModernBert")) | not)
+                       and (has("vision_config")
+                          or has("image_token_index")
+                          or has("vision_start_token_id")))
+                ' "${dir}/config.json" >/dev/null 2>&1; then
+                vision=true
+            fi
+        fi
+
+        reasoning=$(jq -r '((.thinking_budget_enabled // false) or (.enable_thinking // false))' <<<"$ms_entry")
+        ctx=$(jq -r --argjson g "$g_ctx" '.max_context_window // $g' <<<"$ms_entry")
+
+        jq -cn --arg id "$model_id" \
+            --argjson vision "$vision" \
+            --argjson reasoning "$reasoning" \
+            --argjson ctx "$ctx" \
+            --argjson max_out "$g_max_tokens" \
+            '{
+                id: $id,
+                model_info: {
+                    supports_vision: $vision,
+                    max_input_tokens: $ctx,
+                    max_output_tokens: $max_out
+                }
+                + (if $reasoning then {
+                    supported_openai_params: [
+                        "messages", "model", "max_tokens", "temperature", "top_p",
+                        "top_k", "n", "stop", "stream", "seed",
+                        "presence_penalty", "frequency_penalty",
+                        "tools", "tool_choice", "parallel_tool_calls",
+                        "response_format", "logprobs", "top_logprobs",
+                        "reasoning_effort"
+                    ],
+                    supported_reasoning_efforts: ["low", "medium", "high"]
+                } else {} end)
+            }' >> "$caps_file"
+    done
 
     # --- Fetch existing LiteLLM models that use the omlx credential ---
     log_info "Fetching existing omlx models from LiteLLM..."
@@ -335,58 +448,160 @@ sync_omlx_models() {
 
     log_info "Found ${#existing_models[@]} existing omlx models in LiteLLM"
 
-    # --- Determine to-create and to-delete sets ---
+    # Index existing deployments by underlying omlx model id, and capture their
+    # capability fields (normalized) for drift comparison.
+    declare -A existing_by_model=()   # omlx model id -> "registered_name|litellm_id"
+    declare -A existing_caps=()      # omlx model id -> normalized capability JSON
+    while IFS=$'\t' read -r um_model um_name um_id um_caps; do
+        existing_by_model["$um_model"]="$um_name|$um_id"
+        existing_caps["$um_model"]="$um_caps"
+    done < <(echo "$litellm_models_raw" | jq -r '
+        .data[]
+        | select(.litellm_params.litellm_credential_name == "omlx")
+        | [ .litellm_params.model,
+            .model_name,
+            .model_info.id,
+            (.model_info | {
+                supports_vision: (.supports_vision // false),
+                max_input_tokens,
+                max_output_tokens,
+                supported_openai_params: ((.supported_openai_params // []) | sort),
+                supported_reasoning_efforts: ((.supported_reasoning_efforts // []) | sort)
+              } | tojson)
+          ] | @tsv')
+
+    # --- Determine to-create, to-recreate (capability drift), and to-delete sets ---
     local -a to_create=()
     local -a to_delete=()
+    local -a to_recreate=()
     # litellm_model_id -> model_name as registered on LiteLLM (for readable output)
     declare -A delete_names=()
+    # omlx model id -> registered name to reuse when re-creating after drift
+    declare -A recreate_names=()
 
-    # Models in omlx that are not yet in litellm
+    # Desired capabilities for a model, normalized the same way as existing_caps.
+    desired_caps() {
+        jq -c --arg id "$1" '
+            select(.id == $id) | .model_info | {
+                supports_vision: (.supports_vision // false),
+                max_input_tokens,
+                max_output_tokens,
+                supported_openai_params: ((.supported_openai_params // []) | sort),
+                supported_reasoning_efforts: ((.supported_reasoning_efforts // []) | sort)
+            }' "$caps_file" | head -n1
+    }
+
+    # One-line summary of the capabilities that will be stamped on a model
+    caps_summary() {
+        jq -r --arg id "$1" '
+            select(.id == $id) | .model_info |
+            "vision=" + (.supports_vision|tostring)
+            + " ctx=" + (.max_input_tokens|tostring)
+            + " out=" + (.max_output_tokens|tostring)
+            + " reasoning=" + (if .supported_reasoning_efforts then ((.supported_reasoning_efforts // []) | join(",")) else "no" end)
+        ' "$caps_file" | head -n1
+    }
+
+    # Models in omlx that are not yet in LiteLLM, or whose capabilities drifted
     for model_id in "${omlx_models[@]}"; do
         local proposed_name="omlx-${model_id}"
-        if [ -z "${existing_models[$proposed_name]+x}" ]; then
+        if [ -n "${existing_by_model[$model_id]:-}" ]; then
+            local want have
+            want=$(desired_caps "$model_id")
+            have="${existing_caps[$model_id]}"
+            if [ "$check_drift" = "true" ] && [ "$want" != "$have" ]; then
+                # /model/update cannot persist model_info changes, so refresh via delete+create
+                local reg_name="${existing_by_model[$model_id]%%|*}"
+                local reg_id="${existing_by_model[$model_id]##*|}"
+                to_recreate+=("$model_id")
+                recreate_names["$model_id"]="$reg_name"
+                to_create+=("$model_id")
+                to_delete+=("$reg_id")
+                delete_names["$reg_id"]="$reg_name"
+            fi
+        elif [ -z "${existing_models[$proposed_name]+x}" ]; then
             to_create+=("$model_id")
         fi
     done
 
-    # Models in litellm (omlx-credentialed) that are not in omlx
-    for model_name in "${!existing_models[@]}"; do
-        # Strip the "omlx-" prefix to get the underlying model id
-        local underlying_model="${model_name#omlx-}"
-        if [[ ! " ${omlx_models[*]} " =~ " ${underlying_model} " ]]; then
-            to_delete+=("${existing_models[$model_name]}")
-            delete_names["${existing_models[$model_name]}"]="$model_name"
+    # Models in litellm (omlx-credentialed) whose underlying model is gone from omlx
+    for um in "${!existing_by_model[@]}"; do
+        if [[ ! " ${omlx_models[*]} " =~ " ${um} " ]]; then
+            local reg_id="${existing_by_model[$um]##*|}"
+            # Skip ids already queued for deletion by a capability refresh above
+            local already=false
+            for d in "${to_delete[@]:-}"; do
+                [ "$d" = "$reg_id" ] && already=true && break
+            done
+            [ "$already" = "true" ] && continue
+            to_delete+=("$reg_id")
+            delete_names["$reg_id"]="${existing_by_model[$um]%%|*}"
         fi
     done
 
-    log_info "Models to create: ${#to_create[@]}"
+    log_info "Models to create: ${#to_create[@]} (${#to_recreate[@]} refresh)"
     log_info "Models to delete: ${#to_delete[@]}"
 
     # --- Interactive approval ---
-    if [ ${#to_create[@]} -gt 0 ]; then
+    # Capability refreshes keep their registered name; only genuinely new
+    # models are offered for naming.
+    local -a new_models=()
+    for model_id in "${to_create[@]:-}"; do
+        [ -z "$model_id" ] && continue
+        local is_refresh=false
+        for r in "${to_recreate[@]:-}"; do
+            [ "$r" = "$model_id" ] && is_refresh=true && break
+        done
+        [ "$is_refresh" = "true" ] || new_models+=("$model_id")
+    done
+
+    if [ ${#to_recreate[@]} -gt 0 ]; then
+        echo ""
+        echo "Models to REFRESH (capability update, same name):"
+        for model_id in "${to_recreate[@]}"; do
+            echo "  ${recreate_names[$model_id]}  ->  $(caps_summary "$model_id")"
+        done
+    fi
+
+    if [ ${#new_models[@]} -gt 0 ]; then
         echo ""
         echo "Models to ADD to LiteLLM:"
-        for i in "${!to_create[@]}"; do
-            local model_id="${to_create[$i]}"
-            echo "  [$((i+1))] ${model_id}"
+        for i in "${!new_models[@]}"; do
+            local model_id="${new_models[$i]}"
+            echo "  [$((i+1))] ${model_id}  ->  $(caps_summary "$model_id")"
         done
 
-        # Prompt for custom names or accept defaults
+        # Prompt per model: skip it, accept the lowercase default name, or
+        # type a custom one.
         declare -A model_names
-        if [ "$dry_run" = "true" ]; then
-          echo ""
-        fi
-        for i in "${!to_create[@]}"; do
-            local model_id="${to_create[$i]}"
-            local default_name="omlx-${model_id}"
+        local skipped=0
+        local ii
+        for ii in "${!new_models[@]}"; do
+            local model_id="${new_models[$ii]}"
+            local default_name="omlx-${model_id,,}"
 
             if [ "$dry_run" = "true" ]; then
-                echo "  Would add '${model_id}' as '${default_name}'"
+                echo "  Would add '${model_id}' as '${default_name}' (real run: 'n' skips)"
                 model_names["$model_id"]="$default_name"
                 continue
             fi
 
             echo ""
+            read -r -p "  Add '${model_id}'? [Y/n]: " add_answer
+            case "$add_answer" in
+                n|N)
+                    echo "  Skipping '${model_id}'"
+                    skipped=$((skipped + 1))
+                    unset 'new_models[ii]'
+                    # Drop it from to_create so it is never registered.
+                    local ci
+                    for ci in "${!to_create[@]}"; do
+                        [ "${to_create[$ci]}" = "$model_id" ] && unset 'to_create[ci]'
+                    done
+                    continue
+                    ;;
+            esac
+
             read -r -p "  Enter name for '${model_id}' [${default_name}]: " custom_name
             if [ -z "$custom_name" ]; then
                 custom_name="$default_name"
@@ -398,7 +613,13 @@ sync_omlx_models() {
                 read -r -p "  Overwrite? (y/N): " overwrite
                 if [ "$overwrite" != "y" ] && [ "$overwrite" != "Y" ]; then
                     echo "  Skipping '${model_id}'"
-                    unset 'to_create[i]'
+                    skipped=$((skipped + 1))
+                    unset "new_models[$ii]"
+                    # Drop it from to_create so it is never registered.
+                    local ci
+                    for ci in "${!to_create[@]}"; do
+                        [ "${to_create[$ci]}" = "$model_id" ] && unset "to_create[$ci]"
+                    done
                     continue
                 fi
                 # Mark for deletion of the old one
@@ -408,6 +629,10 @@ sync_omlx_models() {
 
             model_names["$model_id"]="$custom_name"
         done
+
+        if [ "$skipped" -gt 0 ]; then
+            log_info "Skipped ${skipped} new model(s) by user choice."
+        fi
     else
         echo ""
         log_info "No new models to add."
@@ -427,7 +652,7 @@ sync_omlx_models() {
         done
     fi
 
-    if [ ${#to_create[@]} -eq 0 ] && [ ${#to_delete[@]} -eq 0 ]; then
+    if [ ${#to_create[@]} -eq 0 ] && [ ${#to_delete[@]} -eq 0 ] && [ ${#to_recreate[@]} -eq 0 ]; then
         log_info "Nothing to do. omlx and LiteLLM models are in sync."
         return 0
     fi
@@ -476,41 +701,9 @@ sync_omlx_models() {
         log_info "'omlx' credential already exists."
     fi
 
-    # --- Create new models ---
-    local created=0
-    for model_id in "${to_create[@]}"; do
-        [ -z "$model_id" ] && continue
-
-        local model_name="${model_names[$model_id]}"
-        [ -z "$model_name" ] && model_name="omlx-${model_id}"
-
-        log_info "Adding model '${model_name}' -> ${model_id}..."
-
-        local payload
-        payload=$(jq -n --arg name "$model_name" --arg model "$model_id" '{
-            model_name: $name,
-            litellm_params: {
-                model: $model,
-                custom_llm_provider: "openai",
-                litellm_credential_name: "omlx"
-            }
-        }')
-
-        local resp
-        resp=$(curl -sS -X POST "${litellm_url}/model/new" \
-            -H "$auth_header" \
-            -H "Content-Type: application/json" \
-            -d "$payload" 2>&1) || { log_warn "Failed to create '${model_name}': ${resp}"; continue; }
-
-        if [ -n "$resp" ]; then
-            log_info "Created '${model_name}'."
-            created=$((created + 1))
-        else
-            log_warn "Failed to create '${model_name}' (empty response)."
-        fi
-    done
-
-    # --- Delete obsolete models ---
+    # --- Delete obsolete models (and refresh targets) FIRST ---
+    # Deleting before creating avoids duplicate registered names when a model
+    # is being refreshed (same name, updated capabilities).
     local deleted=0
     for model_id in "${to_delete[@]}"; do
         [ -z "$model_id" ] && continue
@@ -532,8 +725,43 @@ sync_omlx_models() {
         fi
     done
 
+    # --- Create new models (and re-create refreshed ones with new capabilities) ---
+    local created=0
+    for model_id in "${to_create[@]}"; do
+        [ -z "$model_id" ] && continue
+
+        local model_name="${model_names[$model_id]:-${recreate_names[$model_id]:-omlx-${model_id}}}"
+
+        log_info "Adding model '${model_name}' -> ${model_id}..."
+
+        local payload
+        payload=$(jq -n --arg name "$model_name" --arg model "$model_id" \
+            --slurpfile caps <(cat "$caps_file") '{
+            model_name: $name,
+            litellm_params: {
+                model: $model,
+                custom_llm_provider: "openai",
+                litellm_credential_name: "omlx"
+            },
+            model_info: ([$caps[] | select(.id == $model) | .model_info] | first // {})
+        }')
+
+        local resp
+        resp=$(curl -sS -X POST "${litellm_url}/model/new" \
+            -H "$auth_header" \
+            -H "Content-Type: application/json" \
+            -d "$payload" 2>&1) || { log_warn "Failed to create '${model_name}': ${resp}"; continue; }
+
+        if [ -n "$resp" ]; then
+            log_info "Created '${model_name}'."
+            created=$((created + 1))
+        else
+            log_warn "Failed to create '${model_name}' (empty response)."
+        fi
+    done
+
     echo ""
-    log_info "Sync complete: ${created} created, ${deleted} deleted."
+    log_info "Sync complete: ${created} created, ${deleted} deleted, ${#to_recreate[@]} refreshed."
 }
 
 uninstall_litellm() {
@@ -587,12 +815,14 @@ main() {
             ;;
         sync-omlx)
             if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-                echo "Usage: $(basename "$0") sync-omlx [--dry-run]"
+                echo "Usage: $(basename "$0") sync-omlx [--dry-run] [--no-drift]"
                 echo ""
                 echo "Sync omlx models to LiteLLM proxy."
                 echo ""
                 echo "Options:"
-                echo "  --dry-run   Preview changes without applying them."
+                echo "  --dry-run    Preview changes without applying them."
+                echo "  --no-drift   Skip capability drift detection (only add/remove"
+                echo "               models, never re-create ones whose caps changed)."
                 exit 0
             fi
             sync_omlx_models "$@"
