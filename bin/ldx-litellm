@@ -426,7 +426,7 @@ sync_omlx_models() {
                         "response_format", "logprobs", "top_logprobs",
                         "reasoning_effort"
                     ],
-                    supported_reasoning_efforts: ["low", "medium", "high"]
+                    reasoning_effort_levels: ["low", "medium", "high"]
                 } else {} end)
             }' >> "$caps_file"
     done
@@ -466,7 +466,7 @@ sync_omlx_models() {
                 max_input_tokens,
                 max_output_tokens,
                 supported_openai_params: ((.supported_openai_params // []) | sort),
-                supported_reasoning_efforts: ((.supported_reasoning_efforts // []) | sort)
+                reasoning_effort_levels: ((.reasoning_effort_levels // []) | sort)
               } | tojson)
           ] | @tsv')
 
@@ -487,7 +487,7 @@ sync_omlx_models() {
                 max_input_tokens,
                 max_output_tokens,
                 supported_openai_params: ((.supported_openai_params // []) | sort),
-                supported_reasoning_efforts: ((.supported_reasoning_efforts // []) | sort)
+                reasoning_effort_levels: ((.reasoning_effort_levels // []) | sort)
             }' "$caps_file" | head -n1
     }
 
@@ -498,7 +498,7 @@ sync_omlx_models() {
             "vision=" + (.supports_vision|tostring)
             + " ctx=" + (.max_input_tokens|tostring)
             + " out=" + (.max_output_tokens|tostring)
-            + " reasoning=" + (if .supported_reasoning_efforts then ((.supported_reasoning_efforts // []) | join(",")) else "no" end)
+            + " reasoning=" + (if .reasoning_effort_levels then ((.reasoning_effort_levels // []) | join(",")) else "no" end)
         ' "$caps_file" | head -n1
     }
 
