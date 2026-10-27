@@ -25,6 +25,10 @@ VAULT_OIDC_HOST="vault.rd.localhost"
 AGENTGATEWAY_SECRET="agentgateway-secrets"
 # ConfigMap holding the synced oMLX model list (fragment of the gateway config).
 AGENTGATEWAY_MODELS_CM="agentgateway-llm-models"
+# Virtual client key the gateway validates on inbound LLM requests (stored in
+# the runtime Secret, cached locally for harness configs like opencode).
+AGENTGATEWAY_API_KEY_NAME="AGENTGATEWAY_API_KEY"
+AGENTGATEWAY_KEY_CACHE="${CACHE_DIR}/agentgateway/api_key"
 
 show_help() {
     echo "Usage: $(basename "$0") <install|uninstall|sso|sync-omlx>"
@@ -34,6 +38,7 @@ show_help() {
     echo "  uninstall   Remove agentgateway deployment, services, ingress, config and data."
     echo "  sso         Enable Vault OIDC login for the agentgateway UI."
     echo "  sync-omlx   Sync local oMLX models into the gateway's LLM routes."
+    echo "  api-key     Enforce API-key auth on LLM routes; create/reuse a virtual key."
     echo ""
     echo "Options for sso:"
     echo "  --vault-username <user>  Vault username for entity discovery (default: admin)"
@@ -72,6 +77,14 @@ get_oidc_state() {
         return 0
     fi
     return 1
+}
+
+# Reads the virtual client API key from the runtime Secret. Returns non-zero
+# when API-key enforcement has not been enabled.
+get_api_key_state() {
+    AGENTGATEWAY_API_KEY=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n commons \
+        -o jsonpath="{.data.${AGENTGATEWAY_API_KEY_NAME}}" 2>/dev/null | base64 -d 2>/dev/null) || true
+    [ -n "$AGENTGATEWAY_API_KEY" ]
 }
 
 # Reads the synced oMLX models fragment (the `models:` list) from its ConfigMap.
@@ -129,7 +142,17 @@ EOF
     fi
 
     if [ -n "$models_fragment" ]; then
-        printf 'llm:\n  gateways:\n  - default\n%s\n' "$models_fragment"
+        printf 'llm:\n  gateways:\n  - default\n'
+        # LLM routes are always authenticated with virtual client keys.
+        if ! get_api_key_state; then
+            fatal "No ${AGENTGATEWAY_API_KEY_NAME} in Secret '${AGENTGATEWAY_SECRET}'. Run 'ldx agentgateway api-key' (install/sync-omlx do this automatically)."
+        fi
+        # Virtual client keys: inbound requests must carry one of these in
+        # 'Authorization: Bearer <key>'; the gateway swaps in the provider
+        # key ($OMLX_API_KEY) before forwarding. The raw key stays in the
+        # Secret; the config references it for env expansion.
+        printf '  policies:\n    apiKey:\n      mode: strict\n      keys:\n      - key: $%s\n        metadata:\n          user: local\n' "$AGENTGATEWAY_API_KEY_NAME"
+        printf '%s\n' "$models_fragment"
     fi
 }
 
@@ -181,6 +204,8 @@ install_agentgateway() {
 
     # Render the base config (plus any previously synced models / SSO policy)
     # and apply it before the Deployment so the pod starts with a valid config.
+    # LLM routes always require a virtual client key — ensure one exists first.
+    ensure_api_key
     apply_config
 
     cat <<EOF | kubectl apply -f -
@@ -322,6 +347,9 @@ uninstall_agentgateway() {
     log_info "Removing agentgateway PVC to ensure clean re-install..."
     kubectl delete pvc agentgateway-data -n "$namespace" --ignore-not-found
 
+    # The virtual client key died with the Secret; drop the stale local cache.
+    rm -f "$AGENTGATEWAY_KEY_CACHE"
+
     log_info "agentgateway uninstall complete. The 'commons' namespace was not deleted."
 }
 
@@ -420,6 +448,10 @@ sync_omlx_models() {
         put_secret "OMLX_API_KEY=${omlx_api_key}"
     fi
 
+    # LLM routes always enforce virtual client keys; make sure one exists so
+    # the rendered config carries the apiKey policy.
+    ensure_api_key
+
     log_info "Writing ${#omlx_models[@]} model routes to ConfigMap ${AGENTGATEWAY_MODELS_CM}..."
     kubectl create configmap "$AGENTGATEWAY_MODELS_CM" -n commons \
         --from-literal=models.yaml="$models_fragment" \
@@ -431,6 +463,55 @@ sync_omlx_models() {
     rollout_agentgateway
 
     log_info "Sync complete. ${#omlx_models[@]} oMLX models are now served at https://${AGENTGATEWAY_HOST}/v1"
+}
+
+# ---------------------------------------------------------------------------
+# api-key (virtual client key enforcement)
+# ---------------------------------------------------------------------------
+
+# Ensures a virtual client API key exists: reuses the stored key or generates
+# and stores a fresh one, and keeps the local cache in sync. Does NOT apply the
+# config or restart the gateway; callers decide when that happens.
+ensure_api_key() {
+    local key
+    if get_api_key_state; then
+        key="$AGENTGATEWAY_API_KEY"
+    else
+        key="agw-$(openssl rand -hex 24)"
+        put_secret "${AGENTGATEWAY_API_KEY_NAME}=${key}"
+        log_info "Generated a new virtual API key (stored in Secret '${AGENTGATEWAY_SECRET}')."
+    fi
+
+    # Cache for local harnesses (opencode). Restrict perms: it's a bearer token.
+    mkdir -p "$(dirname "$AGENTGATEWAY_KEY_CACHE")"
+    umask 077
+    printf '%s\n' "$key" > "$AGENTGATEWAY_KEY_CACHE"
+    chmod 600 "$AGENTGATEWAY_KEY_CACHE"
+
+    AGENTGATEWAY_API_KEY="$key"
+}
+
+# Generates (or reuses) the virtual client API key, stores it in the runtime
+# Secret, caches it locally for harness configs, and applies the apiKey policy.
+enable_api_key() {
+    require_command "kubectl"
+
+    local existed=true
+    get_api_key_state || existed=false
+    ensure_api_key
+    if [ "$existed" = true ]; then
+        log_info "Reusing existing virtual API key."
+    fi
+    log_info "Cached key at ${AGENTGATEWAY_KEY_CACHE} (mode 600)."
+
+    apply_config
+    rollout_agentgateway
+
+    log_info "API-key enforcement enabled (llm.policies.apiKey.mode=strict)."
+    log_info "Virtual key stored in Secret '${AGENTGATEWAY_SECRET}' (${AGENTGATEWAY_API_KEY_NAME})"
+    log_info "and cached at ${AGENTGATEWAY_KEY_CACHE}; clients send it as"
+    log_info "'Authorization: Bearer \$(cat ${AGENTGATEWAY_KEY_CACHE})'."
+    log_info "Sync it into opencode with: ldx opencode sync"
 }
 
 # ---------------------------------------------------------------------------
@@ -632,6 +713,9 @@ main() {
             ;;
         sync-omlx)
             sync_omlx_models "$@"
+            ;;
+        api-key)
+            enable_api_key "$@"
             ;;
         *)
             log_error "Unknown subcommand: $subcommand"

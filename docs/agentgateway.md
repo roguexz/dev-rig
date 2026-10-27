@@ -20,8 +20,15 @@ This command installs agentgateway into the `commons` namespace:
    time, so no secret material is stored in the ConfigMap.
 4. **Deployment**: Deploys the pinned agentgateway image (`cr.agentgateway.dev/agentgateway:v1.6.0`) with the config
    mounted read-only at `/etc/agentgateway/config.yaml`.
-5. **Service & Ingress Exposure**: Exposes the gateway via Traefik Ingress (`https://agentgateway.rd.localhost`) and
+5. **Client API key**: Ensures the gateway's virtual client API key exists (generated once as `agw-<48 hex>`, cached
+   at `~/.cache/local-dev/agentgateway/api_key` with mode `0600`, stored in the Secret under `AGENTGATEWAY_API_KEY`)
+   and wires the `llm.policies.apiKey` policy into the config so every LLM request must present it — see
+   [`api-key`](#ldx-agentgateway-api-key).
+6. **Service & Ingress Exposure**: Exposes the gateway via Traefik Ingress (`https://agentgateway.rd.localhost`) and
    an internal ClusterIP for in-cluster clients.
+
+After installation, the gateway UI is available at `https://agentgateway.rd.localhost`. LLM endpoints are protected by
+the client API key policy; the UI itself is authenticated separately (Vault SSO when configured, otherwise open).
 
 > **Note:** Configuration is declarative. Because the ConfigMap mount is read-only, changes made in the agentgateway UI
 > do not survive a pod restart. To change the configuration permanently, edit the manifest in `bin/ldx-agentgateway`
@@ -37,9 +44,25 @@ Syncs the models served by the local [omlx](https://github.com/jundot/omlx) serv
    served at `https://agentgateway.rd.localhost/v1/...` and proxied to `http://host.docker.internal:<port>/v1`.
 4. Stores the omlx API key in the `agentgateway-secrets` Secret (`OMLX_API_KEY`) unless key verification is disabled in
    omlx settings.
+5. Ensures the virtual client API key and `llm.policies.apiKey` policy are present (same as `install`).
 
 Use `--dry-run` to print the generated configuration without applying it. Re-run the command whenever the local model
 list changes.
+
+### `ldx agentgateway api-key`
+
+Manages the gateway's virtual client API key — the credential every LLM client must present:
+
+- **Enforcement**: `llm.policies.apiKey` (mode `strict`) is always configured by `install` and `sync-omlx`; requests
+  to `/v1/...` without a valid key get `401`. The UI and its OIDC flow are not affected.
+- **Generation**: On first use, a key `agw-<48 hex>` is generated, written to
+  `~/.cache/local-dev/agentgateway/api_key` (mode `0600`), and stored in the `agentgateway-secrets` Secret under
+  `AGENTGATEWAY_API_KEY`. The config references it as `$AGENTGATEWAY_API_KEY` (expanded by agentgateway at load time),
+  so the Secret is the canonical copy.
+- **Reuse and rotation**: Re-running the command is idempotent (reuses the cached key, repairs the Secret/config if
+  they drifted). Delete the cache file first to generate a fresh key. `--dry-run` prints without applying.
+
+Clients such as `ldx opencode sync` pick the key up from the cache file or the Secret automatically.
 
 ### `ldx agentgateway sso`
 
@@ -67,8 +90,8 @@ Vault must be unsealed before running this command (`ldx vault unseal`).
 
 ### `ldx agentgateway uninstall`
 
-This command cleans up the agentgateway deployment, services, ingress, configuration, runtime secrets, and the SQLite
-PVC, leaving the `commons` namespace intact.
+This command cleans up the agentgateway deployment, services, ingress, configuration, runtime secrets, the SQLite
+PVC, and the cached client API key file, leaving the `commons` namespace intact.
 
 ## Accessing agentgateway
 
@@ -93,7 +116,9 @@ to connect:
 - **Endpoint:** `http://agentgateway.commons.svc.cluster.local:4000`
 
 LLM clients can call `http://agentgateway.commons.svc.cluster.local:4000/v1/chat/completions` (and the rest of the
-OpenAI-compatible surface) for models synced with `sync-omlx`, authenticating with the omlx API key.
+OpenAI-compatible surface) for models synced with `sync-omlx`, authenticating with the gateway client API key
+(`AGENTGATEWAY_API_KEY`, see [`api-key`](#ldx-agentgateway-api-key)) — not the omlx key, which stays server-side in
+the gateway.
 
 ## Upgrading
 
