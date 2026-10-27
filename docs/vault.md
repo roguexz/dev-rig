@@ -55,6 +55,47 @@ OIDC providers list it via `scopes_supported=profile` (Vault adds `openid` impli
 error), and clients request it at authorize time. Users without metadata simply get empty `name`/`email` claims;
 token issuance never fails. Services such as `ldx agentgateway sso` reference this scope rather than creating it.
 
+### `ldx vault upgrade [chart-version]`
+
+Upgrades Vault to a Helm chart version, with a pre-upgrade snapshot and post-upgrade checks.
+
+```bash
+ldx vault upgrade            # jump to the latest chart
+ldx vault upgrade 0.34.1     # pin a specific chart version
+ldx vault upgrade --dry-run  # render only; touch nothing
+```
+
+What it does:
+
+1. Resolves the target (latest chart if omitted) and prints the plan
+   `chart X (Vault a) -> chart Y (Vault b)`.
+2. Requires an unsealed, running Vault, then saves a storage snapshot
+   (Raft snapshot, or a tar of `/vault/data` for the standalone file backend)
+   into `~/.cache/local-dev/vault/snapshots/`.
+3. Runs `helm upgrade` with the rig's own `--set` values (not `--reuse-values`,
+   which breaks across chart majors that add new value sections) and
+   `--force-conflicts` (the injector controller owns the webhook `caBundle`).
+4. Recreates `vault-0` to load the new image — this chart uses an `OnDelete`
+   rollout — then unseals it and waits for readiness.
+5. Smoke-tests the OIDC issuer discovery endpoint (no token needed) to confirm
+   identity data survived, and records the new version in the cache.
+
+Vault refuses to start against storage written by a **newer** version, so the
+snapshot is the only downgrade path: redeploy the older chart and restore the
+snapshot into the PVC if you must roll back.
+
+### `ldx vault snapshot`
+
+Saves a storage snapshot (Raft or file backend, auto-detected) to
+`~/.cache/local-dev/vault/snapshots/`. The Vault must be unsealed. `upgrade`
+calls this for you before it changes anything.
+
+### Version cache
+
+`setup` and `upgrade` write `~/.cache/local-dev/vault/version.json` recording
+the chart/app version installed, the base version, and the previous one, so a
+later downgrade or audit can see what this workspace was built against.
+
 ### `ldx vault uninstall`
 
 This command completely removes Vault, its persistent data, and its related configurations.

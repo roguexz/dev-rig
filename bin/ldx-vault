@@ -13,10 +13,32 @@ get_script_dir() {
 }
 
 SCRIPT_DIR="$(get_script_dir)"
+
+# Base version guard: the chart pins the Vault app version
+# (0.34.1 -> Vault 2.0.4). Never silently pull a newer chart; ldx vault
+# upgrade handles version moves deliberately (snapshot + checks).
+VAULT_CHART_VERSION="0.34.1"
+
+# The --set flags that define this rig's Vault deployment. Shared by setup and
+# upgrade so an upgrade never relies on --reuse-values: chart 0.34.x added new
+# value sections (server.httproute) whose templates blow up when the old
+# release's values are reused without the new chart's defaults.
+VAULT_HELM_SET_ARGS=(
+    --set "server.dev.enabled=false"
+    --set "server.ha.enabled=false"
+    --set "server.standalone.enabled=true"
+    --set "server.dataStorage.size=1Gi"
+    --set "server.ingress.enabled=true"
+    --set "server.ingress.ingressClassName=traefik"
+    --set "server.ingress.hosts[0].host=vault.rogue.io"
+    --set "server.ingress.hosts[0].paths[0]=/"
+    --set "server.ingress.tls[0].secretName=default-tls-secret"
+    --set "server.ingress.tls[0].hosts[0]=vault.rogue.io"
+)
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <setup|status|unseal|seal|create-user|uninstall> [options]"
+    echo "Usage: $(basename "$0") <setup|status|unseal|seal|create-user|upgrade|snapshot|uninstall> [options]"
     echo ""
     echo "Commands:"
     echo "  setup       Install Vault, initialize it, and store keys."
@@ -24,6 +46,8 @@ show_help() {
     echo "  unseal      Unseal the Vault using stored keys."
     echo "  seal        Seal the Vault."
     echo "  create-user Create (or update) a userpass user with entity metadata."
+    echo "  upgrade     Upgrade Vault to a chart version (default: latest) with a snapshot + checks."
+    echo "  snapshot    Save a storage snapshot (Raft or file backend; Vault must be unsealed)."
     echo "  uninstall   Remove Vault and its stored keys."
     echo ""
     echo "Options for setup:"
@@ -36,6 +60,11 @@ show_help() {
     echo "  --full-name <name>     Display name exposed to OIDC clients via the profile scope"
     echo "  --email <email>        Email exposed to OIDC clients via the profile scope"
     echo "  --policies <list>      Vault policies for the user (default: default)"
+    echo ""
+    echo "Options for upgrade:"
+    echo "  <chart-version>        Target chart version (e.g. 0.34.1, app Vault 2.0.4)."
+    echo "                         Omit to upgrade to the latest chart."
+    echo "  --dry-run              Show what would change; do not touch the cluster."
     echo ""
     echo "Alternatively, you can set OIDC_CLIENT_ID and OIDC_CLIENT_SECRET environment variables."
 }
@@ -87,19 +116,15 @@ setup_vault() {
     local namespace="commons"
     kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
 
-    log_info "Installing Vault..."
+    # Cache the version before installing so it survives even if init is interrupted.
+    record_vault_version "$VAULT_CHART_VERSION" "$(vault_app_version_for_chart "$VAULT_CHART_VERSION")"
+
+    log_info "Installing Vault via Helm (chart ${VAULT_CHART_VERSION})..."
     helm upgrade --install vault hashicorp/vault \
+        --version "$VAULT_CHART_VERSION" \
         --namespace "$namespace" \
-        --set "server.dev.enabled=false" \
-        --set "server.ha.enabled=false" \
-        --set "server.standalone.enabled=true" \
-        --set "server.dataStorage.size=1Gi" \
-        --set "server.ingress.enabled=true" \
-        --set "server.ingress.ingressClassName=traefik" \
-        --set "server.ingress.hosts[0].host=vault.rogue.io" \
-        --set "server.ingress.hosts[0].paths[0]=/" \
-        --set "server.ingress.tls[0].secretName=default-tls-secret" \
-        --set "server.ingress.tls[0].hosts[0]=vault.rogue.io" \
+        "${VAULT_HELM_SET_ARGS[@]}" \
+        --force-conflicts \
         --wait
 
     log_info "Waiting for Vault pod to be created and running..."
@@ -142,6 +167,13 @@ unseal_vault() {
 
     if [ ! -f "${VAULT_DIR}/keys.json" ]; then
         fatal "Vault keys not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
+    fi
+
+    local sealed
+    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    if [ "$sealed" = "false" ]; then
+        log_info "Vault is already unsealed."
+        return
     fi
 
     log_info "Unsealing Vault..."
@@ -437,6 +469,240 @@ REMOTE_EOF
     fi
 }
 
+# --- Version tracking ---------------------------------------------------------
+# ${VAULT_DIR}/version.json records the chart/app version this workspace's
+# setup pins and what the cluster actually runs, so later upgrades (or a
+# downgrade) know the base. Written by setup and upgrade.
+record_vault_version() {
+    local chart="$1" app="$2" prev_chart="${3:-}" prev_app="${4:-}"
+    init_dirs
+    local file="${VAULT_DIR}/version.json" updated
+    updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if [ -f "$file" ] && jq -e . "$file" >/dev/null 2>&1; then
+        [ -n "$prev_chart" ] || prev_chart=$(jq -r '.base_chart // empty' "$file")
+        [ -n "$prev_app" ] || prev_app=$(jq -r '.base_app // empty' "$file")
+    fi
+    jq -n \
+        --arg base_chart "$chart" --arg base_app "$app" \
+        --arg chart "$chart" --arg app "$app" \
+        --arg prev_chart "$prev_chart" --arg prev_app "$prev_app" \
+        --arg updated "$updated" \
+        '{base_chart: $base_chart, base_app: $base_app,
+          chart: $chart, app: $app,
+          previous_chart: (if $prev_chart == "" then null else $prev_chart end),
+          previous_app: (if $prev_app == "" then null else $prev_app end),
+          updated_at: $updated}' > "$file"
+}
+
+# Chart version of the installed helm release, e.g. "0.33.0" (empty if absent).
+vault_release_chart() {
+    helm list -n commons -o json 2>/dev/null \
+        | jq -r '.[] | select(.name == "vault") | .chart' 2>/dev/null \
+        | sed -n 's/^vault-//p'
+}
+
+# Status of the installed helm release ("deployed", "failed", ...).
+vault_release_status() {
+    helm list -n commons -o json 2>/dev/null \
+        | jq -r '.[] | select(.name == "vault") | .status' 2>/dev/null
+}
+
+# Vault app version the running pod reports (empty if not running).
+vault_live_app_version() {
+    kubectl get pod vault-0 -n commons \
+        -o jsonpath='{.spec.containers[?(@.name=="vault")].image}' 2>/dev/null \
+        | sed -n 's/.*:\(.*\)$/\1/p'
+}
+
+# App version pinned by a given chart version (empty when unknown).
+vault_app_version_for_chart() {
+    helm show chart hashicorp/vault --version "$1" 2>/dev/null \
+        | sed -n 's/^appVersion:[[:space:]]*//p' | tr -d '"' | head -1
+}
+
+# Storage backend declared in the generated Vault config: "raft" | "file".
+vault_storage_type() {
+    local type
+    type=$(kubectl get configmap vault-config -n commons -o jsonpath='{.data.config}' 2>/dev/null \
+        | sed -n 's/.*storage "\([a-z-]*\)".*/\1/p' | head -1)
+    printf '%s' "${type:-file}"
+}
+
+snapshot_vault() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local namespace="commons"
+    local sealed
+    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    [ "$sealed" = "false" ] || fatal "Vault is sealed (or not running). Run 'unseal' first."
+
+    init_dirs
+    local chart storage snap
+    chart=$(vault_release_chart)
+    storage=$(vault_storage_type)
+    snap="${VAULT_DIR}/snapshots/$(date +%Y%m%d-%H%M%S)-vault${chart:+-${chart}}-${storage}.snap"
+
+    case "$storage" in
+        raft)
+            log_info "Saving Raft snapshot..."
+            kubectl exec -n "$namespace" vault-0 -- vault operator raft snapshot save /tmp/raft.snap >/dev/null
+            kubectl cp "${namespace}/vault-0:/tmp/raft.snap" "$snap" >/dev/null
+            kubectl exec -n "$namespace" vault-0 -- rm -f /tmp/raft.snap 2>/dev/null || true
+            ;;
+        file)
+            # File backend (chart default for standalone): the data dir on the
+            # PVC *is* the database. Tar it out of the pod. Writes during the
+            # tar are rare on a dev box; for a hard-consistent copy seal first.
+            log_info "Backing up file storage (/vault/data)..."
+            kubectl exec -n "$namespace" vault-0 -- tar czf /tmp/filedb.tgz -C /vault data >/dev/null
+            kubectl cp "${namespace}/vault-0:/tmp/filedb.tgz" "$snap" >/dev/null
+            kubectl exec -n "$namespace" vault-0 -- rm -f /tmp/filedb.tgz 2>/dev/null || true
+            ;;
+        *)
+            fatal "Unsupported storage backend '${storage}'. Snapshot manually."
+            ;;
+    esac
+
+    if [ ! -s "$snap" ]; then
+        rm -f "$snap"
+        fatal "Snapshot is empty; the file was not written."
+    fi
+    log_info "Snapshot saved (${storage}): ${snap} ($(wc -c < "$snap" | tr -d ' ') bytes)"
+}
+
+upgrade_vault() {
+    require_command "helm"
+    require_command "kubectl"
+    require_command "jq"
+
+    local namespace="commons"
+    local target="" dry_run=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                [ -z "$target" ] || { log_error "Unexpected argument: $1"; exit 1; }
+                target="$1"
+                shift
+                ;;
+        esac
+    done
+
+    helm repo add hashicorp https://helm.releases.hashicorp.com --force-update >/dev/null 2>&1 || true
+    helm repo update hashicorp >/dev/null 2>&1 || helm repo update >/dev/null
+
+    local current status
+    current=$(vault_release_chart)
+    status=$(vault_release_status)
+    [ -n "$current" ] || fatal "Vault is not installed. Run 'setup' first."
+
+    if [ -z "$target" ]; then
+        target=$(helm search repo hashicorp/vault -l 2>/dev/null | awk 'NR==2 {print $2}')
+        [ -n "$target" ] || fatal "Could not determine the latest chart version."
+        log_info "No version given; latest chart is ${target} (Vault $(vault_app_version_for_chart "$target"))."
+    fi
+
+    # A release already at the target and healthy is a no-op. A release stuck
+    # at the target but 'failed' (a prior interrupted upgrade) is re-driven.
+    if [ "$target" = "$current" ] && [ "$status" = "deployed" ]; then
+        log_info "Vault already at chart ${target}; nothing to do."
+        record_vault_version "$target" "$(vault_live_app_version)"
+        return
+    fi
+
+    local target_app current_app
+    target_app=$(vault_app_version_for_chart "$target")
+    current_app=$(vault_live_app_version)
+    log_info "Upgrade plan: chart ${current} (Vault ${current_app:-unknown}) -> chart ${target} (Vault ${target_app:-unknown})"
+
+    if $dry_run; then
+        helm upgrade vault hashicorp/vault \
+            --version "$target" \
+            --namespace "$namespace" \
+            "${VAULT_HELM_SET_ARGS[@]}" \
+            --dry-run=client >/dev/null
+        log_info "--dry-run: manifest rendered successfully; no changes applied."
+        return
+    fi
+
+    # Pre-flight: Vault must be healthy and unsealed, and we must hold a
+    # snapshot. Vault refuses to start against storage written by a newer
+    # version, so the snapshot (or the PVC contents) is the rollback path.
+    local sealed
+    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    [ "$sealed" = "false" ] || fatal "Vault is sealed (or not running). Run 'unseal' first."
+
+    snapshot_vault
+    local snap
+    snap=$(ls -t "${VAULT_DIR}/snapshots/"*.snap | head -1)
+
+    log_info "Upgrading Vault Helm release to chart ${target}..."
+    # --force-conflicts: the injector controller re-writes the webhook caBundle
+    # outside helm; helm 4's server-side apply otherwise refuses the field.
+    # No --wait: this chart rolls out OnDelete and its readiness probe fails
+    # while sealed, so helm can never observe the new pod ready on its own.
+    if ! helm upgrade vault hashicorp/vault \
+        --version "$target" \
+        --namespace "$namespace" \
+        "${VAULT_HELM_SET_ARGS[@]}" \
+        --force-conflicts; then
+        fatal "helm upgrade failed. Snapshot: ${snap}. Fix and re-run, or consult docs/vault.md."
+    fi
+
+    # Drive the OnDelete rollout ourselves: recreate the pod so it picks up the
+    # new image, then unseal (a fresh pod starts sealed).
+    if [ "$(vault_live_app_version)" != "${target_app:-$current_app}" ]; then
+        log_info "Recreating vault-0 to load the new image..."
+        kubectl delete pod vault-0 -n "$namespace" --wait=true
+    fi
+    log_info "Waiting for the vault container to start..."
+    kubectl wait --for=condition=ContainersReady pod/vault-0 -n "$namespace" --timeout=180s \
+        || log_warn "vault-0 not ContainersReady yet; attempting unseal anyway."
+
+    log_info "Re-unsealing (new pod starts sealed)..."
+    unseal_vault
+
+    # Wait for readiness now that it is unsealed (readiness = `vault status`).
+    if ! kubectl wait --for=condition=Ready pod/vault-0 -n "$namespace" --timeout=120s; then
+        fatal "vault-0 did not become Ready after unseal. Snapshot for rollback: ${snap}. See docs/vault.md."
+    fi
+
+    # Post checks: app version and that the OIDC issuer config survived the
+    # version move. The provider discovery endpoint needs no token, so a 200
+    # proves the identity backend read the (persisted) OIDC configuration.
+    local new_app ok=true
+    new_app=$(vault_live_app_version)
+    log_info "Running pod image tag: ${new_app:-unknown} (expected ${target_app:-unknown})"
+
+    if kubectl exec -n "$namespace" vault-0 -- sh -c \
+        'wget -qO- http://127.0.0.1:8200/v1/identity/oidc/provider/agentgateway/.well-known/openid-configuration 2>/dev/null || curl -s http://127.0.0.1:8200/v1/identity/oidc/provider/agentgateway/.well-known/openid-configuration' \
+        | grep -q '"issuer"'; then
+        log_info "OIDC issuer responds: identity data intact."
+    else
+        log_warn "OIDC issuer did not respond after upgrade."
+        ok=false
+    fi
+
+    record_vault_version "$target" "${new_app:-$target_app}" "$current" "$current_app"
+
+    if $ok; then
+        log_info "Upgrade complete: chart ${target}, Vault ${new_app:-$target_app}."
+        log_info "Log in at https://agentgateway.rd.localhost/ui and confirm SSO still works."
+    else
+        fatal "Upgrade applied but a smoke check failed. Snapshot for rollback: ${snap}. See docs/vault.md."
+    fi
+}
+
 seal_vault() {
     require_command "kubectl"
 
@@ -514,6 +780,12 @@ main() {
             ;;
         create-user)
             create_user_vault "$@"
+            ;;
+        upgrade)
+            upgrade_vault "$@"
+            ;;
+        snapshot)
+            snapshot_vault
             ;;
         uninstall)
             uninstall_vault
