@@ -558,30 +558,16 @@ sso_agentgateway() {
     sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
     [ "$sealed" = "false" ] || fatal "Vault is sealed. Run 'ldx vault unseal' first."
 
-    # Ensure Vault is reachable at https://vault.rd.localhost from both the
-    # browser (Traefik on the forwarded host ports) and gateway pods
-    # (Deployment hostAlias to the node IP, added by 'install').
-    log_info "Ensuring Vault Ingress for ${VAULT_OIDC_HOST}..."
-    cat <<EOF | kubectl apply -f -
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: vault-rd
-  namespace: ${namespace}
-spec:
-  ingressClassName: traefik
-  rules:
-  - host: ${VAULT_OIDC_HOST}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: vault
-            port:
-              number: 8200
-EOF
+    # Vault must be published at https://vault.rd.localhost for the browser (Traefik on
+    # the forwarded host ports) and for gateway pods (Deployment hostAlias to the node
+    # IP, added by 'install'). The Vault chart's own ingress carries that host, so this
+    # only checks it is there, and clears the duplicate Ingress older rigs created.
+    log_info "Checking Vault is published at ${VAULT_OIDC_HOST}..."
+    kubectl delete ingress vault-rd -n "$namespace" --ignore-not-found
+    if ! kubectl get ingress -n "$namespace" -o jsonpath='{range .items[*]}{.spec.rules[*].host}{"\n"}{end}' 2>/dev/null |
+        grep -qx "$VAULT_OIDC_HOST"; then
+        fatal "No Ingress publishes ${VAULT_OIDC_HOST}. Run 'ldx vault setup' first; it publishes Vault there."
+    fi
 
     # Vault 2.x requires the provider issuer to be scheme+host only; the full
     # issuer (with the provider path) is what ends up in the iss claim.

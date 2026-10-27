@@ -68,7 +68,8 @@ Clients such as `ldx opencode sync` pick the key up from the cache file or the S
 
 Enables Vault (deployed by `ldx vault setup`) as the OIDC identity provider for the agentgateway UI:
 
-1. Creates a Traefik Ingress for `vault.rd.localhost` so the browser can reach Vault with a trusted certificate.
+1. Checks that Vault is published at `vault.rd.localhost`, which `ldx vault setup` does with its own ingress, and removes
+   the duplicate `vault-rd` Ingress that older rigs created for the same host.
 2. Inside the Vault pod, provisions the OIDC resources: signing key (`agentgateway-ui`), OIDC client (`agentgateway-ui`,
    redirect URI `https://agentgateway.rd.localhost/oauth/callback`), group (`agentgateway-ui-users`), assignment, and
    provider (`agentgateway`). The provider advertises
@@ -85,8 +86,7 @@ metadata) instead of the raw entity UUID. Provision or update that metadata with
 Vault must be unsealed before running this command (`ldx vault unseal`).
 
 > **Note:** Vault-side resources (`identity/oidc/{key,client,assignment,provider}/agentgateway*`,
-> `identity/group/name/agentgateway-ui-users`) and the `vault-rd` Ingress are left in place by `uninstall`; clean them
-> up manually if desired.
+> `identity/group/name/agentgateway-ui-users`) are left in place by `uninstall`; clean them up manually if desired.
 
 ### `ldx agentgateway uninstall`
 
