@@ -43,6 +43,25 @@ Models that previously existed in the config but are no longer routed by the gat
 - `--default-model <name>`: select the default model non-interactively.
 - `--keep-stale`: do not prune models that disappeared from the gateway.
 
+## Refreshing after oMLX model changes
+
+The manifest is a snapshot of the gateway's routes taken at sync time, so a model loaded into (or unloaded from) oMLX
+stays invisible to opencode until both steps below re-run, in this order:
+
+```bash
+# 1. gateway routes follow the live oMLX list (rewrites llm.models, restarts the gateway)
+ldx agentgateway sync-omlx
+
+# 2. opencode's provider.local follows the gateway routes
+ldx opencode sync
+```
+
+Step 2 reads the route names from the `agentgateway-llm-models` ConfigMap, so running it before step 1 only re-applies
+the old set. New models appear as extra `local/agw-*` entries; models the gateway dropped are pruned with a warning
+(`--keep-stale` keeps them). The default model reference is kept when the gateway still serves it — pass
+`--default-model <name>` when it does not, since a non-interactive run has no prompt to fall back on. Verify with
+`opencode models | grep local/`.
+
 ## How opencode reaches the gateway
 
 ```

@@ -46,8 +46,12 @@ Syncs the models served by the local [omlx](https://github.com/jundot/omlx) serv
    omlx settings.
 5. Ensures the virtual client API key and `llm.policies.apiKey` policy are present (same as `install`).
 
-Use `--dry-run` to print the generated configuration without applying it. Re-run the command whenever the local model
-list changes.
+Use `--dry-run` to print the generated configuration without applying it.
+
+> **When to run:** whenever models are added to or removed from oMLX. The `llm.models` fragment is rebuilt from the live
+> `/v1/models` list, so a newly loaded model only gains a gateway route — and a removed model only stops being routed —
+> once this command re-runs; the gateway pod restarts as part of it. Clients that cached the previous route list then
+> need their own refresh, see [Refreshing after oMLX model changes](./opencode.md#refreshing-after-omlx-model-changes).
 
 ### `ldx agentgateway api-key`
 
