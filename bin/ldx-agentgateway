@@ -401,7 +401,7 @@ sync_omlx_models() {
         fatal "Failed to fetch models from omlx at ${omlx_base}/v1/models (empty response)"
     fi
 
-    # Extract model IDs (exclude helper/non-LLM models, same list as ldx-litellm)
+    # Extract model IDs (exclude helper/non-LLM models)
     local omlx_models=()
     while IFS= read -r model_id; do
         case "$model_id" in

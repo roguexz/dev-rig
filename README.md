@@ -108,7 +108,6 @@ The `ldx` CLI is modular, with each command managing a specific capability.
 | `ldx redis <subcommand>`        | Deploys a Redis instance accessible from the host.                                          | `ldx-redis`        |
 | `ldx postgres <subcommand>`     | Deploys a PostgreSQL instance with pgvector extension.                                      | `ldx-postgres`     |
 | `ldx vault <subcommand>`        | Manages a local HashiCorp Vault deployment for secrets management.                          | `ldx-vault`        |
-| `ldx litellm <subcommand>`      | Deploys a LiteLLM proxy instance backed by PostgreSQL.                                      | `ldx-litellm`      |
 | `ldx agentgateway <subcommand>` | Deploys agentgateway (LLM/MCP/A2A gateway) with built-in UI, Vault SSO and oMLX model sync. | `ldx-agentgateway` |
 | `ldx opencode <subcommand>`     | Configures the local opencode harness from agentgateway models.                             | `ldx-opencode`     |
 
@@ -124,7 +123,6 @@ For detailed usage of each command, see the documentation below.
 - [**Redis (`redis`)**](./docs/redis.md)
 - [**PostgreSQL (`postgres`)**](./docs/postgres.md)
 - [**Vault (`vault`)**](./docs/vault.md)
-- [**LiteLLM Proxy (`litellm`)**](./docs/litellm.md)
 - [**agentgateway (`agentgateway`)**](./docs/agentgateway.md)
 
 All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each
