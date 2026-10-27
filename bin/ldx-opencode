@@ -86,47 +86,17 @@ get_gateway_models() {
 # from the existing opencode config, if any.
 get_current_default() {
     [ -f "$OPENCODE_CONFIG" ] || return 0
-    OPENCODE_CONFIG="$OPENCODE_CONFIG" PROVIDER_ID="$PROVIDER_ID" python3 - <<'PY'
-import json, os, re, sys
+    OPENCODE_CONFIG="$OPENCODE_CONFIG" PROVIDER_ID="$PROVIDER_ID" \
+    LDX_LIB_DIR="${SCRIPT_DIR}/lib" python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["LDX_LIB_DIR"])
+import jsonc
 
 # Note: this heredoc IS python's stdin, so the config is read by path rather
 # than piped through strip_jsonc.
 try:
     raw = open(os.environ["OPENCODE_CONFIG"], encoding="utf-8").read()
-except OSError:
-    sys.exit(0)
-
-# String-aware // comment stripper (a naive regex would eat the "//" in
-# https:// URLs inside strings).
-out = []
-in_str = esc = False
-i, n = 0, len(raw)
-while i < n:
-    c = raw[i]
-    if in_str:
-        out.append(c)
-        if esc:
-            esc = False
-        elif c == "\\":
-            esc = True
-        elif c == '"':
-            in_str = False
-        i += 1
-        continue
-    if c == '"':
-        in_str = True
-        out.append(c)
-        i += 1
-        continue
-    if c == "/" and i + 1 < n and raw[i + 1] == "/":
-        while i < n and raw[i] != "\n":
-            i += 1
-        continue
-    out.append(c)
-    i += 1
-
-try:
-    cfg = json.loads(re.sub(r",(\s*[}\]])", r"\1", "".join(out)))
+    cfg = jsonc.loads(raw)
 except Exception:
     sys.exit(0)
 
@@ -250,7 +220,9 @@ select_default_model() {
     if [ -n "$current" ]; then
         log_warn "Previous default '${current}' is no longer served by the gateway."
     fi
-    echo "Models served by agentgateway:"
+    # stdout is captured by the caller's $(...); the menu must go to stderr
+    # or the user is prompted to pick a number without ever seeing the list.
+    echo "Models served by agentgateway:" >&2
     local i=0
     while IFS= read -r line; do
         i=$((i + 1))
@@ -259,7 +231,7 @@ select_default_model() {
         [ "$(jq -r '.vision' <<<"$line")" = "true" ] && flags="${flags}vision "
         local ctx
         ctx=$(jq -r '.context' <<<"$line")
-        printf '  [%d] %-32s %s %sctx\n' "$i" "$(jq -r '.id' <<<"$line")" "$flags" "$ctx"
+        printf '  [%d] %-32s %s %sctx\n' "$i" "$(jq -r '.id' <<<"$line")" "$flags" "$ctx" >&2
     done < "$manifest"
 
     local choice
@@ -287,9 +259,12 @@ merge_config() {
     CLIENT_KEY="$client_key" \
     OPENCODE_CONFIG="$OPENCODE_CONFIG" \
     PROVIDER_ID="$PROVIDER_ID" \
+    LDX_LIB_DIR="${SCRIPT_DIR}/lib" \
     GATEWAY_BASE_URL="https://${AGENTGATEWAY_HOST}/v1" \
     python3 - <<'PY'
-import json, os, re, sys
+import json, os, sys
+sys.path.insert(0, os.environ["LDX_LIB_DIR"])
+import jsonc
 
 provider_id = os.environ["PROVIDER_ID"]
 base_url = os.environ["GATEWAY_BASE_URL"]
@@ -345,44 +320,13 @@ provider = {
     "models": {("agw-" + m["id"] if not m["id"].startswith("agw-") else m["id"]): model_entry(m) for m in models},
 }
 
-# Load the existing config (JSONC: strip // comments and trailing commas).
+# Load the existing config (JSONC: // and /* */ comments, trailing commas).
 cfg = {}
 had_comments = False
 try:
     raw = open(path, encoding="utf-8").read()
-
-    # String-aware // comment stripper (a naive regex would eat the "//" in
-    # https:// URLs inside strings).
-    out_chars = []
-    in_str = esc = False
-    i, n = 0, len(raw)
-    while i < n:
-        c = raw[i]
-        if in_str:
-            out_chars.append(c)
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == '"':
-                in_str = False
-            i += 1
-            continue
-        if c == '"':
-            in_str = True
-            out_chars.append(c)
-            i += 1
-            continue
-        if c == "/" and i + 1 < n and raw[i + 1] == "/":
-            had_comments = True
-            while i < n and raw[i] != "\n":
-                i += 1
-            continue
-        out_chars.append(c)
-        i += 1
-
-    stripped = re.sub(r",(\s*[}\]])", r"\1", "".join(out_chars))
-    cfg = json.loads(stripped)
+    stripped, had_comments = jsonc.strip_comments(raw)
+    cfg = json.loads(jsonc.strip_trailing_commas(stripped))
 except FileNotFoundError:
     pass
 except Exception as e:
