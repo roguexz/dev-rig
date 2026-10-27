@@ -24,6 +24,37 @@ installed in your local PATH (`ldx install`).
 
 This command manually seals the Vault.
 
+### `ldx vault create-user <username>`
+
+Creates (or updates) a userpass user with identity metadata, so OIDC clients can show a real name/email instead of a
+raw entity UUID.
+
+```bash
+ldx vault create-user alice --full-name "Alice Example" --email alice@example.com
+# password is prompted (leave empty to keep an existing user's password)
+ldx vault create-user alice --email alice-new@example.com   # update email only
+```
+
+- `--password <pass>` — password (prompted when omitted; an empty response keeps the existing password)
+- `--full-name <name>` / `--email <email>` — stored as entity metadata; omitted values keep their previous value
+- `--policies <list>` — Vault policies for the user (default: `default`)
+
+The command materializes the user's Vault identity entity and writes the metadata onto it. The shared OIDC
+`profile` scope (see below) renders these values into `name`/`email` claims for any client that requests it.
+`setup` does the same for the built-in `admin` user (`Administrator` / `admin@rd.localhost`).
+
+### OIDC profile scope
+
+`setup` and `create-user` ensure a shared OIDC scope exists at `identity/oidc/scope/profile`:
+
+```
+{"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}
+```
+
+OIDC providers list it via `scopes_supported=profile` (Vault adds `openid` implicitly — passing it explicitly is an
+error), and clients request it at authorize time. Users without metadata simply get empty `name`/`email` claims;
+token issuance never fails. Services such as `ldx agentgateway sso` reference this scope rather than creating it.
+
 ### `ldx vault uninstall`
 
 This command completely removes Vault, its persistent data, and its related configurations.

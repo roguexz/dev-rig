@@ -16,19 +16,26 @@ SCRIPT_DIR="$(get_script_dir)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <setup|status|unseal|seal|uninstall> [options]"
+    echo "Usage: $(basename "$0") <setup|status|unseal|seal|create-user|uninstall> [options]"
     echo ""
     echo "Commands:"
-    echo "  setup      Install Vault, initialize it, and store keys."
-    echo "  status     Show the current status of the Vault installation."
-    echo "  unseal     Unseal the Vault using stored keys."
-    echo "  seal       Seal the Vault."
-    echo "  uninstall  Remove Vault and its stored keys."
+    echo "  setup       Install Vault, initialize it, and store keys."
+    echo "  status      Show the current status of the Vault installation."
+    echo "  unseal      Unseal the Vault using stored keys."
+    echo "  seal        Seal the Vault."
+    echo "  create-user Create (or update) a userpass user with entity metadata."
+    echo "  uninstall   Remove Vault and its stored keys."
     echo ""
     echo "Options for setup:"
     echo "  --oidc-client-id <id>          Google OIDC Client ID (enables OIDC login with WebAuthn/Passkeys)"
     echo "  --oidc-client-secret <secret>  Google OIDC Client Secret"
     echo "  --disable-userpass             Disable the default 'admin' userpass login (useful if relying purely on OIDC)"
+    echo ""
+    echo "Options for create-user:"
+    echo "  --password <pass>      Password (prompted when omitted)"
+    echo "  --full-name <name>     Display name exposed to OIDC clients via the profile scope"
+    echo "  --email <email>        Email exposed to OIDC clients via the profile scope"
+    echo "  --policies <list>      Vault policies for the user (default: default)"
     echo ""
     echo "Alternatively, you can set OIDC_CLIENT_ID and OIDC_CLIENT_SECRET environment variables."
 }
@@ -179,6 +186,26 @@ POLICY
             fi
             # Create or update the admin user with the password 'changeit' and assign the admin policy
             vault write auth/userpass/users/admin password=changeit policies=admin
+
+            # Give the admin entity profile metadata (full_name/email) so OIDC
+            # providers that request the profile scope can render claims for
+            # it. The login materializes the entity and its userpass alias;
+            # VAULT_TOKEN must be unset for the login response to carry the
+            # auth block, and the image has no jq, so parse with sed.
+            unset VAULT_TOKEN
+            admin_entity_id=\$(vault login -format=json -method=userpass username=admin password=changeit 2>/dev/null | sed -n 's/.*"entity_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            export VAULT_TOKEN="${root_token}"
+            if [ -n "\$admin_entity_id" ]; then
+                printf '{"id":"%s","name":"admin","metadata":{"full_name":"Administrator","email":"admin@rd.localhost"}}' "\$admin_entity_id" | vault write identity/entity/id/\$admin_entity_id - >/dev/null
+            fi
+
+            # Shared OIDC profile scope: OIDC clients (e.g. agentgateway)
+            # request scope=profile and Vault renders name/email from entity
+            # metadata set above (or by 'create-user'). Missing metadata
+            # renders as an empty claim, never an error.
+            vault write identity/oidc/scope/profile \
+                description="Profile information (name, email)" \
+                template='{"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}' >/dev/null
         else
             # If someone explicitly disables it later, we could optionally disable the auth path,
             # but for a dev script, it's safer to just skip creating/updating it.
@@ -221,6 +248,193 @@ EOF
     fi
 
     log_info "Vault configured successfully with ${auth_methods:-No} authentication."
+}
+
+create_user_vault() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local namespace="commons"
+    local username="" password="" full_name="" email="" policies="default"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --password)
+                password="$2"
+                shift 2
+                ;;
+            --full-name)
+                full_name="$2"
+                shift 2
+                ;;
+            --email)
+                email="$2"
+                shift 2
+                ;;
+            --policies)
+                policies="$2"
+                shift 2
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                if [ -z "$username" ]; then
+                    username="$1"
+                    shift
+                else
+                    log_error "Unexpected argument: $1"
+                    show_help
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    if [ -z "$username" ]; then
+        fatal "Usage: ldx vault create-user <username> [--password <pass>] [--full-name <name>] [--email <email>] [--policies <list>]"
+    fi
+
+    if [ -z "$password" ]; then
+        read -rsp "Password for '${username}' (unchanged if left empty): " password
+        echo ""
+    fi
+
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
+    fi
+    local root_token
+    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+
+    local sealed
+    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    [ "$sealed" = "false" ] || fatal "Vault is sealed. Run 'unseal' first."
+
+    log_info "Creating user '${username}' in Vault..."
+    local out
+    out=$(cat <<'REMOTE_EOF' | kubectl exec -i -n "$namespace" vault-0 -- sh -s "$root_token" "$username" "$password" "$full_name" "$email" "$policies"
+root_token="$1"
+username="$2"
+password="$3"
+full_name="$4"
+email="$5"
+policies="$6"
+export VAULT_TOKEN="$root_token"
+
+# Ensure userpass auth is enabled.
+if ! vault auth list | grep -q "userpass/"; then
+    vault auth enable userpass >/dev/null
+fi
+
+# Ensure the shared OIDC `profile` scope exists (canonical owner: 'setup';
+# this also repairs installs that predate it). Idempotent.
+vault write identity/oidc/scope/profile \
+    description="Profile information (name, email)" \
+    template='{"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}' >/dev/null
+
+# Create the user, or update it without touching the password when blank.
+if [ -n "$password" ]; then
+    vault write auth/userpass/users/$username password="$password" policies="$policies" >/dev/null
+else
+    if ! vault read auth/userpass/users/$username >/dev/null 2>&1; then
+        echo "ERROR: user '$username' does not exist and no --password was given" >&2
+        exit 1
+    fi
+    vault write auth/userpass/users/$username policies="$policies" >/dev/null
+fi
+
+userpass_accessor=$(vault read -format=json sys/auth | tr -d '[:space:]' \
+    | sed -n 's/.*"userpass\/":{"accessor":"\([^"]*\)".*/\1/p')
+
+# Some identity endpoints (entity create, entity-alias, alias lookup) only
+# accept POST, which the Vault CLI (PUT) cannot reach. The Vault image ships
+# wget but not curl; dev hosts usually the other way round.
+http_post() {
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -O - --header="X-Vault-Token: $root_token" --post-data="$2" "$1" 2>/dev/null
+    else
+        curl -s -X POST -H "X-Vault-Token: $root_token" -d "$2" "$1" 2>/dev/null
+    fi
+}
+vault_api() { http_post "${VAULT_ADDR:-http://127.0.0.1:8200}/v1/$1" "$2"; }
+
+# Find the user's entity. A login materializes entity+alias (VAULT_TOKEN must
+# be unset for the response to carry the auth block); with a blank password,
+# fall back to an alias lookup.
+unset VAULT_TOKEN
+entity_id=$(vault login -format=json -method=userpass username="$username" password="$password" 2>/dev/null \
+    | sed -n 's/.*"entity_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+export VAULT_TOKEN="$root_token"
+if { [ -z "$entity_id" ] || [ "$entity_id" = "null" ]; } && [ -n "$userpass_accessor" ]; then
+    entity_id=$(vault_api identity/lookup/entity \
+        "{\"alias_name\":\"$username\",\"alias_mount_accessor\":\"$userpass_accessor\"}" \
+        | sed -n 's/.*"id":"\([^"]*\)".*/\1/p') || true
+fi
+
+# Read-modify-write the entity metadata so unrelated keys survive (a PUT
+# replaces the whole metadata map). The image has no jq/curl; parse the two
+# keys we manage with sed and rewrite the full map.
+meta=""
+existing=""
+if [ -n "$entity_id" ] && [ "$entity_id" != "null" ]; then
+    existing=$(vault read -format=json identity/entity/id/$entity_id 2>/dev/null) || true
+fi
+if [ -n "$existing" ]; then
+    kept_name=$(printf '%s' "$existing" | sed -n 's/.*"full_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    kept_email=$(printf '%s' "$existing" | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    [ -z "$full_name" ] && full_name="$kept_name"
+    [ -z "$email" ] && email="$kept_email"
+fi
+[ -n "$full_name" ] && meta="\"full_name\":\"$full_name\""
+[ -n "$email" ] && meta="${meta:+$meta,}\"email\":\"$email\""
+
+if [ -n "$entity_id" ] && [ "$entity_id" != "null" ]; then
+    if [ -n "$meta" ]; then
+        # Keep the entity name Vault assigned (auto-generated names look like
+        # entity_xxxx once the alias exists).
+        entity_name=$(vault read -format=json -field=name identity/entity/id/$entity_id 2>/dev/null | tr -d '"')
+        [ -n "$entity_name" ] && [ "$entity_name" != "null" ] || entity_name="$username"
+        printf '{"id":"%s","name":"%s","metadata":{%s}}' "$entity_id" "$entity_name" "$meta" \
+            | vault write identity/entity/id/$entity_id - >/dev/null
+    fi
+    echo "OK ${entity_id}"
+elif [ -n "$meta" ] && [ -n "$userpass_accessor" ]; then
+    # Entity does not exist yet (user never logged in): create it with the
+    # metadata and bind the userpass alias so the first login maps onto it.
+    entity_id=$(vault_api identity/entity \
+        "{\"name\":\"$username\",\"metadata\":{$meta}}" \
+        | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+    if [ -n "$entity_id" ]; then
+        vault_api identity/entity-alias \
+            "{\"name\":\"$username\",\"canonical_id\":\"$entity_id\",\"mount_accessor\":\"$userpass_accessor\"}" >/dev/null
+        echo "OK ${entity_id}"
+    else
+        echo "OK no-login"
+    fi
+else
+    echo "OK no-login"
+fi
+REMOTE_EOF
+)
+
+    local status entity_id
+    entity_id=$(printf '%s\n' "$out" | sed -n 's/^OK //p')
+    status="$entity_id"
+    if printf '%s\n' "$out" | grep -q '^ERROR'; then
+        fatal "Vault: $(printf '%s\n' "$out" | sed -n 's/^ERROR: //p')"
+    fi
+
+    log_info "User '${username}' ready (policies: ${policies})."
+    if [ "$status" = "no-login" ]; then
+        log_warn "Could not log in with the given password; entity metadata was left unchanged."
+    elif [ -n "$entity_id" ]; then
+        log_info "Entity: ${entity_id} (full_name: ${full_name:-unchanged}, email: ${email:-unchanged})"
+        if [ -n "$full_name" ] || [ -n "$email" ]; then
+            log_info "OIDC clients requesting the 'profile' scope will receive these as name/email claims."
+        fi
+    fi
 }
 
 seal_vault() {
@@ -297,6 +511,9 @@ main() {
             ;;
         seal)
             seal_vault
+            ;;
+        create-user)
+            create_user_vault "$@"
             ;;
         uninstall)
             uninstall_vault
