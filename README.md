@@ -30,6 +30,11 @@ Before using these scripts, ensure you have the following command-line tools ins
   ```
 
 - A Java Development Kit (JDK) for the `ldx tls keystore` command.
+- Xcode Command Line Tools for the `ldx touchid` command (compiles the Touch ID helper):
+
+  ```bash
+  xcode-select --install
+  ```
 
 ## Quick Start & Installation
 
@@ -102,6 +107,7 @@ The `ldx` CLI is modular, with each command managing a specific capability.
 |---------------------------------|---------------------------------------------------------------------------------------------|--------------------|
 | `ldx install [flags]`           | Installs `ldx` commands into `$HOME/.local/bin` (`--copy` default, `--link` flag).          | `ldx install`      |
 | `ldx cvescan <subcommand>`      | System-wide automated Grype vulnerability scanner LaunchDaemon.                             | `ldx-cvescan`      |
+| `ldx touchid <subcommand>`      | Touch ID (biometric) authentication for `git push` via a global pre-push hook.              | `ldx-touchid`      |
 | `ldx tls <subcommand>`          | Manages local TLS certificates and Java keystores.                                          | `ldx-tls`          |
 | `ldx certmanager <subcommand>`  | Installs and configures `cert-manager` for in-cluster certificates.                         | `ldx-certmanager`  |
 | `ldx otel <subcommand>`         | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).                               | `ldx-otel`         |
@@ -117,6 +123,7 @@ For detailed usage of each command, see the documentation below.
 
 - [**CLI Reference (`ldx`)**](./docs/ldx.md)
 - [**System CVE Scanner (`cvescan`)**](./docs/cvescan.md)
+- [**Touch ID Git Push Hook (`touchid`)**](./docs/touchid.md)
 - [**TLS & Traefik (`tls`)**](./docs/tls.md)
 - [**Cert-Manager (`certmanager`)**](./docs/cert-manager.md)
 - [**OpenTelemetry LGTM Stack (`otel`)**](./docs/otel.md)
@@ -154,4 +161,5 @@ brew install --cask openchamber bruno ghidra
   runs on the same JDK you already installed for `ldx tls keystore`); Hopper is a paid app.
 - **Secure your `git push` with hooks** — [gitleaks](https://github.com/gitleaks/gitleaks) catches secrets before they
   leave your machine. Wire it into a `pre-push` hook — directly or through a hook manager
-  like [lefthook](https://github.com/evilmartians/lefthook) — so credentials never reach a remote.
+  like [lefthook](https://github.com/evilmartians/lefthook) — so credentials never reach a remote. For biometric
+  gating, `ldx touchid` installs a Touch ID-only `pre-push` hook into `$HOME/.config/git/hooks`.

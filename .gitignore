@@ -2,3 +2,6 @@
 .idea/
 *.log
 .DS_Store
+
+# Compiled Touch ID helper (normally built into $HOME/.local/bin by 'ldx touchid install')
+touchid_auth

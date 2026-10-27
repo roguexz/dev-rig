@@ -39,6 +39,7 @@ show_help() {
   echo "Agent Skills & Utilities:"
   echo "  skill         Manage agent skills (install, uninstall, list, info)"
   echo "  cvescan       Manage system-wide automated Grype vulnerability scanner"
+  echo "  touchid       Manage Touch ID authentication for git push (pre-push hook)"
   echo ""
   echo "Local Kubernetes & Infrastructure Setup (Rancher Desktop):"
   echo "  tls           Manage TLS certificates and Traefik configuration"
@@ -98,7 +99,7 @@ install_binaries() {
 
   log_info "Installing ldx commands into '${target_dir}' using ${mode} mode..."
 
-  local scripts=("ldx" "ldx-skill" "ldx-cvescan" "ldx-certmanager" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault" "ldx-agentgateway" "ldx-opencode")
+  local scripts=("ldx" "ldx-skill" "ldx-cvescan" "ldx-touchid" "ldx-certmanager" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault" "ldx-agentgateway" "ldx-opencode")
   local repo_dir="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
   local share_dir="$(cd "${target_dir}/.." &>/dev/null && pwd)/share/ldx"
   [ -z "$share_dir" ] && share_dir="${target_dir}/share/ldx"
@@ -120,6 +121,11 @@ install_binaries() {
       mkdir -p "${share_dir}/cvescan"
       cp -R "${repo_dir}/cvescan/"* "${share_dir}/cvescan/"
       log_info "Copied cvescan/ assets -> ${share_dir}/cvescan/"
+    fi
+    if [ -d "${repo_dir}/lib" ]; then
+      mkdir -p "${share_dir}/lib"
+      cp -R "${repo_dir}/lib/"* "${share_dir}/lib/"
+      log_info "Copied lib/ assets -> ${share_dir}/lib/"
     fi
     if [ -d "${repo_dir}/skills" ]; then
       mkdir -p "${share_dir}/skills"
@@ -146,6 +152,11 @@ install_binaries() {
       mkdir -p "${share_dir}"
       ln -snf "${repo_dir}/cvescan" "${share_dir}/cvescan"
       log_info "Linked cvescan/ assets -> ${share_dir}/cvescan/"
+    fi
+    if [ -d "${repo_dir}/lib" ]; then
+      mkdir -p "${share_dir}"
+      ln -snf "${repo_dir}/lib" "${share_dir}/lib"
+      log_info "Linked lib/ assets -> ${share_dir}/lib/"
     fi
     if [ -d "${repo_dir}/skills" ]; then
       mkdir -p "${share_dir}"
@@ -182,7 +193,7 @@ case "$COMMAND" in
     install_binaries "$@"
     exit 0
     ;;
-  skill|cvescan|tls|certmanager|otel|redis|postgres|vault|agentgateway|opencode)
+  skill|cvescan|touchid|tls|certmanager|otel|redis|postgres|vault|agentgateway|opencode)
     EXEC_SCRIPT="${SCRIPT_DIR}/ldx-${COMMAND}"
     ;;
   help|-h|--help)

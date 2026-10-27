@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+#
+# ldx-touchid - Build the Touch ID authentication helper (touchid_auth) and install
+# it as a global git pre-push hook under $HOME/.config/git/hooks (core.hookspath).
+#
+
+set -euo pipefail
+
+get_script_dir() {
+  local SOURCE="${BASH_SOURCE[0]}"
+  while [ -L "$SOURCE" ]; do
+    local DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+  done
+  cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd
+}
+
+SCRIPT_DIR="$(get_script_dir)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+HOOKS_DIR="${HOME}/.config/git/hooks"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  install [options]   Compile touchid_auth and install the git pre-push hook."
+    echo "                      Options:"
+    echo "                        --dir <path>   Bin directory for touchid_auth"
+    echo "                                     (default: \$HOME/.local/bin or \$HOME/bin)"
+    echo "  uninstall           Remove the git-push helper and the pre-push hook."
+    echo ""
+    echo "The hook is installed into \$HOME/.config/git/hooks and core.hookspath is"
+    echo "pointed there globally. Pushes are gated by Touch ID only (no password fallback)."
+}
+
+# Locate a shipped asset (touchid_auth.swift, pre-push) relative to this script.
+# Works from the repository (bin/../lib) and from copy-installs (bin/../share/ldx/lib).
+resolve_asset() {
+    local asset="$1"
+    local candidate
+    for candidate in \
+        "${SCRIPT_DIR}/../lib/${asset}" \
+        "${SCRIPT_DIR}/../share/ldx/lib/${asset}"; do
+        if [ -f "$candidate" ]; then
+            printf '%s\n' "$(cd "$(dirname "$candidate")" && pwd)/${asset}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Same target-dir heuristic as 'ldx install'.
+default_bin_dir() {
+    if [ -d "${HOME}/.local/bin" ] || [ ! -d "${HOME}/bin" ]; then
+        echo "${HOME}/.local/bin"
+    else
+        echo "${HOME}/bin"
+    fi
+}
+
+install_touchid() {
+    local target_dir=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dir)
+                if [[ -n "${2:-}" && ! "$2" =~ ^-- ]]; then
+                    target_dir="$2"
+                    shift 2
+                else
+                    fatal "Option $1 requires a directory argument."
+                fi
+                ;;
+            *)
+                log_error "Unknown flag for install: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
+    require_command "xcrun"
+    require_command "git"
+
+    if [ -z "$target_dir" ]; then
+        target_dir="$(default_bin_dir)"
+    fi
+
+    local swift_src hook_src
+    swift_src="$(resolve_asset "touchid_auth.swift")" \
+        || fatal "Could not locate lib/touchid_auth.swift next to this script or in share/ldx/lib."
+    hook_src="$(resolve_asset "pre-push")" \
+        || fatal "Could not locate lib/pre-push next to this script or in share/ldx/lib."
+
+    mkdir -p "$target_dir" "$HOOKS_DIR"
+
+    local binary="${target_dir}/touchid_auth"
+    log_info "Compiling ${swift_src} -> ${binary} ..."
+    xcrun swiftc -O "$swift_src" -o "$binary"
+
+    # Ad-hoc sign for robustness (the linker already does this on Apple Silicon).
+    if command -v codesign &>/dev/null; then
+        codesign --force --sign - "$binary" 2>/dev/null \
+            || log_warn "Ad-hoc code signing failed; Touch ID may refuse an unsigned binary."
+    fi
+    chmod +x "$binary"
+
+    cp "$binary" "${HOOKS_DIR}/git-push"
+    chmod +x "${HOOKS_DIR}/git-push"
+    log_info "Installed helper -> ${HOOKS_DIR}/git-push"
+
+    if [ -f "${HOOKS_DIR}/pre-push" ] && [ ! -f "${HOOKS_DIR}/pre-push.bak" ]; then
+        cp "${HOOKS_DIR}/pre-push" "${HOOKS_DIR}/pre-push.bak"
+        log_info "Backed up existing pre-push hook -> ${HOOKS_DIR}/pre-push.bak"
+    fi
+    cp "$hook_src" "${HOOKS_DIR}/pre-push"
+    chmod +x "${HOOKS_DIR}/pre-push"
+    log_info "Installed hook -> ${HOOKS_DIR}/pre-push"
+
+    git config --global core.hookspath "$HOOKS_DIR"
+    log_info "Set git core.hookspath -> ${HOOKS_DIR}"
+
+    log_info "Installation complete! All git pushes will now require Touch ID."
+    log_info "Bypass deliberately with: git push --no-verify"
+}
+
+uninstall_touchid() {
+    if [ -f "${HOOKS_DIR}/pre-push.bak" ]; then
+        mv -f "${HOOKS_DIR}/pre-push.bak" "${HOOKS_DIR}/pre-push"
+        log_info "Restored previous pre-push hook from ${HOOKS_DIR}/pre-push.bak"
+    elif [ -f "${HOOKS_DIR}/pre-push" ]; then
+        rm -f "${HOOKS_DIR}/pre-push"
+        log_info "Removed ${HOOKS_DIR}/pre-push"
+    fi
+
+    rm -f "${HOOKS_DIR}/git-push"
+    log_info "Removed ${HOOKS_DIR}/git-push"
+
+    local candidate_dir
+    for candidate_dir in "$(default_bin_dir)" "${HOME}/.local/bin" "${HOME}/bin"; do
+        if [ -f "${candidate_dir}/touchid_auth" ]; then
+            rm -f "${candidate_dir}/touchid_auth"
+            log_info "Removed ${candidate_dir}/touchid_auth"
+        fi
+    done
+
+    log_info "Uninstall complete. core.hookspath was left untouched (${HOOKS_DIR})."
+}
+
+if [ $# -lt 1 ]; then
+    show_help
+    exit 0
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+    install)
+        install_touchid "$@"
+        ;;
+    uninstall)
+        uninstall_touchid "$@"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    *)
+        log_error "Unknown command: ${COMMAND}"
+        show_help
+        exit 1
+        ;;
+esac

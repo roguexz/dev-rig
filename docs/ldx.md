@@ -22,6 +22,7 @@ You can also run individual capability binaries directly, such as `ldx-vault uns
 | `ldx install`      | Management              | Install `ldx` commands to local bin (`--copy` default, `--link` flag) | [README.md](../README.md)            |
 | `ldx skill`        | Agent Skills            | Manage agent skills (install, uninstall, list, info)                  | [skill.md](./skill.md)               |
 | `ldx cvescan`      | Host Security           | System-wide automated Grype vulnerability scanner daemon              | [cvescan.md](./cvescan.md)           |
+| `ldx touchid`      | Host Security           | Touch ID (biometric) authentication for `git push` via pre-push hook  | [touchid.md](./touchid.md)           |
 | `ldx tls`          | Dev Infrastructure      | Local TLS certificates & Traefik configuration                        | [tls.md](./tls.md)                   |
 | `ldx certmanager`  | Kubernetes Dev          | In-cluster `cert-manager` setup                                       | [cert-manager.md](./cert-manager.md) |
 | `ldx otel`         | Observability           | Grafana LGTM stack (Loki, Grafana, Tempo, Mimir)                      | [otel.md](./otel.md)                 |

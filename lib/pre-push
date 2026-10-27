@@ -1,0 +1,30 @@
+#!/bin/bash
+#
+# pre-push - Git pre-push hook that gates pushes behind Touch ID.
+#
+# Installed by `ldx touchid install` into $HOME/.config/git/hooks (core.hookspath).
+# Requires the `git-push` helper binary to sit next to this hook.
+#
+
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+AUTH_BIN="${HOOK_DIR}/git-push"
+
+REMOTE_NAME="${1:-remote}"
+
+echo "🔒 Authentication required: Touch ID needed to push to remote..."
+
+if [ ! -x "$AUTH_BIN" ]; then
+    echo "❌ Push blocked: Touch ID helper not found at ${AUTH_BIN}." >&2
+    echo "   Reinstall it with: ldx touchid install" >&2
+    exit 1
+fi
+
+# Biometrics-only by design: any failure (no biometrics, timeout, cancellation)
+# blocks the push. Use `git push --no-verify` to bypass hooks deliberately.
+if ! "$AUTH_BIN" "push commits to ${REMOTE_NAME}"; then
+    echo "❌ Push blocked: Touch ID authentication failed or was cancelled." >&2
+    exit 1
+fi
+
+echo "✅ Authenticated. Proceeding with push..."
+exit 0
