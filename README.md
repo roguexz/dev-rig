@@ -21,6 +21,14 @@ Before using these scripts, ensure you have the following command-line tools ins
 - [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
 - [helm](https://helm.sh/docs/intro/install/)
 - [jq](https://stedolan.github.io/jq/download/)
+- [Vault CLI](https://developer.hashicorp.com/vault/install) (for `ldx vault create-user`, which drives Vault over
+  its HTTPS API)
+
+  ```bash
+  brew tap hashicorp/tap
+  brew install hashicorp/tap/vault
+  ```
+
 - A Java Development Kit (JDK) for the `ldx tls keystore` command.
 
 ## Quick Start & Installation

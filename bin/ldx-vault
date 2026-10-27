@@ -30,10 +30,10 @@ VAULT_HELM_SET_ARGS=(
     --set "server.dataStorage.size=1Gi"
     --set "server.ingress.enabled=true"
     --set "server.ingress.ingressClassName=traefik"
-    --set "server.ingress.hosts[0].host=vault.rogue.io"
+    --set "server.ingress.hosts[0].host=vault.rd.localhost"
     --set "server.ingress.hosts[0].paths[0]=/"
     --set "server.ingress.tls[0].secretName=default-tls-secret"
-    --set "server.ingress.tls[0].hosts[0]=vault.rogue.io"
+    --set "server.ingress.tls[0].hosts[0]=vault.rd.localhost"
     # Chart 0.34.x hard-codes *required* pod anti-affinity on hostname for the agent
     # injector (its own comment says to clear it for single-node clusters). On Rancher
     # Desktop a rolling update can then never place its surge pod: the running pod
@@ -112,7 +112,7 @@ status_vault() {
         log_warn "Vault pod is Running but could not determine seal status."
     fi
 
-    log_info "Access URL: https://vault.rogue.io"
+    log_info "Access URL: https://vault.rd.localhost"
     log_info "In-cluster URL: http://vault.commons.svc.cluster.local:8200"
 }
 
@@ -179,7 +179,7 @@ setup_vault() {
 
     configure_default_user
 
-    log_info "Vault UI and API are accessible at: https://vault.rogue.io"
+    log_info "Vault UI and API are accessible at: https://vault.rd.localhost"
     if [ "${DISABLE_USERPASS:-false}" != "true" ]; then
         log_info "You can login with Username: admin, Password: changeit"
     fi
@@ -256,8 +256,10 @@ POLICY
             unset VAULT_TOKEN
             admin_entity_id=\$(vault login -format=json -method=userpass username=admin password=changeit 2>/dev/null | sed -n 's/.*"entity_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
             export VAULT_TOKEN="${root_token}"
+            # No "id" in the body: the path already carries it, and Vault warns when a
+            # body repeats a parameter it takes from the URL.
             if [ -n "\$admin_entity_id" ]; then
-                printf '{"id":"%s","name":"admin","metadata":{"full_name":"Administrator","email":"admin@rd.localhost"}}' "\$admin_entity_id" | vault write identity/entity/id/\$admin_entity_id - >/dev/null
+                printf '{"name":"admin","metadata":{"full_name":"Administrator","email":"admin@rd.localhost"}}' | vault write identity/entity/id/\$admin_entity_id - >/dev/null
             fi
 
             # Shared OIDC profile scope: OIDC clients (e.g. agentgateway)
@@ -289,7 +291,7 @@ POLICY
 
             vault write auth/oidc/role/admin \\
                 bound_audiences="${OIDC_CLIENT_ID:-}" \\
-                allowed_redirect_uris="https://vault.rogue.io/ui/vault/auth/oidc/oidc/callback" \\
+                allowed_redirect_uris="https://vault.rd.localhost/ui/vault/auth/oidc/oidc/callback" \\
                 allowed_redirect_uris="http://localhost:8250/oidc/callback" \\
                 user_claim="sub" \\
                 policies="admin"
@@ -311,11 +313,41 @@ EOF
     log_info "Vault configured successfully with ${auth_methods:-No} authentication."
 }
 
-create_user_vault() {
-    require_command "kubectl"
-    require_command "jq"
+# --- Vault API access ---------------------------------------------------------
+# Pods reach Vault at http://vault.commons.svc; host-side CLI calls go through
+# the Traefik ingress instead. The certificate for it comes from 'ldx tls setup',
+# whose wildcard covers *.rd.localhost, so the Go binary verifies it without -k.
+VAULT_API_URL="https://vault.rd.localhost"
+VAULT_ROOT_TOKEN=""
 
-    local namespace="commons"
+# Address and token are passed explicitly, so an ambient VAULT_ADDR/VAULT_TOKEN
+# in the caller's shell can never point these commands at another server.
+vault_cli() {
+    VAULT_ADDR="$VAULT_API_URL" VAULT_TOKEN="$VAULT_ROOT_TOKEN" vault "$@"
+}
+
+# Loads the cached root token and requires a reachable, unsealed Vault.
+# Reads `.sealed` as a raw boolean: jq's `//` treats `false` as absent, so
+# `.sealed // empty` would report a healthy Vault as unreachable.
+require_unsealed_vault() {
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
+    fi
+    VAULT_ROOT_TOKEN=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+
+    local sealed
+    sealed=$(vault_cli status -format=json 2>/dev/null | jq -r '.sealed') || true
+    case "$sealed" in
+        false) ;;
+        true) fatal "Vault is sealed. Run 'unseal' first." ;;
+        *) fatal "Cannot reach Vault at ${VAULT_API_URL}. Is the cluster up and 'ldx vault setup' done?" ;;
+    esac
+}
+
+create_user_vault() {
+    require_command "jq"
+    require_command "vault"
+
     local username="" password="" full_name="" email="" policies="default"
 
     while [[ $# -gt 0 ]]; do
@@ -359,142 +391,98 @@ create_user_vault() {
     fi
 
     if [ -z "$password" ]; then
-        read -rsp "Password for '${username}' (unchanged if left empty): " password
+        # `|| true`: with no TTY (CI, a pipe) read hits EOF and fails, and set -e
+        # would drop out here without a word. An empty password is meaningful below.
+        read -rsp "Password for '${username}' (unchanged if left empty): " password || true
         echo ""
     fi
 
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
-        fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
-    fi
-    local root_token
-    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
-
-    local sealed
-    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
-    [ "$sealed" = "false" ] || fatal "Vault is sealed. Run 'unseal' first."
+    require_unsealed_vault
 
     log_info "Creating user '${username}' in Vault..."
-    local out
-    out=$(cat <<'REMOTE_EOF' | kubectl exec -i -n "$namespace" vault-0 -- sh -s "$root_token" "$username" "$password" "$full_name" "$email" "$policies"
-root_token="$1"
-username="$2"
-password="$3"
-full_name="$4"
-email="$5"
-policies="$6"
-export VAULT_TOKEN="$root_token"
 
-# Ensure userpass auth is enabled.
-if ! vault auth list | grep -q "userpass/"; then
-    vault auth enable userpass >/dev/null
-fi
-
-# Ensure the shared OIDC `profile` scope exists (canonical owner: 'setup';
-# this also repairs installs that predate it). Idempotent.
-vault write identity/oidc/scope/profile \
-    description="Profile information (name, email)" \
-    template='{"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}' >/dev/null
-
-# Create the user, or update it without touching the password when blank.
-if [ -n "$password" ]; then
-    vault write auth/userpass/users/$username password="$password" policies="$policies" >/dev/null
-else
-    if ! vault read auth/userpass/users/$username >/dev/null 2>&1; then
-        echo "ERROR: user '$username' does not exist and no --password was given" >&2
-        exit 1
+    # Ensure userpass auth is enabled.
+    if ! vault_cli read -format=json sys/auth | jq -e '.data | has("userpass/")' >/dev/null 2>&1; then
+        vault_cli auth enable userpass >/dev/null
     fi
-    vault write auth/userpass/users/$username policies="$policies" >/dev/null
-fi
 
-userpass_accessor=$(vault read -format=json sys/auth | tr -d '[:space:]' \
-    | sed -n 's/.*"userpass\/":{"accessor":"\([^"]*\)".*/\1/p')
+    # Ensure the shared OIDC `profile` scope exists (canonical owner: 'setup';
+    # this also repairs installs that predate it). Idempotent.
+    vault_cli write identity/oidc/scope/profile \
+        description="Profile information (name, email)" \
+        template='{"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}' >/dev/null
 
-# Some identity endpoints (entity create, entity-alias, alias lookup) only
-# accept POST, which the Vault CLI (PUT) cannot reach. The Vault image ships
-# wget but not curl; dev hosts usually the other way round.
-http_post() {
-    if command -v wget >/dev/null 2>&1; then
-        wget -q -O - --header="X-Vault-Token: $root_token" --post-data="$2" "$1" 2>/dev/null
+    # Create the user, or update it without touching the password when blank.
+    if [ -n "$password" ]; then
+        vault_cli write "auth/userpass/users/${username}" password="$password" policies="$policies" >/dev/null
+    elif vault_cli read "auth/userpass/users/${username}" >/dev/null 2>&1; then
+        vault_cli write "auth/userpass/users/${username}" policies="$policies" >/dev/null
     else
-        curl -s -X POST -H "X-Vault-Token: $root_token" -d "$2" "$1" 2>/dev/null
+        fatal "user '${username}' does not exist and no --password was given."
     fi
-}
-vault_api() { http_post "${VAULT_ADDR:-http://127.0.0.1:8200}/v1/$1" "$2"; }
 
-# Find the user's entity. A login materializes entity+alias (VAULT_TOKEN must
-# be unset for the response to carry the auth block); with a blank password,
-# fall back to an alias lookup.
-unset VAULT_TOKEN
-entity_id=$(vault login -format=json -method=userpass username="$username" password="$password" 2>/dev/null \
-    | sed -n 's/.*"entity_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-export VAULT_TOKEN="$root_token"
-if { [ -z "$entity_id" ] || [ "$entity_id" = "null" ]; } && [ -n "$userpass_accessor" ]; then
-    entity_id=$(vault_api identity/lookup/entity \
-        "{\"alias_name\":\"$username\",\"alias_mount_accessor\":\"$userpass_accessor\"}" \
-        | sed -n 's/.*"id":"\([^"]*\)".*/\1/p') || true
-fi
-
-# Read-modify-write the entity metadata so unrelated keys survive (a PUT
-# replaces the whole metadata map). The image has no jq/curl; parse the two
-# keys we manage with sed and rewrite the full map.
-meta=""
-existing=""
-if [ -n "$entity_id" ] && [ "$entity_id" != "null" ]; then
-    existing=$(vault read -format=json identity/entity/id/$entity_id 2>/dev/null) || true
-fi
-if [ -n "$existing" ]; then
-    kept_name=$(printf '%s' "$existing" | sed -n 's/.*"full_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    kept_email=$(printf '%s' "$existing" | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-    [ -z "$full_name" ] && full_name="$kept_name"
-    [ -z "$email" ] && email="$kept_email"
-fi
-[ -n "$full_name" ] && meta="\"full_name\":\"$full_name\""
-[ -n "$email" ] && meta="${meta:+$meta,}\"email\":\"$email\""
-
-if [ -n "$entity_id" ] && [ "$entity_id" != "null" ]; then
-    if [ -n "$meta" ]; then
-        # Keep the entity name Vault assigned (auto-generated names look like
-        # entity_xxxx once the alias exists).
-        entity_name=$(vault read -format=json -field=name identity/entity/id/$entity_id 2>/dev/null | tr -d '"')
-        [ -n "$entity_name" ] && [ "$entity_name" != "null" ] || entity_name="$username"
-        printf '{"id":"%s","name":"%s","metadata":{%s}}' "$entity_id" "$entity_name" "$meta" \
-            | vault write identity/entity/id/$entity_id - >/dev/null
+    # A successful login both checks the password and makes Vault materialize the
+    # entity and its userpass alias. -no-store keeps the caller's own token file.
+    if [ -n "$password" ] &&
+        ! vault_cli login -no-store -method=userpass username="$username" password="$password" >/dev/null 2>&1; then
+        log_warn "Could not log in with the given password."
     fi
-    echo "OK ${entity_id}"
-elif [ -n "$meta" ] && [ -n "$userpass_accessor" ]; then
-    # Entity does not exist yet (user never logged in): create it with the
-    # metadata and bind the userpass alias so the first login maps onto it.
-    entity_id=$(vault_api identity/entity \
-        "{\"name\":\"$username\",\"metadata\":{$meta}}" \
-        | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+
+    local accessor entity_id
+    accessor=$(vault_cli read -format=json sys/auth | jq -r '.data["userpass/"].accessor // empty')
+
+    # Find the entity by its userpass alias. identity/lookup/entity is documented
+    # as POST-only, but Vault answers the CLI's PUT as well, so the CLI covers
+    # every identity call this command needs.
+    entity_id=""
+    if [ -n "$accessor" ]; then
+        entity_id=$(vault_cli write -format=json -field=id identity/lookup/entity \
+            alias_name="$username" alias_mount_accessor="$accessor" 2>/dev/null | tr -d '"') || true
+    fi
+
+    # Read-modify-write the entity so unrelated metadata keys survive (a PUT
+    # replaces the whole map) and the entity name Vault assigned is kept.
+    local entity_name="$username" current_meta='{}' metadata entity_json
     if [ -n "$entity_id" ]; then
-        vault_api identity/entity-alias \
-            "{\"name\":\"$username\",\"canonical_id\":\"$entity_id\",\"mount_accessor\":\"$userpass_accessor\"}" >/dev/null
-        echo "OK ${entity_id}"
-    else
-        echo "OK no-login"
+        entity_json=$(vault_cli read -format=json "identity/entity/id/${entity_id}" 2>/dev/null) || true
+        if [ -n "$entity_json" ]; then
+            current_meta=$(jq -c '.data.metadata // {}' <<<"$entity_json")
+            [ -n "$current_meta" ] || current_meta='{}'
+            entity_name=$(jq -r '.data.name // empty' <<<"$entity_json")
+            [ -n "$entity_name" ] || entity_name="$username"
+        fi
     fi
-else
-    echo "OK no-login"
-fi
-REMOTE_EOF
-)
+    metadata=$(jq -cn \
+        --argjson current "$current_meta" --arg full_name "$full_name" --arg email "$email" \
+        '$current
+         + (if $full_name == "" then {} else {full_name: $full_name} end)
+         + (if $email == "" then {} else {email: $email} end)')
 
-    local status entity_id
-    entity_id=$(printf '%s\n' "$out" | sed -n 's/^OK //p')
-    status="$entity_id"
-    if printf '%s\n' "$out" | grep -q '^ERROR'; then
-        fatal "Vault: $(printf '%s\n' "$out" | sed -n 's/^ERROR: //p')"
+    if [ -n "$entity_id" ]; then
+        # The id comes from the path, so it stays out of the body.
+        jq -n --arg name "$entity_name" --argjson metadata "$metadata" \
+            '{name: $name, metadata: $metadata}' \
+            | vault_cli write "identity/entity/id/${entity_id}" - >/dev/null
+    elif [ -n "$accessor" ] && [ "$metadata" != "{}" ]; then
+        # Entity does not exist yet (user never logged in): create it with the
+        # metadata and bind the userpass alias so the first login maps onto it.
+        entity_id=$(jq -n --arg name "$username" --argjson metadata "$metadata" \
+            '{name: $name, metadata: $metadata}' \
+            | vault_cli write -format=json -field=id identity/entity - 2>/dev/null | tr -d '"') || true
+        if [ -n "$entity_id" ]; then
+            vault_cli write identity/entity-alias \
+                name="$username" canonical_id="$entity_id" mount_accessor="$accessor" >/dev/null
+        fi
     fi
 
     log_info "User '${username}' ready (policies: ${policies})."
-    if [ "$status" = "no-login" ]; then
-        log_warn "Could not log in with the given password; entity metadata was left unchanged."
-    elif [ -n "$entity_id" ]; then
+    if [ -z "$entity_id" ]; then
+        log_warn "No entity for '${username}' and nothing to store; metadata was left unchanged."
+    elif [ -n "$full_name" ] || [ -n "$email" ]; then
         log_info "Entity: ${entity_id} (full_name: ${full_name:-unchanged}, email: ${email:-unchanged})"
-        if [ -n "$full_name" ] || [ -n "$email" ]; then
-            log_info "OIDC clients requesting the 'profile' scope will receive these as name/email claims."
-        fi
+        log_info "OIDC clients requesting the 'profile' scope will receive these as name/email claims."
+    else
+        log_info "Entity: ${entity_id}"
     fi
 }
 
@@ -687,7 +675,7 @@ upgrade_vault() {
         --force-conflicts; then
         log_error "helm upgrade failed. Pods that are not ready:"
         report_unready_pods "$namespace"
-        fatal "helm upgrade failed. Snapshot: ${snap}. Fix and re-run, or consult docs/vault.md."
+        fatal "Snapshot: ${snap}. Fix and re-run, or consult docs/vault.md."
     fi
 
     # Drive the OnDelete rollout ourselves: recreate the pod so it picks up the

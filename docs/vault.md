@@ -43,6 +43,12 @@ The command materializes the user's Vault identity entity and writes the metadat
 `profile` scope (see below) renders these values into `name`/`email` claims for any client that requests it.
 `setup` does the same for the built-in `admin` user (`Administrator` / `admin@rd.localhost`).
 
+It drives Vault with the `vault` CLI over the ingress (`https://vault.rd.localhost`), authenticating with the root token
+cached in `~/.cache/local-dev/vault/keys.json`; that host is on the mkcert wildcard `ldx tls` issues (`*.rd.localhost`) and
+installs into the system trust store, so the CLI verifies it without `-k`. If the user has no identity entity yet (they never
+logged in), the command creates one and binds its `userpass` alias, so the first login maps onto that entity. Existing
+metadata keys and the entity name Vault assigned are preserved.
+
 ### OIDC profile scope
 
 `setup` and `create-user` ensure a shared OIDC scope exists at `identity/oidc/scope/profile`:
@@ -107,9 +113,23 @@ This command completely removes Vault, its persistent data, and its related conf
 The Vault UI and API are exposed via a Traefik Ingress. For applications running directly on your host OS or for
 accessing the UI in your browser, use the following address:
 
-- **Vault Address:** `https://vault.rogue.io` (or `https://vault.rd.localhost`)
+- **Vault Address:** `https://vault.rd.localhost`
 - **UI Username:** `admin`
 - **UI Password:** `changeit`
+
+`vault.rd.localhost` resolves to loopback on its own and is covered by the certificate `ldx tls` issues, so the UI and the
+CLI work without an `/etc/hosts` entry or `-k`. An install made before this host was used still publishes
+`vault.rogue.io` on the ingress; `ldx vault setup` moves it.
+
+With the `vault` CLI (see Prerequisites in the README):
+
+```bash
+export VAULT_ADDR=https://vault.rd.localhost
+vault login -method=userpass username=admin        # writes ~/.vault-token
+vault login -no-store -method=userpass username=admin   # ...without touching it
+```
+
+`ldx vault create-user` uses this same address, with the cached root token instead of a login.
 
 ### From Inside the Kubernetes Cluster
 
