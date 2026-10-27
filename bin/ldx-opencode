@@ -1,0 +1,537 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+get_script_dir() {
+  local SOURCE="${BASH_SOURCE[0]}"
+  while [ -L "$SOURCE" ]; do
+    local DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+  done
+  cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd
+}
+
+SCRIPT_DIR="$(get_script_dir)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+# Hostname (Traefik Ingress) the agentgateway LLM endpoint is served on.
+# Keep in sync with bin/ldx-agentgateway.
+AGENTGATEWAY_HOST="agentgateway.rd.localhost"
+# ConfigMap holding the synced oMLX model list (fragment of the gateway config).
+AGENTGATEWAY_MODELS_CM="agentgateway-llm-models"
+# Provider id written into the opencode config.
+PROVIDER_ID="local"
+
+# oMLX local files.
+OMLX_DIR="${HOME}/.omlx"
+OMLX_SETTINGS="${OMLX_DIR}/settings.json"
+OMLX_MODEL_SETTINGS="${OMLX_DIR}/model_settings.json"
+
+# Target harness config.
+OPENCODE_CONFIG="${HOME}/.config/opencode/opencode.jsonc"
+
+# Virtual client key cached by 'ldx agentgateway api-key'.
+AGENTGATEWAY_KEY_CACHE="${CACHE_DIR}/agentgateway/api_key"
+
+# Helper (non-LLM) models served by omlx but useless as coding models; same
+# exclusion list as ldx-agentgateway sync-omlx, extended with embeddings.
+is_helper_model() {
+    case "$1" in
+        MarkItDown|nomicai-modernbert|*modernbert*|*embedding*|*embed*) return 0 ;;
+    esac
+    return 1
+}
+
+show_help() {
+    echo "Usage: $(basename "$0") <sync>"
+    echo ""
+    echo "Commands:"
+    echo "  sync        Sync agentgateway model routes + omlx settings into the"
+    echo "              local opencode config (~/.config/opencode/opencode.jsonc)."
+    echo ""
+    echo "Options for sync:"
+    echo "  --dry-run             Show the merged config without writing it."
+    echo "  --default-model <id>  Default coding model (id as served by the"
+    echo "                        gateway). Skips the interactive prompt."
+    echo "  --keep-stale          Keep provider models the gateway no longer serves"
+    echo "                        instead of pruning them."
+    echo ""
+    echo "Notes:"
+    echo "  - The gateway list comes from the ConfigMap written by"
+    echo "    'ldx agentgateway sync-omlx'; run that first (or re-run it to refresh)."
+    echo "  - The gateway injects the omlx API key upstream, so the opencode"
+    echo "    config uses a placeholder key."
+    echo "  - JSONC comments in the existing config are not preserved; a backup is"
+    echo "    written to opencode.jsonc.bak before overwriting."
+}
+
+# ---------------------------------------------------------------------------
+# Data collection
+# ---------------------------------------------------------------------------
+
+# Reads the synced oMLX model route names from the gateway's ConfigMap,
+# one per line, helpers excluded.
+get_gateway_models() {
+    local fragment
+    fragment=$(kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n commons \
+        -o jsonpath='{.data.models\.yaml}' 2>/dev/null) || true
+    if [ -z "$fragment" ]; then
+        return 1
+    fi
+    printf '%s\n' "$fragment" | sed -n 's/^[[:space:]]*- name:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p'
+}
+
+# Reads the current default model id (without provider prefix or #variant)
+# from the existing opencode config, if any.
+get_current_default() {
+    [ -f "$OPENCODE_CONFIG" ] || return 0
+    OPENCODE_CONFIG="$OPENCODE_CONFIG" PROVIDER_ID="$PROVIDER_ID" python3 - <<'PY'
+import json, os, re, sys
+
+# Note: this heredoc IS python's stdin, so the config is read by path rather
+# than piped through strip_jsonc.
+try:
+    raw = open(os.environ["OPENCODE_CONFIG"], encoding="utf-8").read()
+except OSError:
+    sys.exit(0)
+
+# String-aware // comment stripper (a naive regex would eat the "//" in
+# https:// URLs inside strings).
+out = []
+in_str = esc = False
+i, n = 0, len(raw)
+while i < n:
+    c = raw[i]
+    if in_str:
+        out.append(c)
+        if esc:
+            esc = False
+        elif c == "\\":
+            esc = True
+        elif c == '"':
+            in_str = False
+        i += 1
+        continue
+    if c == '"':
+        in_str = True
+        out.append(c)
+        i += 1
+        continue
+    if c == "/" and i + 1 < n and raw[i + 1] == "/":
+        while i < n and raw[i] != "\n":
+            i += 1
+        continue
+    out.append(c)
+    i += 1
+
+try:
+    cfg = json.loads(re.sub(r",(\s*[}\]])", r"\1", "".join(out)))
+except Exception:
+    sys.exit(0)
+
+model = cfg.get("model") or ""
+if "/" in model:
+    provider, rest = model.split("/", 1)
+    if provider == os.environ.get("PROVIDER_ID", "local"):
+        mid = rest.split("#", 1)[0]
+        # Config keys carry the 'agw-' prefix; manifest ids don't.
+        if mid.startswith("agw-"):
+            mid = mid[len("agw-"):]
+        print(mid)
+PY
+}
+
+# Builds the model manifest consumed by merge_config: one JSON object per line
+# with the fields needed to render the opencode provider block. Reads model ids
+# from stdin; helpers and hidden/unknown entries are skipped.
+build_manifest() {
+    local manifest="$1" model_id
+    : > "$manifest"
+    while IFS= read -r model_id; do
+        [ -n "$model_id" ] || continue
+        is_helper_model "$model_id" && continue
+        MODEL_ID="$model_id" \
+        OMLX_SETTINGS="$OMLX_SETTINGS" \
+        OMLX_MODEL_SETTINGS="$OMLX_MODEL_SETTINGS" \
+        OMLX_MODELS_DIR="${OMLX_DIR}/models" \
+        python3 - <<'PY' >> "$manifest"
+import glob, json, os, sys
+
+model_id = os.environ["MODEL_ID"]
+settings = json.load(open(os.environ["OMLX_SETTINGS"], encoding="utf-8"))
+mset = json.load(open(os.environ["OMLX_MODEL_SETTINGS"], encoding="utf-8")).get("models", {})
+
+# Match by alias first, then by model folder name.
+entry, folder = None, model_id
+for key, value in mset.items():
+    if value.get("model_alias") == model_id or key == model_id:
+        entry, folder = value, key
+        break
+# Unknown to omlx settings (e.g. removed there but still routed), or hidden:
+# skip so the harness only offers fully-configured models.
+if entry is None or entry.get("is_hidden"):
+    sys.exit(0)
+
+sampling = settings.get("sampling", {})
+context = entry.get("max_context_window") or sampling.get("max_context_window") or 8192
+output = sampling.get("max_tokens") or 8192
+
+# Vision: probe the model config.json for vision_*/image_* keys.
+vision = False
+pattern = os.path.join(os.environ["OMLX_MODELS_DIR"], "*", folder, "config.json")
+for path in glob.glob(pattern):
+    try:
+        conf = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        continue
+    if any(k.startswith("vision") or k.startswith("image_") for k in conf):
+        vision = True
+        break
+
+# Display name: humanize the id (qwen-3.8-moe-full -> Qwen 3.8 MoE Full).
+def humanize(word):
+    if word.lower() == "moe":
+        return "MoE"
+    return word.capitalize()
+
+name = " ".join(humanize(w) for w in model_id.split("-"))
+
+print(json.dumps({
+    "id": model_id,
+    "name": name,
+    "vision": vision,
+    "context": context,
+    "output": output,
+    "parser": bool(entry.get("reasoning_parser")),
+    "budget_enabled": bool(entry.get("thinking_budget_enabled")),
+    "budget": entry.get("thinking_budget_tokens") or 4096,
+}))
+PY
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Default model selection
+# ---------------------------------------------------------------------------
+
+# Echoes the chosen model id. Priority: --default-model flag, current config
+# (if still served), interactive prompt. Errors on non-TTY with no valid pick.
+select_default_model() {
+    local manifest="$1" flag="$2" current="$3"
+    # Accept ids with or without the config-side 'agw-' prefix.
+    flag="${flag#agw-}"
+    local count
+    count=$(wc -l < "$manifest" | tr -d '[:space:]')
+    [ "$count" -gt 0 ] || fatal "No usable models found in the gateway list."
+
+    if [ -n "$flag" ]; then
+        if ! jq -e --arg id "$flag" 'select(.id == $id)' "$manifest" >/dev/null 2>&1; then
+            log_error "Model '${flag}' is not served by the gateway. Available:"
+            jq -r '.id' "$manifest" | sed 's/^/  - /' >&2
+            exit 1
+        fi
+        printf '%s\n' "$flag"
+        return 0
+    fi
+
+    if [ -n "$current" ] && jq -e --arg id "$current" 'select(.id == $id)' "$manifest" >/dev/null 2>&1; then
+        printf '%s\n' "$current"
+        return 0
+    fi
+
+    if [ ! -t 0 ]; then
+        log_error "No default model configured and none selected with --default-model."
+        log_error "Available models:" >&2
+        jq -r '.id' "$manifest" | sed 's/^/  - /' >&2
+        exit 1
+    fi
+
+    if [ -n "$current" ]; then
+        log_warn "Previous default '${current}' is no longer served by the gateway."
+    fi
+    echo "Models served by agentgateway:"
+    local i=0
+    while IFS= read -r line; do
+        i=$((i + 1))
+        local flags=""
+        [ "$(jq -r '.parser or .budget_enabled' <<<"$line")" = "true" ] && flags="${flags}thinking "
+        [ "$(jq -r '.vision' <<<"$line")" = "true" ] && flags="${flags}vision "
+        local ctx
+        ctx=$(jq -r '.context' <<<"$line")
+        printf '  [%d] %-32s %s %sctx\n' "$i" "$(jq -r '.id' <<<"$line")" "$flags" "$ctx"
+    done < "$manifest"
+
+    local choice
+    while true; do
+        read -r -p "Default coding model [1]: " choice
+        choice=${choice:-1}
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$count" ]; then
+            jq -r ".id" <(sed -n "${choice}p" "$manifest")
+            return 0
+        fi
+        echo "Pick a number between 1 and ${count}." >&2
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Config merge
+# ---------------------------------------------------------------------------
+
+merge_config() {
+    local manifest="$1" default_id="$2" keep_stale="$3" client_key="$4"
+
+    MANIFEST="$manifest" \
+    DEFAULT_ID="$default_id" \
+    KEEP_STALE="$keep_stale" \
+    CLIENT_KEY="$client_key" \
+    OPENCODE_CONFIG="$OPENCODE_CONFIG" \
+    PROVIDER_ID="$PROVIDER_ID" \
+    GATEWAY_BASE_URL="https://${AGENTGATEWAY_HOST}/v1" \
+    python3 - <<'PY'
+import json, os, re, sys
+
+provider_id = os.environ["PROVIDER_ID"]
+base_url = os.environ["GATEWAY_BASE_URL"]
+default_id = os.environ["DEFAULT_ID"]
+keep_stale = os.environ.get("KEEP_STALE") == "true"
+path = os.environ["OPENCODE_CONFIG"]
+
+models = [json.loads(line) for line in open(os.environ["MANIFEST"], encoding="utf-8") if line.strip()]
+if not models:
+    sys.exit("no models in manifest")
+
+def variants_for(m):
+    if not (m["parser"] or m["budget_enabled"]):
+        return None
+    budget = m["budget"]
+    output = m["output"]
+    if m["parser"]:
+        low = max(budget // 4, 1024)
+        high = min(output, budget * 4)
+        return {
+            level: {"options": {"thinking": {"type": "enabled", "budgetTokens": tokens}}}
+            for level, tokens in (("low", low), ("medium", budget), ("high", high))
+        }
+    # Thinking-capable without a parseable reasoning stream: effort levels.
+    return {level: {"options": {"reasoningEffort": level}} for level in ("low", "medium", "high")}
+
+def model_entry(m):
+    entry = {
+        # Wire id: the gateway routes on the un-prefixed name; the config key
+        # carries the 'agw-' prefix so ids can't collide with other providers.
+        "id": m["id"],
+        "name": m["name"],
+        "capabilities": {"vision": m["vision"]},
+        "limit": {"context": m["context"], "output": m["output"]},
+    }
+    variants = variants_for(m)
+    if variants:
+        entry["variants"] = variants
+    return entry
+
+provider = {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "Local Server",
+    "options": {
+        # Virtual client key validated by the gateway's apiKey policy; the
+        # gateway swaps it for the real omlx key ($OMLX_API_KEY) upstream.
+        # Falls back to a placeholder only when enforcement is not enabled.
+        "baseURL": base_url,
+        "apiKey": os.environ.get("CLIENT_KEY") or "omlx",
+    },
+    # Config key: 'agw-' prefix keeps ids from colliding with other providers'
+    # models in opencode's catalog; 'id' above keeps the wire name intact.
+    "models": {("agw-" + m["id"] if not m["id"].startswith("agw-") else m["id"]): model_entry(m) for m in models},
+}
+
+# Load the existing config (JSONC: strip // comments and trailing commas).
+cfg = {}
+had_comments = False
+try:
+    raw = open(path, encoding="utf-8").read()
+
+    # String-aware // comment stripper (a naive regex would eat the "//" in
+    # https:// URLs inside strings).
+    out_chars = []
+    in_str = esc = False
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if in_str:
+            out_chars.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out_chars.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and raw[i + 1] == "/":
+            had_comments = True
+            while i < n and raw[i] != "\n":
+                i += 1
+            continue
+        out_chars.append(c)
+        i += 1
+
+    stripped = re.sub(r",(\s*[}\]])", r"\1", "".join(out_chars))
+    cfg = json.loads(stripped)
+except FileNotFoundError:
+    pass
+except Exception as e:
+    sys.exit(f"Failed to parse {path}: {e}")
+
+old_provider = cfg.get("provider", {}).get(provider_id, {})
+old_models = old_provider.get("models", {})
+new_ids = set(provider["models"])
+
+def is_stale(old_key):
+    if old_key in new_ids:
+        return False
+    # Keys gained the 'agw-' prefix at some point; don't report the rename as
+    # a stale model when the prefixed twin exists now.
+    return ("agw-" + old_key) not in new_ids
+
+pruned = sorted(k for k in old_models if is_stale(k)) if old_models else []
+if pruned and keep_stale:
+    for mid in pruned:
+        provider["models"][mid] = old_models[mid]
+    pruned = []
+
+# Merge: update/add provider.<id> and model; leave everything else untouched.
+cfg.setdefault("$schema", "https://opencode.ai/config.json")
+cfg.setdefault("provider", {})[provider_id] = provider
+key = default_id if default_id.startswith("agw-") else "agw-" + default_id
+suffix = "#low" if "variants" in provider["models"][key] else ""
+cfg["model"] = f"{provider_id}/{key}{suffix}"
+
+out = json.dumps(cfg, indent=2) + "\n"
+meta = {"pruned": pruned, "had_comments": had_comments, "model": cfg["model"]}
+print(json.dumps({"config": out, "meta": meta}))
+PY
+}
+
+# ---------------------------------------------------------------------------
+# sync
+# ---------------------------------------------------------------------------
+
+sync_opencode() {
+    require_command "kubectl"
+    require_command "jq"
+    require_command "python3"
+
+    local dry_run=false default_flag="" keep_stale=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run=true; shift ;;
+            --default-model) default_flag="${2:-}"; shift 2 ;;
+            --keep-stale) keep_stale=true; shift ;;
+            *) fatal "Unknown option for sync: $1" ;;
+        esac
+    done
+
+    [ -f "$OMLX_MODEL_SETTINGS" ] || fatal "omlx model settings not found at: $OMLX_MODEL_SETTINGS"
+    [ -f "$OMLX_SETTINGS" ] || fatal "omlx settings not found at: $OMLX_SETTINGS"
+
+    log_info "Reading model routes from ConfigMap ${AGENTGATEWAY_MODELS_CM}..."
+    local gateway_models
+    gateway_models=$(get_gateway_models) || fatal "Could not read ${AGENTGATEWAY_MODELS_CM} from the cluster. Run 'ldx agentgateway sync-omlx' first (is agentgateway installed?)."
+    local gw_count
+    gw_count=$(printf '%s\n' "$gateway_models" | grep -c . || true)
+    log_info "Gateway serves ${gw_count} models."
+
+    local manifest
+    manifest=$(mktemp)
+    # ${manifest:-} — the trap fires after an early set -e exit, once this
+    # function's locals are gone.
+    trap 'rm -f "${manifest:-}"' EXIT
+
+    printf '%s\n' "$gateway_models" | build_manifest "$manifest"
+
+    local count
+    count=$(grep -c . "$manifest" || true)
+    [ "$count" -gt 0 ] || fatal "No usable models after filtering helpers/hidden entries."
+    log_info "Configuring ${count} models from omlx settings."
+
+    local current default_id
+    current=$(get_current_default)
+    if [ "$dry_run" = true ] && [ -z "$default_flag" ]; then
+        # Don't block a dry run on the interactive prompt; preview with the
+        # current default if it's still served, otherwise the first model.
+        if [ -n "$current" ] && jq -e --arg id "$current" 'select(.id == $id)' "$manifest" >/dev/null 2>&1; then
+            default_id="$current"
+        else
+            default_id=$(head -n1 "$manifest" | jq -r '.id')
+            log_warn "Dry run: no valid default configured; previewing with '${default_id}'."
+        fi
+    else
+        default_id=$(select_default_model "$manifest" "$default_flag" "$current")
+    fi
+
+    local client_key=""
+    if [ -f "$AGENTGATEWAY_KEY_CACHE" ]; then
+        client_key=$(head -n1 "$AGENTGATEWAY_KEY_CACHE" | tr -d '[:space:]')
+    else
+        fatal "No cached gateway API key at ${AGENTGATEWAY_KEY_CACHE}. The gateway enforces API keys; run 'ldx agentgateway api-key' (or 'ldx agentgateway sync-omlx') first."
+    fi
+
+    local result pruned had_comments model_ref
+    result=$(merge_config "$manifest" "$default_id" "$keep_stale" "$client_key") || fatal "Failed to merge opencode config."
+    # Bracket notation: jq 1.8.x rejects some bare field names after a dot.
+    pruned=$(jq -r '.meta["pruned"] | join(", ")' <<<"$result")
+    had_comments=$(jq -r '.meta["had_comments"]' <<<"$result")
+    model_ref=$(jq -r '.meta["model"]' <<<"$result")
+
+    if [ "$dry_run" = true ]; then
+        log_info "Dry run — merged config would be:"
+        jq . <<<"$(jq -r '.config' <<<"$result")" | sed -E 's/("apiKey"[[:space:]]*:[[:space:]]*")[^"]+(")/\1***REDACTED***\2/'
+        [ -n "$pruned" ] && log_info "Would prune stale models: ${pruned}"
+        return 0
+    fi
+
+    if [ "$had_comments" = true ]; then
+        log_warn "JSONC comments in ${OPENCODE_CONFIG} are not preserved on rewrite."
+    fi
+    mkdir -p "$(dirname "$OPENCODE_CONFIG")"
+    if [ -f "$OPENCODE_CONFIG" ]; then
+        cp "$OPENCODE_CONFIG" "${OPENCODE_CONFIG}.bak"
+        log_info "Backed up existing config to ${OPENCODE_CONFIG}.bak"
+    fi
+    jq -r '.config' <<<"$result" > "${OPENCODE_CONFIG}.tmp"
+    mv "${OPENCODE_CONFIG}.tmp" "$OPENCODE_CONFIG"
+
+    log_info "Wrote provider '${PROVIDER_ID}' with ${count} models to ${OPENCODE_CONFIG}."
+    log_info "Default model: ${model_ref}"
+    [ -n "$pruned" ] && log_warn "Pruned stale models (no longer served by the gateway): ${pruned}"
+    log_info "Done. Verify with: opencode models | grep ${PROVIDER_ID}/"
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        sync|setup)
+            sync_opencode "$@"
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

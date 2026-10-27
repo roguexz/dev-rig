@@ -30,6 +30,7 @@ You can also run individual capability binaries directly, such as `ldx-vault uns
 | `ldx vault`        | Security / Secrets      | Local HashiCorp Vault deployment                                      | [vault.md](./vault.md)               |
 | `ldx litellm`      | AI / LLM Infrastructure | LiteLLM proxy instance backed by PostgreSQL                           | [litellm.md](./litellm.md)           |
 | `ldx agentgateway` | AI / LLM Infrastructure | agentgateway (LLM/MCP/A2A gateway) with UI, Vault SSO, oMLX sync      | [agentgateway.md](./agentgateway.md) |
+| `ldx opencode`     | AI / LLM Infrastructure | Configure the local opencode harness from agentgateway models         | [opencode.md](./opencode.md)         |
 
 ---
 
