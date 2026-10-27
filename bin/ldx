@@ -48,6 +48,7 @@ show_help() {
   echo "  postgres      Deploy PostgreSQL with pgvector extension"
   echo "  vault         Manage local Vault deployment"
   echo "  litellm       Deploy LiteLLM proxy"
+  echo "  agentgateway  Deploy agentgateway (LLM/MCP/A2A gateway) with oMLX sync and Vault SSO"
   echo ""
   echo "Run '$(basename "$0") <command> help' for detailed usage of a specific command."
 }
@@ -97,7 +98,7 @@ install_binaries() {
 
   log_info "Installing ldx commands into '${target_dir}' using ${mode} mode..."
 
-  local scripts=("ldx" "ldx-skill" "ldx-cvescan" "ldx-certmanager" "ldx-litellm" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault")
+  local scripts=("ldx" "ldx-skill" "ldx-cvescan" "ldx-certmanager" "ldx-litellm" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault" "ldx-agentgateway")
   local repo_dir="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
   local share_dir="$(cd "${target_dir}/.." &>/dev/null && pwd)/share/ldx"
   [ -z "$share_dir" ] && share_dir="${target_dir}/share/ldx"
@@ -181,7 +182,7 @@ case "$COMMAND" in
     install_binaries "$@"
     exit 0
     ;;
-  skill|cvescan|tls|certmanager|otel|redis|postgres|vault|litellm)
+  skill|cvescan|tls|certmanager|otel|redis|postgres|vault|litellm|agentgateway)
     EXEC_SCRIPT="${SCRIPT_DIR}/ldx-${COMMAND}"
     ;;
   help|-h|--help)

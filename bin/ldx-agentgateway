@@ -1,0 +1,644 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+get_script_dir() {
+  local SOURCE="${BASH_SOURCE[0]}"
+  while [ -L "$SOURCE" ]; do
+    local DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+  done
+  cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd
+}
+
+SCRIPT_DIR="$(get_script_dir)"
+source "${SCRIPT_DIR}/lib/common.sh"
+
+# Pinned agentgateway image (standalone distribution).
+AGENTGATEWAY_IMAGE="cr.agentgateway.dev/agentgateway:v1.6.0"
+# Hostname (Traefik Ingress) the gateway and its UI are served on.
+AGENTGATEWAY_HOST="agentgateway.rd.localhost"
+# Hostname Vault is served on (Traefik Ingress) for browser-facing SSO.
+VAULT_OIDC_HOST="vault.rd.localhost"
+# Secret holding runtime credentials (OIDC client secret, oMLX key).
+AGENTGATEWAY_SECRET="agentgateway-secrets"
+# ConfigMap holding the synced oMLX model list (fragment of the gateway config).
+AGENTGATEWAY_MODELS_CM="agentgateway-llm-models"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall|sso|sync-omlx>"
+    echo ""
+    echo "Commands:"
+    echo "  install     Deploy agentgateway (LLM/MCP/A2A gateway) into the cluster."
+    echo "  uninstall   Remove agentgateway deployment, services, ingress, config and data."
+    echo "  sso         Enable Vault OIDC login for the agentgateway UI."
+    echo "  sync-omlx   Sync local oMLX models into the gateway's LLM routes."
+    echo ""
+    echo "Options for sso:"
+    echo "  --vault-username <user>  Vault username for entity discovery (default: admin)"
+    echo "  --vault-password <pass>  Vault password (default: changeit)"
+    echo ""
+    echo "Options for sync-omlx:"
+    echo "  --dry-run    Show the generated model configuration without applying it."
+    echo ""
+    echo "Note: install preserves previously synced models and SSO configuration; uninstall removes everything."
+    echo "Note: users are provisioned with 'ldx vault create-user'; the OIDC profile scope"
+    echo "(name/email claims) is created by 'ldx vault setup'."
+}
+
+# ---------------------------------------------------------------------------
+# Config assembly helpers
+# ---------------------------------------------------------------------------
+
+# In-cluster Vault URL. Pods resolve *.rd.localhost to 127.0.0.1 and do not
+# trust the mkcert CA, so the gateway talks to Vault over the plaintext service
+# URL instead; the issuer/authorize URLs stay browser-facing (Traefik + the
+# wildcard cert). Vault derives its OIDC endpoint URLs from the explicit
+# provider issuer, so the in-cluster discovery document still advertises the
+# browser-facing vault.rd.localhost endpoints.
+VAULT_SVC_URL="http://vault.commons.svc.cluster.local:8200"
+VAULT_OIDC_PATH="/v1/identity/oidc/provider/agentgateway"
+
+# Reads OIDC state (issuer + clientId) from the runtime Secret. Returns non-zero
+# when SSO has not been configured.
+get_oidc_state() {
+    local issuer client_id
+    issuer=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n commons -o jsonpath='{.data.OIDC_ISSUER}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    client_id=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n commons -o jsonpath='{.data.OIDC_CLIENT_ID}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    if [ -n "$issuer" ] && [ -n "$client_id" ]; then
+        OIDC_ISSUER="$issuer"
+        OIDC_CLIENT_ID="$client_id"
+        return 0
+    fi
+    return 1
+}
+
+# Reads the synced oMLX models fragment (the `models:` list) from its ConfigMap.
+get_models_fragment() {
+    kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n commons -o jsonpath='{.data.models\.yaml}' 2>/dev/null || true
+}
+
+# Renders the full gateway config.yaml to stdout, preserving optional features
+# that are already configured (Vault SSO, synced oMLX models).
+#
+# Note: this heredoc is intentionally UNQUOTED. Literal agentgateway env-var
+# references (\$UI_CLIENT_SECRET, \$OMLX_API_KEY) are escaped so they reach the
+# config file as $VAR for agentgateway to expand from the pod environment.
+render_config() {
+    local oidc_enabled=false models_fragment=""
+    if get_oidc_state; then
+        oidc_enabled=true
+    fi
+    models_fragment=$(get_models_fragment)
+
+    cat <<EOF
+# yaml-language-server: \$schema=https://agentgateway.dev/schema/config
+config:
+  database:
+    url: sqlite:///data/data.db
+gateways:
+  default:
+    port: 4000
+EOF
+
+    if [ "$oidc_enabled" = true ]; then
+        cat <<EOF
+ui:
+  gateways: default
+  policies:
+    oidc:
+      issuer: ${OIDC_ISSUER}
+      authorizationEndpoint: https://${VAULT_OIDC_HOST}/ui/vault/identity/oidc/provider/agentgateway/authorize
+      tokenEndpoint: ${VAULT_SVC_URL}${VAULT_OIDC_PATH}/token
+      jwks:
+        url: ${VAULT_SVC_URL}${VAULT_OIDC_PATH}/.well-known/keys
+      clientId: ${OIDC_CLIENT_ID}
+      clientSecret: \$UI_CLIENT_SECRET
+      redirectURI: https://${AGENTGATEWAY_HOST}/oauth/callback
+      # Ask Vault for the profile scope so the UI shows name/email instead of
+      # the raw entity UUID (see 'ldx vault create-user' / setup metadata).
+      scopes:
+      - profile
+EOF
+    else
+        cat <<EOF
+ui:
+  gateways: default
+EOF
+    fi
+
+    if [ -n "$models_fragment" ]; then
+        printf 'llm:\n  gateways:\n  - default\n%s\n' "$models_fragment"
+    fi
+}
+
+apply_config() {
+    local config
+    config=$(render_config)
+    kubectl create configmap agentgateway-config -n commons \
+        --from-literal=config.yaml="$config" \
+        --dry-run=client -o yaml | kubectl apply -f -
+}
+
+# Restarts the deployment and waits for readiness.
+rollout_agentgateway() {
+    kubectl rollout restart deployment/agentgateway -n commons
+    kubectl rollout status deployment/agentgateway -n commons --timeout=120s
+}
+
+# Upserts the shared runtime Secret with the given key=value pairs, preserving
+# existing keys and creating the Secret if needed. Uses a merge patch so keys
+# set by other subcommands survive.
+put_secret() {
+    local args=("$@")
+    local json="{}"
+    local kv
+    for kv in "$@"; do
+        json=$(jq -c --arg k "${kv%%=*}" --arg v "${kv#*=}" '. + {($k): $v}' <<<"$json")
+    done
+    if ! kubectl patch secret "$AGENTGATEWAY_SECRET" -n commons \
+        --type merge -p "{\"stringData\":${json}}" >/dev/null 2>&1; then
+        local flags=()
+        for kv in "${args[@]}"; do
+            flags+=("--from-literal=$kv")
+        done
+        kubectl create secret generic "$AGENTGATEWAY_SECRET" -n commons "${flags[@]}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# install / uninstall
+# ---------------------------------------------------------------------------
+
+install_agentgateway() {
+    require_command "kubectl"
+
+    local namespace="commons"
+    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+
+    log_info "Deploying agentgateway..."
+
+    # Render the base config (plus any previously synced models / SSO policy)
+    # and apply it before the Deployment so the pod starts with a valid config.
+    apply_config
+
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentgateway-data
+  namespace: ${namespace}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentgateway
+  namespace: ${namespace}
+  labels:
+    app: agentgateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentgateway
+  template:
+    metadata:
+      labels:
+        app: agentgateway
+    spec:
+      securityContext:
+        # Ensure the SQLite volume stays writable regardless of the image uid.
+        fsGroup: 1000
+      containers:
+      - name: agentgateway
+        image: ${AGENTGATEWAY_IMAGE}
+        imagePullPolicy: IfNotPresent
+        args:
+        - "-f"
+        - "/etc/agentgateway/config.yaml"
+        envFrom:
+        # Runtime credentials (OIDC cookie/client secret, oMLX API key); the
+        # config file references them as \$VAR and agentgateway expands them.
+        - secretRef:
+            name: ${AGENTGATEWAY_SECRET}
+            optional: true
+        ports:
+        - containerPort: 4000
+          name: http
+        volumeMounts:
+        - name: config
+          mountPath: /etc/agentgateway/config.yaml
+          subPath: config.yaml
+        - name: data
+          mountPath: /data
+        # The admin port (15000) binds to the pod's loopback only, so probe
+        # the gateway port instead.
+        readinessProbe:
+          tcpSocket:
+            port: 4000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          tcpSocket:
+            port: 4000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: agentgateway-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: agentgateway-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentgateway
+  namespace: ${namespace}
+spec:
+  type: ClusterIP
+  selector:
+    app: agentgateway
+  ports:
+  - port: 4000
+    targetPort: 4000
+    name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentgateway
+  namespace: ${namespace}
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: ${AGENTGATEWAY_HOST}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: agentgateway
+            port:
+              number: 4000
+EOF
+
+    log_info "Waiting for agentgateway deployment to be ready..."
+    kubectl wait --for=condition=available deployment/agentgateway -n "$namespace" --timeout=120s
+
+    log_info "agentgateway installation complete."
+    log_info "agentgateway UI is accessible at: https://${AGENTGATEWAY_HOST}/ui"
+    log_info "In-cluster DNS: http://agentgateway.${namespace}.svc.cluster.local:4000"
+    if get_oidc_state; then
+        log_info "Vault SSO is enabled for the UI (issuer: ${OIDC_ISSUER})."
+    fi
+    if [ -n "$(get_models_fragment)" ]; then
+        log_info "Synced oMLX models are served on /v1 (re-run 'sync-omlx' to refresh)."
+    fi
+}
+
+uninstall_agentgateway() {
+    require_command "kubectl"
+
+    local namespace="commons"
+
+    log_info "Uninstalling agentgateway..."
+    kubectl delete ingress agentgateway -n "$namespace" --ignore-not-found
+    kubectl delete service agentgateway -n "$namespace" --ignore-not-found
+    kubectl delete deployment agentgateway -n "$namespace" --ignore-not-found
+    kubectl delete configmap agentgateway-config -n "$namespace" --ignore-not-found
+    kubectl delete configmap "$AGENTGATEWAY_MODELS_CM" -n "$namespace" --ignore-not-found
+    kubectl delete secret "$AGENTGATEWAY_SECRET" -n "$namespace" --ignore-not-found
+
+    log_info "Removing agentgateway PVC to ensure clean re-install..."
+    kubectl delete pvc agentgateway-data -n "$namespace" --ignore-not-found
+
+    log_info "agentgateway uninstall complete. The 'commons' namespace was not deleted."
+}
+
+# ---------------------------------------------------------------------------
+# sync-omlx
+# ---------------------------------------------------------------------------
+
+sync_omlx_models() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local dry_run=false
+    for arg in "$@"; do
+        case "$arg" in
+            --dry-run) dry_run=true ;;
+            *) fatal "Unknown option for sync-omlx: $arg" ;;
+        esac
+    done
+
+    local namespace="commons"
+    local settings_file="${HOME}/.omlx/settings.json"
+
+    if [ ! -f "$settings_file" ]; then
+        fatal "omlx settings file not found at: $settings_file"
+    fi
+
+    if ! get_models_fragment >/dev/null && ! kubectl get deployment agentgateway -n "$namespace" >/dev/null 2>&1; then
+        fatal "agentgateway is not installed. Run 'install' first."
+    fi
+
+    local omlx_port omlx_api_key omlx_skip_verify
+    omlx_port=$(jq -r '.server.port // 5033' "$settings_file")
+    omlx_api_key=$(jq -r '.auth.api_key // ""' "$settings_file")
+    omlx_skip_verify=$(jq -r '.auth.skip_api_key_verification // false' "$settings_file")
+
+    local omlx_base="http://localhost:${omlx_port}"
+    log_info "omlx server: ${omlx_base} (skip_api_key_verification=${omlx_skip_verify})"
+
+    # --- Fetch omlx models ---
+    log_info "Fetching models from omlx..."
+    local omlx_models_raw
+    if [ "$omlx_skip_verify" = "true" ]; then
+        omlx_models_raw=$(curl -sS "${omlx_base}/v1/models" 2>&1) || fatal "Failed to fetch models from omlx at ${omlx_base}/v1/models: ${omlx_models_raw}"
+    else
+        omlx_models_raw=$(curl -sS -H "Authorization: Bearer ${omlx_api_key}" "${omlx_base}/v1/models" 2>&1) || fatal "Failed to fetch models from omlx at ${omlx_base}/v1/models: ${omlx_models_raw}"
+    fi
+
+    if [ -z "$omlx_models_raw" ]; then
+        fatal "Failed to fetch models from omlx at ${omlx_base}/v1/models (empty response)"
+    fi
+
+    # Extract model IDs (exclude helper/non-LLM models, same list as ldx-litellm)
+    local omlx_models=()
+    while IFS= read -r model_id; do
+        case "$model_id" in
+            MarkItDown|nomicai-modernbert) continue ;;
+        esac
+        [ -n "$model_id" ] && omlx_models+=("$model_id")
+    done < <(echo "$omlx_models_raw" | jq -r '.data[].id')
+
+    if [ ${#omlx_models[@]} -eq 0 ]; then
+        fatal "No omlx models found at ${omlx_base}/v1/models"
+    fi
+    log_info "Found ${#omlx_models[@]} omlx models"
+
+    # --- Generate the llm.models fragment ---
+    # The gateway reaches omlx on the host via host.docker.internal (Rancher
+    # Desktop resolves it to the macOS host for pods).
+    local omlx_upstream="http://host.docker.internal:${omlx_port}/v1"
+    local models_fragment="  models:"
+    local model_id
+    for model_id in "${omlx_models[@]}"; do
+        # YAML-escape double quotes in model ids (rare but legal).
+        local escaped_id="${model_id//\"/\\\"}"
+        models_fragment+=$'\n'"  - name: \"${escaped_id}\""
+        models_fragment+=$'\n'"    provider:"
+        models_fragment+=$'\n'"      custom:"
+        models_fragment+=$'\n'"        formats:"
+        models_fragment+=$'\n'"        - type: completions"
+        models_fragment+=$'\n'"    params:"
+        models_fragment+=$'\n'"      baseUrl: ${omlx_upstream}"
+        models_fragment+=$'\n'"      model: \"${escaped_id}\""
+        if [ "$omlx_skip_verify" != "true" ] && [ -n "$omlx_api_key" ]; then
+            models_fragment+=$'\n'"      apiKey: \$OMLX_API_KEY"
+        fi
+    done
+
+    if [ "$dry_run" = true ]; then
+        log_info "Dry run — generated config would be:"
+        printf 'llm:\n  gateways:\n  - default\n%s\n' "$models_fragment"
+        return 0
+    fi
+
+    # --- Store the oMLX API key (if any) in the shared runtime Secret ---
+    if [ "$omlx_skip_verify" != "true" ] && [ -n "$omlx_api_key" ]; then
+        put_secret "OMLX_API_KEY=${omlx_api_key}"
+    fi
+
+    log_info "Writing ${#omlx_models[@]} model routes to ConfigMap ${AGENTGATEWAY_MODELS_CM}..."
+    kubectl create configmap "$AGENTGATEWAY_MODELS_CM" -n commons \
+        --from-literal=models.yaml="$models_fragment" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    apply_config
+
+    log_info "Restarting agentgateway to pick up the new model routes..."
+    rollout_agentgateway
+
+    log_info "Sync complete. ${#omlx_models[@]} oMLX models are now served at https://${AGENTGATEWAY_HOST}/v1"
+}
+
+# ---------------------------------------------------------------------------
+# sso (Vault OIDC)
+# ---------------------------------------------------------------------------
+
+sso_agentgateway() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local namespace="commons"
+    local vault_username="${VAULT_SSO_USERNAME:-admin}"
+    local vault_password="${VAULT_SSO_PASSWORD:-changeit}"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --vault-username)
+                vault_username="$2"
+                shift 2
+                ;;
+            --vault-password)
+                vault_password="$2"
+                shift 2
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'ldx vault setup' first."
+    fi
+    local root_token
+    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+
+    # Ensure the Vault pod is running and unsealed.
+    local phase
+    phase=$(kubectl get pods vault-0 -n "$namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    [ "$phase" = "Running" ] || fatal "Vault pod is not running. Run 'ldx vault setup' first."
+    local sealed
+    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    [ "$sealed" = "false" ] || fatal "Vault is sealed. Run 'ldx vault unseal' first."
+
+    # Ensure Vault is reachable at https://vault.rd.localhost from both the
+    # browser (Traefik on the forwarded host ports) and gateway pods
+    # (Deployment hostAlias to the node IP, added by 'install').
+    log_info "Ensuring Vault Ingress for ${VAULT_OIDC_HOST}..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vault-rd
+  namespace: ${namespace}
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: ${VAULT_OIDC_HOST}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: vault
+            port:
+              number: 8200
+EOF
+
+    # Vault 2.x requires the provider issuer to be scheme+host only; the full
+    # issuer (with the provider path) is what ends up in the iss claim.
+    local issuer_host="https://${VAULT_OIDC_HOST}"
+    local issuer="${issuer_host}${VAULT_OIDC_PATH}"
+    local redirect_uri="https://${AGENTGATEWAY_HOST}/oauth/callback"
+
+    # Configure Vault as an OIDC provider for agentgateway. Runs inside the
+    # Vault pod (same pattern as ldx-vault's user configuration). Values are
+    # passed as positional args so the quoted heredoc below needs no escaping.
+    log_info "Configuring Vault OIDC provider, client and assignment..."
+    local out client_id client_secret entity_id
+    out=$(cat <<'REMOTE_EOF' | kubectl exec -i -n "$namespace" vault-0 -- sh -s "$root_token" "$redirect_uri" "$issuer_host" "$vault_username" "$vault_password"
+root_token="$1"
+redirect_uri="$2"
+issuer_host="$3"
+sso_user="$4"
+sso_pass="$5"
+
+# Discover the user's entity id (the login also materializes the entity).
+# VAULT_TOKEN must be unset so the login response carries the auth block, and
+# Vault 2.0.x has no jq in the image, so parse the JSON with sed.
+unset VAULT_TOKEN
+entity_id=$(vault login -format=json -method=userpass username="$sso_user" password="$sso_pass" 2>/dev/null \
+    | sed -n 's/.*"entity_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+export VAULT_TOKEN="$root_token"
+
+# Signing key for ID tokens (idempotent; default RS256, 24h rotation).
+vault write -f identity/oidc/key/agentgateway-ui >/dev/null
+
+# Group + assignment granting the login to the user's entity. The assignment
+# must exist before the client references it (validated on client write).
+if [ -n "$entity_id" ] && [ "$entity_id" != "null" ]; then
+    vault write identity/group/name/agentgateway-ui-users member_entity_ids="$entity_id" >/dev/null
+fi
+group_id=$(vault read -format=json -field=id identity/group/name/agentgateway-ui-users 2>/dev/null | tr -d '"') || true
+if [ -n "$group_id" ] && [ "$group_id" != "null" ]; then
+    vault write identity/oidc/assignment/agentgateway-ui-assignment group_ids="$group_id" >/dev/null
+fi
+
+# OIDC client with the gateway's callback URI registered. Vault generates and
+# stabilizes client_id/client_secret; re-writing the client keeps them.
+vault write identity/oidc/client/agentgateway-ui \
+    assignments="agentgateway-ui-assignment" \
+    redirect_uris="$redirect_uri" \
+    key="agentgateway-ui" >/dev/null
+
+client_id=$(vault read -format=json -field=client_id identity/oidc/client/agentgateway-ui | tr -d '"')
+client_secret=$(vault read -format=json -field=client_secret identity/oidc/client/agentgateway-ui | tr -d '"')
+
+# The key must explicitly allow this client (an empty list denies all).
+vault write identity/oidc/key/agentgateway-ui allowed_client_ids="$client_id" >/dev/null
+
+# Provider with an explicit host-only issuer so the iss claim is stable
+# regardless of Vault's api_addr. scopes_supported carries only custom
+# scopes (openid is implicit); the `profile` scope itself is owned by
+# ldx-vault (setup / create-user provision the entity metadata it reads).
+if ! vault read identity/oidc/scope/profile >/dev/null 2>&1; then
+    echo "ERROR: OIDC scope 'profile' is missing. Run 'ldx vault setup' (or 'ldx vault create-user') first." >&2
+    exit 1
+fi
+vault write identity/oidc/provider/agentgateway \
+    issuer="$issuer_host" \
+    scopes_supported="profile" \
+    allowed_client_ids="$client_id" >/dev/null
+
+echo "CLIENT_ID=${client_id}"
+echo "CLIENT_SECRET=${client_secret}"
+echo "ENTITY_ID=${entity_id}"
+REMOTE_EOF
+)
+
+    client_id=$(printf '%s\n' "$out" | sed -n 's/^CLIENT_ID=//p')
+    client_secret=$(printf '%s\n' "$out" | sed -n 's/^CLIENT_SECRET=//p')
+    entity_id=$(printf '%s\n' "$out" | sed -n 's/^ENTITY_ID=//p')
+
+    if [ -z "$client_id" ] || [ -z "$client_secret" ] || [ "$client_secret" = "null" ]; then
+        fatal "Failed to create/read the Vault OIDC client. Vault output:\n$out"
+    fi
+    if [ -z "$entity_id" ] || [ "$entity_id" = "null" ]; then
+        log_warn "Could not log in as '${vault_username}' to discover its entity id."
+        log_warn "Add it manually: vault write identity/group/name/agentgateway-ui-users member_entity_ids=<entity-id>"
+    else
+        log_info "Vault entity ${entity_id} added to the agentgateway-ui-users group."
+    fi
+
+    # Persist the OIDC client details (client_id is generated by Vault) plus a
+    # stable cookie-signing secret (agentgateway requires OIDC_COOKIE_SECRET
+    # whenever oidc is configured; keep it across re-runs so sessions survive).
+    local cookie_secret
+    cookie_secret=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n commons -o jsonpath='{.data.OIDC_COOKIE_SECRET}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    if [ -z "$cookie_secret" ]; then
+        cookie_secret=$(openssl rand -hex 32)
+    fi
+    put_secret \
+        "OIDC_COOKIE_SECRET=${cookie_secret}" \
+        "UI_CLIENT_SECRET=${client_secret}" \
+        "OIDC_ISSUER=${issuer}" \
+        "OIDC_CLIENT_ID=${client_id}"
+
+    apply_config
+
+    log_info "Restarting agentgateway to enable OIDC..."
+    rollout_agentgateway
+
+    log_info "Vault SSO enabled."
+    log_info "UI login flow: https://${AGENTGATEWAY_HOST}/ui -> ${VAULT_OIDC_HOST} login"
+    log_info "Vault OIDC discovery: ${issuer}/.well-known/openid-configuration"
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        install)
+            install_agentgateway
+            ;;
+        uninstall)
+            uninstall_agentgateway
+            ;;
+        sso)
+            sso_agentgateway "$@"
+            ;;
+        sync-omlx)
+            sync_omlx_models "$@"
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
