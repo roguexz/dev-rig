@@ -10,7 +10,8 @@ backend:
 - **Traces** are sent to **Tempo**.
 - **Metrics** are sent to **Prometheus**.
 
-All components are deployed into the shared `commons` namespace.
+All components are deployed into the shared `commons` namespace by default; a custom namespace can be configured, see
+[Configuration](./ldx.md#configuration).
 
 ## Commands
 
@@ -20,7 +21,7 @@ This command installs and configures the entire stack.
 
 ### `ldx otel uninstall`
 
-This command removes all components related to the OTel stack, but leaves the `commons` namespace intact.
+This command removes all components related to the OTel stack, but leaves the namespace intact.
 
 ## Sending Telemetry Data
 
@@ -42,6 +43,8 @@ to send all OTLP telemetry to:
 
 - **gRPC Endpoint:** `otel-collector.commons.svc.cluster.local:4317`
 - **HTTP Endpoint:** `otel-collector.commons.svc.cluster.local:4318`
+
+*Note: `commons` in the DNS names is the deployment namespace; substitute your custom namespace if one is configured.*
 
 ## Accessing Grafana
 

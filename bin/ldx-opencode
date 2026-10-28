@@ -74,7 +74,7 @@ show_help() {
 # one per line, helpers excluded.
 get_gateway_models() {
     local fragment
-    fragment=$(kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n commons \
+    fragment=$(kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n "$(ldx_namespace agentgateway)" \
         -o jsonpath='{.data.models\.yaml}' 2>/dev/null) || true
     if [ -z "$fragment" ]; then
         return 1

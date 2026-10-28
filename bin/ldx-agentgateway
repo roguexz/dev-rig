@@ -15,6 +15,13 @@ get_script_dir() {
 SCRIPT_DIR="$(get_script_dir)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
+# Namespace agentgateway deploys into, and the namespace Vault lives in (the
+# SSO flow reaches into it). Both honour LDX_AGENTGATEWAY_NAMESPACE /
+# LDX_VAULT_NAMESPACE / LDX_NAMESPACE env vars and the local config; see
+# lib/common.sh.
+NAMESPACE="$(ldx_namespace agentgateway)"
+VAULT_NAMESPACE="$(ldx_namespace vault)"
+
 # Pinned agentgateway image (standalone distribution).
 AGENTGATEWAY_IMAGE="cr.agentgateway.dev/agentgateway:v1.6.0"
 # Hostname (Traefik Ingress) the gateway and its UI are served on.
@@ -62,15 +69,15 @@ show_help() {
 # wildcard cert). Vault derives its OIDC endpoint URLs from the explicit
 # provider issuer, so the in-cluster discovery document still advertises the
 # browser-facing vault.rd.localhost endpoints.
-VAULT_SVC_URL="http://vault.commons.svc.cluster.local:8200"
+VAULT_SVC_URL="http://vault.${VAULT_NAMESPACE}.svc.cluster.local:8200"
 VAULT_OIDC_PATH="/v1/identity/oidc/provider/agentgateway"
 
 # Reads OIDC state (issuer + clientId) from the runtime Secret. Returns non-zero
 # when SSO has not been configured.
 get_oidc_state() {
     local issuer client_id
-    issuer=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n commons -o jsonpath='{.data.OIDC_ISSUER}' 2>/dev/null | base64 -d 2>/dev/null) || true
-    client_id=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n commons -o jsonpath='{.data.OIDC_CLIENT_ID}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    issuer=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n "$NAMESPACE" -o jsonpath='{.data.OIDC_ISSUER}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    client_id=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n "$NAMESPACE" -o jsonpath='{.data.OIDC_CLIENT_ID}' 2>/dev/null | base64 -d 2>/dev/null) || true
     if [ -n "$issuer" ] && [ -n "$client_id" ]; then
         OIDC_ISSUER="$issuer"
         OIDC_CLIENT_ID="$client_id"
@@ -82,14 +89,14 @@ get_oidc_state() {
 # Reads the virtual client API key from the runtime Secret. Returns non-zero
 # when API-key enforcement has not been enabled.
 get_api_key_state() {
-    AGENTGATEWAY_API_KEY=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n commons \
+    AGENTGATEWAY_API_KEY=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n "$NAMESPACE" \
         -o jsonpath="{.data.${AGENTGATEWAY_API_KEY_NAME}}" 2>/dev/null | base64 -d 2>/dev/null) || true
     [ -n "$AGENTGATEWAY_API_KEY" ]
 }
 
 # Reads the synced oMLX models fragment (the `models:` list) from its ConfigMap.
 get_models_fragment() {
-    kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n commons -o jsonpath='{.data.models\.yaml}' 2>/dev/null || true
+    kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n "$NAMESPACE" -o jsonpath='{.data.models\.yaml}' 2>/dev/null || true
 }
 
 # Renders the full gateway config.yaml to stdout, preserving optional features
@@ -159,15 +166,15 @@ EOF
 apply_config() {
     local config
     config=$(render_config)
-    kubectl create configmap agentgateway-config -n commons \
+    kubectl create configmap agentgateway-config -n "$NAMESPACE" \
         --from-literal=config.yaml="$config" \
         --dry-run=client -o yaml | kubectl apply -f -
 }
 
 # Restarts the deployment and waits for readiness.
 rollout_agentgateway() {
-    kubectl rollout restart deployment/agentgateway -n commons
-    kubectl rollout status deployment/agentgateway -n commons --timeout=120s
+    kubectl rollout restart deployment/agentgateway -n "$NAMESPACE"
+    kubectl rollout status deployment/agentgateway -n "$NAMESPACE" --timeout=120s
 }
 
 # Upserts the shared runtime Secret with the given key=value pairs, preserving
@@ -180,13 +187,13 @@ put_secret() {
     for kv in "$@"; do
         json=$(jq -c --arg k "${kv%%=*}" --arg v "${kv#*=}" '. + {($k): $v}' <<<"$json")
     done
-    if ! kubectl patch secret "$AGENTGATEWAY_SECRET" -n commons \
+    if ! kubectl patch secret "$AGENTGATEWAY_SECRET" -n "$NAMESPACE" \
         --type merge -p "{\"stringData\":${json}}" >/dev/null 2>&1; then
         local flags=()
         for kv in "${args[@]}"; do
             flags+=("--from-literal=$kv")
         done
-        kubectl create secret generic "$AGENTGATEWAY_SECRET" -n commons "${flags[@]}"
+        kubectl create secret generic "$AGENTGATEWAY_SECRET" -n "$NAMESPACE" "${flags[@]}"
     fi
 }
 
@@ -197,7 +204,8 @@ put_secret() {
 install_agentgateway() {
     require_command "kubectl"
 
-    local namespace="commons"
+    local namespace="$NAMESPACE"
+    ldx_save_namespace agentgateway "$namespace"
     kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
 
     log_info "Deploying agentgateway..."
@@ -334,7 +342,7 @@ EOF
 uninstall_agentgateway() {
     require_command "kubectl"
 
-    local namespace="commons"
+    local namespace="$NAMESPACE"
 
     log_info "Uninstalling agentgateway..."
     kubectl delete ingress agentgateway -n "$namespace" --ignore-not-found
@@ -350,7 +358,7 @@ uninstall_agentgateway() {
     # The virtual client key died with the Secret; drop the stale local cache.
     rm -f "$AGENTGATEWAY_KEY_CACHE"
 
-    log_info "agentgateway uninstall complete. The 'commons' namespace was not deleted."
+    log_info "agentgateway uninstall complete. The '${namespace}' namespace was not deleted."
 }
 
 # ---------------------------------------------------------------------------
@@ -369,7 +377,7 @@ sync_omlx_models() {
         esac
     done
 
-    local namespace="commons"
+    local namespace="$NAMESPACE"
     local settings_file="${HOME}/.omlx/settings.json"
 
     if [ ! -f "$settings_file" ]; then
@@ -453,7 +461,7 @@ sync_omlx_models() {
     ensure_api_key
 
     log_info "Writing ${#omlx_models[@]} model routes to ConfigMap ${AGENTGATEWAY_MODELS_CM}..."
-    kubectl create configmap "$AGENTGATEWAY_MODELS_CM" -n commons \
+    kubectl create configmap "$AGENTGATEWAY_MODELS_CM" -n "$namespace" \
         --from-literal=models.yaml="$models_fragment" \
         --dry-run=client -o yaml | kubectl apply -f -
 
@@ -522,7 +530,7 @@ sso_agentgateway() {
     require_command "kubectl"
     require_command "jq"
 
-    local namespace="commons"
+    local namespace="$VAULT_NAMESPACE"
     local vault_username="${VAULT_SSO_USERNAME:-admin}"
     local vault_password="${VAULT_SSO_PASSWORD:-changeit}"
 
@@ -658,7 +666,7 @@ REMOTE_EOF
     # stable cookie-signing secret (agentgateway requires OIDC_COOKIE_SECRET
     # whenever oidc is configured; keep it across re-runs so sessions survive).
     local cookie_secret
-    cookie_secret=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n commons -o jsonpath='{.data.OIDC_COOKIE_SECRET}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    cookie_secret=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n "$NAMESPACE" -o jsonpath='{.data.OIDC_COOKIE_SECRET}' 2>/dev/null | base64 -d 2>/dev/null) || true
     if [ -z "$cookie_secret" ]; then
         cookie_secret=$(openssl rand -hex 32)
     fi

@@ -8,7 +8,8 @@ pod in the Kubernetes cluster and exposes it via Traefik Ingress and an internal
 
 ### `ldx agentgateway install`
 
-This command installs agentgateway into the `commons` namespace:
+This command installs agentgateway into the configured namespace (default `commons`, see
+[Configuration](./ldx.md#configuration)):
 
 1. **Configuration**: Creates a ConfigMap (`agentgateway-config`) with a declarative configuration: a SQLite database at
    `/data/data.db`, a `default` gateway on port 4000, and the built-in UI served on that gateway. Previously synced
@@ -83,7 +84,8 @@ Enables Vault (deployed by `ldx vault setup`) as the OIDC identity provider for 
 
 The generated `ui.policies.oidc` block uses explicit provider mode: the `issuer` and `authorizationEndpoint` are the
 browser-facing `vault.rd.localhost` URLs, while `tokenEndpoint` and `jwks` point at the in-cluster Vault service
-(`http://vault.commons.svc.cluster.local:8200`), because pods resolve `*.rd.localhost` to loopback and do not trust the
+(`http://vault.<vault-namespace>.svc.cluster.local:8200`, `commons` by default), because pods resolve `*.rd.localhost`
+to loopback and do not trust the
 mkcert CA. It also requests `scopes: [profile]`, so the UI shows each user's name and email (from Vault entity
 metadata) instead of the raw entity UUID. Provision or update that metadata with `ldx vault create-user`.
 
@@ -95,7 +97,7 @@ Vault must be unsealed before running this command (`ldx vault unseal`).
 ### `ldx agentgateway uninstall`
 
 This command cleans up the agentgateway deployment, services, ingress, configuration, runtime secrets, the SQLite
-PVC, and the cached client API key file, leaving the `commons` namespace intact.
+PVC, and the cached client API key file, leaving the namespace intact.
 
 ## Accessing agentgateway
 
@@ -123,6 +125,8 @@ LLM clients can call `http://agentgateway.commons.svc.cluster.local:4000/v1/chat
 OpenAI-compatible surface) for models synced with `sync-omlx`, authenticating with the gateway client API key
 (`AGENTGATEWAY_API_KEY`, see [`api-key`](#ldx-agentgateway-api-key)) — not the omlx key, which stays server-side in
 the gateway.
+
+*Note: `commons` in the DNS names is the deployment namespace; substitute your custom namespace if one is configured.*
 
 ## Upgrading
 

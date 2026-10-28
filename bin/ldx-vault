@@ -84,7 +84,8 @@ status_vault() {
     require_command "kubectl"
     require_command "jq"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace vault)"
 
     # Check if pod exists
     local phase
@@ -113,7 +114,7 @@ status_vault() {
     fi
 
     log_info "Access URL: https://vault.rd.localhost"
-    log_info "In-cluster URL: http://vault.commons.svc.cluster.local:8200"
+    log_info "In-cluster URL: http://vault.${namespace}.svc.cluster.local:8200"
 }
 
 # helm --wait names only the resource it gave up on. Say which pods are stuck and
@@ -138,7 +139,9 @@ setup_vault() {
     helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
     helm repo update hashicorp
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace vault)"
+    ldx_save_namespace vault "$namespace"
     kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
 
     # Cache the version before installing so it survives even if init is interrupted.
@@ -192,7 +195,8 @@ unseal_vault() {
     require_command "kubectl"
     require_command "jq"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace vault)"
 
     if [ ! -f "${VAULT_DIR}/keys.json" ]; then
         fatal "Vault keys not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
@@ -218,7 +222,8 @@ configure_default_user() {
     require_command "kubectl"
     require_command "jq"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace vault)"
     log_info "Configuring admin user and authentication methods..."
 
     if [ ! -f "${VAULT_DIR}/keys.json" ]; then
@@ -314,9 +319,10 @@ EOF
 }
 
 # --- Vault API access ---------------------------------------------------------
-# Pods reach Vault at http://vault.commons.svc; host-side CLI calls go through
-# the Traefik ingress instead. The certificate for it comes from 'ldx tls setup',
-# whose wildcard covers *.rd.localhost, so the Go binary verifies it without -k.
+# Pods reach Vault at http://vault.<namespace>.svc; host-side CLI calls go
+# through the Traefik ingress instead. The certificate for it comes from
+# 'ldx tls setup', whose wildcard covers *.rd.localhost, so the Go binary
+# verifies it without -k.
 VAULT_API_URL="https://vault.rd.localhost"
 VAULT_ROOT_TOKEN=""
 
@@ -513,20 +519,20 @@ record_vault_version() {
 
 # Chart version of the installed helm release, e.g. "0.33.0" (empty if absent).
 vault_release_chart() {
-    helm list -n commons -o json 2>/dev/null \
+    helm list -n "$(ldx_namespace vault)" -o json 2>/dev/null \
         | jq -r '.[] | select(.name == "vault") | .chart' 2>/dev/null \
         | sed -n 's/^vault-//p'
 }
 
 # Status of the installed helm release ("deployed", "failed", ...).
 vault_release_status() {
-    helm list -n commons -o json 2>/dev/null \
+    helm list -n "$(ldx_namespace vault)" -o json 2>/dev/null \
         | jq -r '.[] | select(.name == "vault") | .status' 2>/dev/null
 }
 
 # Vault app version the running pod reports (empty if not running).
 vault_live_app_version() {
-    kubectl get pod vault-0 -n commons \
+    kubectl get pod vault-0 -n "$(ldx_namespace vault)" \
         -o jsonpath='{.spec.containers[?(@.name=="vault")].image}' 2>/dev/null \
         | sed -n 's/.*:\(.*\)$/\1/p'
 }
@@ -540,7 +546,7 @@ vault_app_version_for_chart() {
 # Storage backend declared in the generated Vault config: "raft" | "file".
 vault_storage_type() {
     local type
-    type=$(kubectl get configmap vault-config -n commons -o jsonpath='{.data.config}' 2>/dev/null \
+    type=$(kubectl get configmap vault-config -n "$(ldx_namespace vault)" -o jsonpath='{.data.config}' 2>/dev/null \
         | sed -n 's/.*storage "\([a-z-]*\)".*/\1/p' | head -1)
     printf '%s' "${type:-file}"
 }
@@ -549,7 +555,8 @@ snapshot_vault() {
     require_command "kubectl"
     require_command "jq"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace vault)"
     local sealed
     sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
     [ "$sealed" = "false" ] || fatal "Vault is sealed (or not running). Run 'unseal' first."
@@ -593,7 +600,8 @@ upgrade_vault() {
     require_command "kubectl"
     require_command "jq"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace vault)"
     local target="" dry_run=false
 
     while [[ $# -gt 0 ]]; do
@@ -725,7 +733,8 @@ upgrade_vault() {
 seal_vault() {
     require_command "kubectl"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace vault)"
     log_info "Sealing Vault..."
     kubectl exec -n "$namespace" vault-0 -- vault operator seal
     log_info "Vault is now sealed."
@@ -735,7 +744,8 @@ uninstall_vault() {
     require_command "helm"
     require_command "kubectl"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace vault)"
 
     log_info "Uninstalling Vault Helm release..."
     helm uninstall vault -n "$namespace" || true
@@ -749,7 +759,7 @@ uninstall_vault() {
     log_info "Removing local Vault keys..."
     rm -rf "${VAULT_DIR}"
 
-    log_info "Vault uninstall complete. The 'commons' namespace was not deleted."
+    log_info "Vault uninstall complete. The '${namespace}' namespace was not deleted."
 }
 
 main() {

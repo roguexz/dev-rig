@@ -62,7 +62,9 @@ EOF
     helm repo add bitnami https://charts.bitnami.com/bitnami --force-update
     helm repo update bitnami
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace postgres)"
+    ldx_save_namespace postgres "$namespace"
     kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
 
     log_info "Installing PostgreSQL with pgvector..."
@@ -98,7 +100,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: postgres-host-access
-  namespace: commons
+  namespace: ${namespace}
 spec:
   type: NodePort
   selector:
@@ -117,7 +119,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: postgres-lb
-  namespace: commons
+  namespace: ${namespace}
 spec:
   type: LoadBalancer
   selector:
@@ -137,7 +139,8 @@ uninstall_postgres() {
     require_command "helm"
     require_command "kubectl"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace postgres)"
 
     log_info "Uninstalling PostgreSQL..."
     kubectl delete service postgres-host-access -n "$namespace" --ignore-not-found
@@ -147,7 +150,7 @@ uninstall_postgres() {
     log_info "Removing PostgreSQL PVC to ensure clean re-install..."
     kubectl delete pvc data-postgresql-0 -n "$namespace" --ignore-not-found
 
-    log_info "PostgreSQL uninstall complete. The 'commons' namespace was not deleted."
+    log_info "PostgreSQL uninstall complete. The '${namespace}' namespace was not deleted."
 }
 
 main() {

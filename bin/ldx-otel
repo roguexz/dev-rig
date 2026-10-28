@@ -26,7 +26,9 @@ show_help() {
 install_otel() {
     require_command "kubectl"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace otel)"
+    ldx_save_namespace otel "$namespace"
     kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
 
     log_info "Deploying Grafana OTel LGTM all-in-one image..."
@@ -127,14 +129,15 @@ EOF
 uninstall_otel() {
     require_command "kubectl"
 
-    local namespace="commons"
+    local namespace
+    namespace="$(ldx_namespace otel)"
 
     log_info "Uninstalling Grafana OTel LGTM stack..."
     kubectl delete deployment lgtm -n "$namespace" --ignore-not-found
     kubectl delete service grafana otel-collector -n "$namespace" --ignore-not-found
     kubectl delete ingress grafana -n "$namespace" --ignore-not-found
 
-    log_info "OTel stack uninstall complete. The 'commons' namespace was not deleted."
+    log_info "OTel stack uninstall complete. The '${namespace}' namespace was not deleted."
 }
 
 main() {

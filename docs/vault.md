@@ -138,7 +138,8 @@ service DNS name. This avoids a round-trip through the external ingress.
 
 - **Vault Address:** `http://vault.commons.svc.cluster.local:8200`
 
-*Note: The connection is `http` (not `https`) for in-cluster communication because you are connecting directly to the
+*Note: `commons` in the DNS name is the deployment namespace; substitute your custom namespace if one is configured.
+The connection is `http` (not `https`) for in-cluster communication because you are connecting directly to the
 service port, bypassing the TLS termination at the Traefik ingress.*
 
 > **See:** The [`examples/vault-agent-injection.yaml`](../examples/vault-agent-injection.yaml) file for the recommended

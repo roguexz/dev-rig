@@ -7,13 +7,13 @@ and exposes it so that it is accessible directly from your host machine.
 
 ### `ldx postgres install`
 
-This command installs a standalone PostgreSQL instance into the `commons` namespace, sets the default password to
+This command installs a standalone PostgreSQL instance into the configured namespace (default `commons`, see
+[Configuration](./ldx.md#configuration)), sets the default password to
 `changeit`, and runs initialization SQL scripts to enable the `vector` extension.
 
 ### `ldx postgres uninstall`
 
-This command cleans up the PostgreSQL deployment, including the persistent storage PVC, leaving the `commons` namespace
-intact.
+This command cleans up the PostgreSQL deployment, including the persistent storage PVC, leaving the namespace intact.
 
 ## Connecting to PostgreSQL
 
@@ -42,3 +42,5 @@ to connect:
 - **Password:** `changeit`
 - **Database:** `postgres`
 - **Connection URI:** `postgresql://postgres:changeit@postgresql.commons.svc.cluster.local:5432/postgres`
+
+*Note: `commons` in the DNS name is the deployment namespace; substitute your custom namespace if one is configured.*

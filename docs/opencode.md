@@ -13,8 +13,9 @@ virtual client API key, and the gateway injects the real upstream (oMLX) credent
 
 Rebuilds the `provider.local` section of `~/.config/opencode/opencode.jsonc`:
 
-1. **Model discovery**: Reads the LLM route names from the agentgateway ConfigMap (`agentgateway-llm-models`,
-   namespace `commons`) via kubectl (Rancher Desktop context). Helpers (embedding models, MarkItDown, ModernBERT) are
+1. **Model discovery**: Reads the LLM route names from the agentgateway ConfigMap (`agentgateway-llm-models`, in the
+   configured agentgateway namespace, `commons` by default) via kubectl (Rancher Desktop context). Helpers (embedding
+   models, MarkItDown, ModernBERT) are
    filtered out.
 2. **Settings join**: Merges each model's oMLX settings — `max_tokens`, `context_window`, `temperature`,
    `top_p`, `top_k`, and reasoning configuration — into an opencode model cost/tracking manifest (`limit.context`,

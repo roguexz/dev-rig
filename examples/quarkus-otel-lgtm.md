@@ -56,3 +56,6 @@ quarkus.log.handler.opentelemetry.enabled=true
 ```
 
 This unified push-based approach simplifies configuration, as you no longer need to worry about exposing a separate `/metrics` endpoint for scraping.
+
+*Note: `commons` in the endpoint hostnames is the namespace the OTel stack was installed into (the default). If you
+configured a custom namespace (e.g. `LDX_NAMESPACE=devtools ldx otel install`), use that instead.*
