@@ -7,11 +7,12 @@ directly from your host machine.
 
 ### `ldx redis install`
 
-This command installs a standalone, unauthenticated Redis instance into the `commons` namespace.
+This command installs a standalone, unauthenticated Redis instance into the configured namespace (default `commons`, see
+[Configuration](./ldx.md#configuration)).
 
 ### `ldx redis uninstall`
 
-This command cleans up the Redis deployment, leaving the `commons` namespace intact.
+This command cleans up the Redis deployment, leaving the namespace intact.
 
 ## Connecting to Redis
 
@@ -31,4 +32,5 @@ to connect:
 
 - **Redis URI:** `redis://redis-master.commons.svc.cluster.local:6379`
 
-*Note: The service is named `redis-master` by the Bitnami Helm chart.*
+*Note: The service is named `redis-master` by the Bitnami Helm chart. `commons` in the DNS name is the deployment
+namespace; substitute your custom namespace if one is configured.*

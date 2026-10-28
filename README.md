@@ -119,6 +119,13 @@ The `ldx` CLI is modular, with each command managing a specific capability.
 
 For detailed usage of each command, see the documentation below.
 
+### Custom namespaces
+
+The infrastructure commands (`otel`, `redis`, `postgres`, `vault`, `agentgateway`) deploy into the `commons` namespace by
+default. Set `LDX_NAMESPACE` (or a tool-specific `LDX_<TOOL>_NAMESPACE`) in the environment or in
+`~/.config/ldx/config` to deploy elsewhere; installs record the namespace they used so later commands find it again.
+See [Configuration](./docs/ldx.md#configuration).
+
 ## Documentation
 
 - [**CLI Reference (`ldx`)**](./docs/ldx.md)

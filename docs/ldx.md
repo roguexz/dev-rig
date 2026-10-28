@@ -15,6 +15,48 @@ You can also run individual capability binaries directly, such as `ldx-vault uns
 
 ---
 
+## Configuration
+
+### Kubernetes namespaces
+
+Infrastructure tools (`otel`, `redis`, `postgres`, `vault`, `agentgateway`) deploy into the `commons` namespace by
+default. You can deploy them into a custom namespace instead. (`tls` and `certmanager` keep their fixed namespaces —
+`kube-system` and `cert-manager` — because Rancher Desktop and upstream conventions require them.)
+
+The namespace for a tool is resolved in this order, first match wins:
+
+1. `LDX_<TOOL>_NAMESPACE` environment variable — e.g. `LDX_VAULT_NAMESPACE`, `LDX_POSTGRES_NAMESPACE`
+2. `LDX_NAMESPACE` environment variable — applies to every tool
+3. `LDX_<TOOL>_NAMESPACE` in the local config file
+4. `LDX_NAMESPACE` in the local config file
+5. `commons` (default)
+
+One-off override:
+
+```bash
+LDX_NAMESPACE=devtools ldx redis install     # Redis into 'devtools'
+LDX_VAULT_NAMESPACE=secrets ldx vault setup  # Vault into 'secrets', other tools unaffected
+```
+
+### Local config file
+
+Config lives at `~/.config/ldx/config` (honours `$XDG_CONFIG_HOME`) as plain `KEY=value` lines:
+
+```ini
+# ldx configuration
+LDX_NAMESPACE=devtools
+LDX_VAULT_NAMESPACE=secrets
+```
+
+You can edit this file by hand, but you rarely need to: every `install`/`setup` run records the namespace it actually
+used, so later commands (`uninstall`, `status`, `unseal`, …) find the deployment without re-specifying it. Environment
+variables always beat the file.
+
+Namespace names must be valid Kubernetes names (RFC 1123 label: lowercase letters, digits and `-`, starting and ending
+alphanumeric, at most 63 characters).
+
+---
+
 ## Commands Overview
 
 | Command            | Category                | Description                                                           | Documentation                        |
