@@ -317,7 +317,8 @@ def app_bucket(real_path):
 # rather than containing the artifact itself. A `Django==5.1.5` line in a
 # requirements file proves nothing is installed — just that some tool
 # pinned that version somewhere.
-DECL_BASENAMES = {'go.mod', 'go.sum', 'Cargo.toml', 'build.gradle', 'build.gradle.kts'}
+DECL_BASENAMES = {'go.mod', 'go.sum', 'Cargo.toml', 'build.gradle', 'build.gradle.kts',
+                  'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'bun.lockb'}
 REQ_PIN_RE = re.compile(r'(?:(?:test|dev|extra)-)?requirements(?:-\d+(?:\.\d+)*)?\.txt$')
 
 def is_declaration(path):
