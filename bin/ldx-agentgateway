@@ -117,6 +117,13 @@ render_config() {
 config:
   database:
     url: sqlite:///data/data.db
+  # The config file is a read-only ConfigMap mount; the default 'file' mode
+  # writes resource changes back into it and fails with
+  # "failed to write to file /etc/agentgateway/config.yaml: Read-only file
+  # system (os error 30)". 'hybrid' keeps this file as the baseline and
+  # stores UI/API-managed resources in the SQLite database above.
+  storage:
+    mode: hybrid
 gateways:
   default:
     port: 4000
