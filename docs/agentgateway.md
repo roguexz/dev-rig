@@ -1,8 +1,7 @@
 # agentgateway (`ldx agentgateway`)
 
 This command deploys [agentgateway](https://agentgateway.dev) — an HTTP/gRPC gateway for LLM, MCP, and A2A traffic — as
-a
-pod in the Kubernetes cluster and exposes it via Traefik Ingress and an internal ClusterIP.
+a pod in the Kubernetes cluster and exposes it via Traefik Ingress and an internal ClusterIP.
 
 ## Commands
 
@@ -12,8 +11,8 @@ This command installs agentgateway into the configured namespace (default `commo
 [Configuration](./ldx.md#configuration)):
 
 1. **Configuration**: Creates a ConfigMap (`agentgateway-config`) with a declarative configuration: a SQLite database at
-   `/data/data.db`, a `default` gateway on port 4000, and the built-in UI served on that gateway. Previously synced
-   oMLX models and an already-configured Vault SSO policy are preserved across re-installs.
+   `/data/data.db` in `hybrid` storage mode, a `default` gateway on port 4000, and the built-in UI served on that
+   gateway. Previously synced oMLX models and an already-configured Vault SSO policy are preserved across re-installs.
 2. **Persistent data**: Creates a PersistentVolumeClaim (`agentgateway-data`, 1Gi) mounted at `/data` for the SQLite
    database (LLM analytics, logs, sessions, and runtime data).
 3. **Runtime secrets**: The Deployment loads the `agentgateway-secrets` Secret (optional) into the pod environment; the
@@ -31,8 +30,10 @@ This command installs agentgateway into the configured namespace (default `commo
 After installation, the gateway UI is available at `https://agentgateway.rd.localhost`. LLM endpoints are protected by
 the client API key policy; the UI itself is authenticated separately (Vault SSO when configured, otherwise open).
 
-> **Note:** Configuration is declarative. Because the ConfigMap mount is read-only, changes made in the agentgateway UI
-> do not survive a pod restart. To change the configuration permanently, edit the manifest in `bin/ldx-agentgateway`
+> **Note:** The ConfigMap mount is read-only, so the gateway runs with `config.storage.mode: hybrid`: the ConfigMap is
+> the baseline and resources managed through the UI or API are stored in the SQLite database on the PVC and merged over
+> it, surviving pod restarts. Saving the *whole* config file from the UI's config editor is still not possible (the
+> mounted file itself stays read-only). To change the baseline permanently, edit the manifest in `bin/ldx-agentgateway`
 > and re-run `ldx agentgateway install`, or use `sync-omlx` / `sso` below.
 
 ### `ldx agentgateway sync-omlx`
@@ -73,7 +74,8 @@ Clients such as `ldx opencode sync` pick the key up from the cache file or the S
 
 Enables Vault (deployed by `ldx vault setup`) as the OIDC identity provider for the agentgateway UI:
 
-1. Checks that Vault is published at `vault.rd.localhost`, which `ldx vault setup` does with its own ingress, and removes
+1. Checks that Vault is published at `vault.rd.localhost`, which `ldx vault setup` does with its own ingress, and
+   removes
    the duplicate `vault-rd` Ingress that older rigs created for the same host.
 2. Inside the Vault pod, provisions the OIDC resources: signing key (`agentgateway-ui`), OIDC client (`agentgateway-ui`,
    redirect URI `https://agentgateway.rd.localhost/oauth/callback`), group (`agentgateway-ui-users`), assignment, and
