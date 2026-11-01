@@ -18,7 +18,7 @@ This command installs agentgateway into the configured namespace (default `commo
 3. **Runtime secrets**: The Deployment loads the `agentgateway-secrets` Secret (optional) into the pod environment; the
    config file references values such as `$OMLX_API_KEY` and `$UI_CLIENT_SECRET` and agentgateway expands them at load
    time, so no secret material is stored in the ConfigMap.
-4. **Deployment**: Deploys the pinned agentgateway image (`cr.agentgateway.dev/agentgateway:v1.6.0`) with the config
+4. **Deployment**: Deploys the pinned agentgateway image (`cr.agentgateway.dev/agentgateway:v1.7.0`) with the config
    mounted read-only at `/etc/agentgateway/config.yaml`.
 5. **Client API key**: Ensures the gateway's virtual client API key exists (generated once as `agw-<48 hex>`, cached
    at `~/.cache/local-dev/agentgateway/api_key` with mode `0600`, stored in the Secret under `AGENTGATEWAY_API_KEY`)
@@ -132,5 +132,25 @@ the gateway.
 
 ## Upgrading
 
-Bump the pinned image tag (`AGENTGATEWAY_IMAGE`) at the top of `bin/ldx-agentgateway` and re-run
-`ldx agentgateway install`. The SQLite database persists in the PVC across upgrades; `uninstall` deletes it.
+### `ldx agentgateway upgrade [version]`
+
+Upgrades the running agentgateway to a new image version with a rolling restart. All runtime state — the SQLite
+database on the PVC, the ConfigMap, and the Secrets (SSO config, API keys, oMLX key) — is preserved; only the pod
+image changes.
+
+```bash
+ldx agentgateway upgrade            # jump to the pinned version (v1.7.0)
+ldx agentgateway upgrade 1.7.0      # pin a specific version
+ldx agentgateway upgrade --dry-run  # render only; touch nothing
+```
+
+What it does:
+
+1. Detects the current running image tag from the deployment.
+2. Resolves the target (the pinned `AGENTGATEWAY_IMAGE` if omitted; a bare version gets a `v` prefix).
+3. Prints the plan ` vX.Y.Z -> vA.B.C` (a no-op when already at the target).
+4. Runs `kubectl set image` and waits for the rollout to complete.
+5. Verifies the new pod's image matches the target, and reminds you to check the UI (and SSO, if configured).
+
+The pinned constant is the source of truth for fresh installs; re-run `ldx agentgateway install` after bumping it if
+you want new workspaces to start at the newer version.

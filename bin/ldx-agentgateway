@@ -23,7 +23,9 @@ NAMESPACE="$(ldx_namespace agentgateway)"
 VAULT_NAMESPACE="$(ldx_namespace vault)"
 
 # Pinned agentgateway image (standalone distribution).
-AGENTGATEWAY_IMAGE="cr.agentgateway.dev/agentgateway:v1.6.0"
+AGENTGATEWAY_IMAGE="cr.agentgateway.dev/agentgateway:v1.7.0"
+# Image reference without the tag (used by 'upgrade' to build target images).
+AGENTGATEWAY_IMAGE_BASE="cr.agentgateway.dev/agentgateway"
 # Hostname (Traefik Ingress) the gateway and its UI are served on.
 AGENTGATEWAY_HOST="agentgateway.rd.localhost"
 # Hostname Vault is served on (Traefik Ingress) for browser-facing SSO.
@@ -38,14 +40,19 @@ AGENTGATEWAY_API_KEY_NAME="AGENTGATEWAY_API_KEY"
 AGENTGATEWAY_KEY_CACHE="${CACHE_DIR}/agentgateway/api_key"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|sso|sync-omlx>"
+    echo "Usage: $(basename "$0") <install|uninstall|upgrade|sso|sync-omlx>"
     echo ""
     echo "Commands:"
     echo "  install     Deploy agentgateway (LLM/MCP/A2A gateway) into the cluster."
     echo "  uninstall   Remove agentgateway deployment, services, ingress, config and data."
+    echo "  upgrade     Upgrade agentgateway to a version (default: pinned) with a rollout."
     echo "  sso         Enable Vault OIDC login for the agentgateway UI."
     echo "  sync-omlx   Sync local oMLX models into the gateway's LLM routes."
     echo "  api-key     Enforce API-key auth on LLM routes; create/reuse a virtual key."
+    echo ""
+    echo "Options for upgrade:"
+    echo "  <version>    Target version (e.g. 1.7.0 or v1.7.0). Omit to use the pinned version."
+    echo "  --dry-run    Show what would change; do not touch the cluster."
     echo ""
     echo "Options for sso:"
     echo "  --vault-username <user>  Vault username for entity discovery (default: admin)"
@@ -366,6 +373,106 @@ uninstall_agentgateway() {
     rm -f "$AGENTGATEWAY_KEY_CACHE"
 
     log_info "agentgateway uninstall complete. The '${namespace}' namespace was not deleted."
+}
+
+# ---------------------------------------------------------------------------
+# upgrade
+# ---------------------------------------------------------------------------
+
+# Image the running deployment specifies (empty if not installed).
+agentgateway_running_image() {
+    kubectl get deployment agentgateway -n "$NAMESPACE" \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="agentgateway")].image}' 2>/dev/null || true
+}
+
+# Tag of the running image (e.g. 'v1.7.0'); empty when the deployment is absent.
+agentgateway_running_tag() {
+    local image
+    image=$(agentgateway_running_image)
+    [ -n "$image" ] || return 1
+    printf '%s' "$image" | sed -n 's/.*:\(.*\)$/\1/p'
+}
+
+upgrade_agentgateway() {
+    require_command "kubectl"
+
+    local namespace="$NAMESPACE"
+    local target="" dry_run=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                [ -z "$target" ] || { log_error "Unexpected argument: $1"; exit 1; }
+                target="$1"
+                shift
+                ;;
+        esac
+    done
+
+    local current_image current_tag
+    current_image=$(agentgateway_running_image)
+    if [ -z "$current_image" ]; then
+        fatal "agentgateway is not installed. Run 'install' first."
+    fi
+    current_tag=$(agentgateway_running_tag)
+
+    # Resolve the target image. A bare version gets a 'v' prefix; a fully
+    # qualified image reference is used as-is. Omitting the version upgrades
+    # to the pinned constant.
+    local target_image
+    if [ -z "$target" ]; then
+        target_image="$AGENTGATEWAY_IMAGE"
+        log_info "No version given; upgrading to pinned ${target_image}."
+    elif printf '%s' "$target" | grep -q ':'; then
+        target_image="$target"
+    else
+        case "$target" in
+            v*) target_image="${AGENTGATEWAY_IMAGE_BASE}:${target}" ;;
+            *)  target_image="${AGENTGATEWAY_IMAGE_BASE}:v${target}" ;;
+        esac
+    fi
+    local target_tag
+    target_tag=$(printf '%s' "$target_image" | sed -n 's/.*:\(.*\)$/\1/p')
+
+    # Already at the target: no-op.
+    if [ "$target_image" = "$current_image" ]; then
+        log_info "agentgateway already at ${current_tag}; nothing to do."
+        return 0
+    fi
+
+    log_info "Upgrade plan: ${current_tag} -> ${target_tag}"
+
+    if $dry_run; then
+        log_info "--dry-run: would set image to ${target_image} and roll the deployment; no changes applied."
+        return 0
+    fi
+
+    log_info "Updating agentgateway image to ${target_tag}..."
+    kubectl set image deployment/agentgateway agentgateway="${target_image}" -n "$namespace"
+
+    rollout_agentgateway
+
+    # Verify the rollout landed on the requested image.
+    local new_image
+    new_image=$(agentgateway_running_image)
+    log_info "Running image: $(agentgateway_running_tag) (expected ${target_tag})"
+    if [ "$new_image" != "$target_image" ]; then
+        fatal "Upgrade did not complete: expected ${target_tag}, got $(agentgateway_running_tag). Check 'kubectl get pods -n ${namespace}'."
+    fi
+
+    log_info "Upgrade complete: agentgateway ${target_tag}."
+    if get_oidc_state; then
+        log_info "Vault SSO is enabled; log in at https://${AGENTGATEWAY_HOST}/ui and confirm it still works."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -712,6 +819,9 @@ main() {
             ;;
         uninstall)
             uninstall_agentgateway
+            ;;
+        upgrade)
+            upgrade_agentgateway "$@"
             ;;
         sso)
             sso_agentgateway "$@"
