@@ -1,0 +1,227 @@
+#!/usr/bin/env zsh
+#
+# rmi - Clean up untagged and unused Docker images.
+#
+# An image is tagged for cleanup when:
+#   * it is untagged (dangling, <none>:<none>), or it is a tagged image that
+#     is simply no longer wanted; AND
+#   * NO container (running or stopped) is associated with it. Every candidate
+#     is checked with `docker ps -a --filter ancestor=<id>` first — images in
+#     use by any container are always skipped.
+#
+# Usage:
+#   rmi [options] [pattern]
+#
+#   pattern   Optional. Matched against the FULL image name including the tag
+#             (e.g. "postgres:16", "nginx:1.27-alpine", "ghcr.io/foo/bar").
+#             Case-insensitive substring match; glob characters (* ? [) switch
+#             to a full anchored match. Untagged images can be matched by
+#             their short or long image ID. Without a pattern, every
+#             untagged/unused image is proposed for removal.
+#
+# Options:
+#   -n, --dry-run     Only show what would be removed, remove nothing
+#   -y, --yes         Skip the confirmation prompt
+#   -u, --untagged    Only consider untagged (dangling) images
+#   -f, --force       Force removal (also removes images that are a parent
+#                     of another image)
+#   -h, --help        Show this help
+#
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Logging (matches ldx house style)
+# ---------------------------------------------------------------------------
+if [[ -t 1 ]]; then
+  log_info()  { print -P "%F{green}[INFO]%f $1"; }
+  log_warn()  { print -P "%F{yellow}[WARN]%f $1"; }
+  log_error() { print -P "%F{red}[ERROR]%f $1"; }
+else
+  log_info()  { print "[INFO] $1"; }
+  log_warn()  { print "[WARN] $1"; }
+  log_error() { print "[ERROR] $1" >&2; }
+fi
+fatal() { log_error "$1"; exit 1; }
+
+usage() {
+  awk 'NR > 2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${(%):-%x}"
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+typeset -gi DRY_RUN=0 ASSUME_YES=0 UNTAGGED_ONLY=0 FORCE=0
+typeset PATTERN=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    -n|--dry-run)   DRY_RUN=1; shift ;;
+    -y|--yes)       ASSUME_YES=1; shift ;;
+    -u|--untagged)  UNTAGGED_ONLY=1; shift ;;
+    -f|--force)     FORCE=1; shift ;;
+    -h|--help)      usage; exit 0 ;;
+    --)             shift; break ;;
+    -*)             fatal "Unknown option: $1 (see 'rmi --help')" ;;
+    *)              break ;;
+  esac
+done
+
+if (( $# > 1 )); then
+  fatal "Expected at most one pattern argument, got: $*"
+fi
+PATTERN="${1:-}"
+
+# ---------------------------------------------------------------------------
+# Preconditions
+# ---------------------------------------------------------------------------
+command -v docker &>/dev/null || fatal "'docker' was not found on your PATH."
+docker info &>/dev/null       || fatal "Cannot reach the Docker daemon. Is Docker (Desktop / Colima / Rancher) running?"
+
+# ---------------------------------------------------------------------------
+# Pattern matching
+#
+# Plain patterns are case-insensitive substrings of the full name (repo:tag).
+# Patterns containing glob characters (* ? [) are anchored full matches.
+# ---------------------------------------------------------------------------
+matches() {
+  local name="${(L)1}"
+  local pat="${(L)PATTERN}"
+  if [[ $PATTERN == *('*'|'?'|'[')* ]]; then
+    [[ $name == ${~pat} ]]
+  else
+    [[ $name == *${~pat}* ]]
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Inventory: collect all images, grouping tags by image ID.
+# Rows are sorted by repository then tag at fetch time, so every list built
+# from id_order (candidates, skipped) is already in name order.
+# ---------------------------------------------------------------------------
+typeset -A id_tags id_size
+typeset -a id_order
+
+while IFS=$'\t' read -r img_id repo tag size; do
+  [[ -z $img_id ]] && continue
+  if [[ -z ${id_tags[$img_id]+set} ]]; then
+    id_tags[$img_id]=""
+    id_size[$img_id]="$size"
+    id_order+="$img_id"
+  fi
+  if [[ $repo != '<none>' && $tag != '<none>' ]]; then
+    id_tags[$img_id]+="${id_tags[$img_id]:+ }${repo}:${tag}"
+  fi
+done < <(docker images --format '{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}' \
+         | LC_ALL=C sort -t $'\t' -k2,2 -k3,3)
+
+(( ${#id_order} > 0 )) || { log_info "No images present. Nothing to do."; exit 0; }
+
+# ---------------------------------------------------------------------------
+# Select candidates: pattern filter -> container association check
+# ---------------------------------------------------------------------------
+typeset -a cand_id cand_label cand_refs   # parallel arrays: candidates marked for cleanup
+typeset -a skipped
+
+for img_id in "${id_order[@]}"; do
+  tags="${id_tags[$img_id]}"
+  typeset -a matched_refs=()
+
+  # 1) Pattern filter against full names (repo:tag) and the image ID
+  if [[ -n $PATTERN ]]; then
+    matched=0
+    for ref in ${(s: :)tags}; do
+      matches "$ref" && { matched=1; matched_refs+="$ref"; }
+    done
+    if (( ! matched )); then
+      if matches "$img_id"; then
+        matched=1
+      else
+        long_id="$(docker image inspect --format '{{.Id}}' "$img_id" 2>/dev/null)" || long_id=""
+        [[ -n $long_id ]] && matches "${long_id#sha256:}" && matched=1
+      fi
+    fi
+    (( matched )) || continue
+  fi
+
+  # 2) Untagged-only mode: skip images that still carry tags
+  (( UNTAGGED_ONLY )) && [[ -n $tags ]] && continue
+
+  # 3) Container association check — NEVER touch images tied to a container
+  containers="$(docker ps -aq --filter "ancestor=$img_id")"
+  if [[ -n $containers ]]; then
+    ncont=${#${(f)containers}}
+    skipped+=("${img_id}  ${tags:-<untagged>}  (${ncont} container(s) associated)")
+    continue
+  fi
+
+  # 4) Decide which references to remove:
+  #    - specific matching tags when a pattern was given, otherwise all tags
+  #    - untagged images (or full ID matches) go by image ID
+  typeset -a refs
+  if [[ -n $PATTERN && ${#matched_refs[@]} -gt 0 ]]; then
+    refs=("${matched_refs[@]}")
+  elif [[ -n $tags ]]; then
+    refs=("${(s: :)tags}")
+  else
+    refs=("$img_id")
+  fi
+
+  cand_id+=("$img_id")
+  cand_label+=("${(j: , :)refs}")
+  cand_refs+=("${(j: :)refs}")
+done
+
+# ---------------------------------------------------------------------------
+# Report + confirmation
+# ---------------------------------------------------------------------------
+if (( ${#skipped[@]} > 0 )); then
+  log_warn "Skipped (still associated with containers):"
+  for s in "${skipped[@]}"; do print "  ${s}"; done
+fi
+
+if (( ${#cand_id[@]} == 0 )); then
+  log_info "No untagged/unused images matched. Nothing to remove."
+  exit 0
+fi
+
+log_info "${#cand_id[@]} image(s) tagged for cleanup:"
+for i in {1..${#cand_id[@]}}; do
+  # NB: zsh padding flags truncate longer strings, so the (possibly long)
+  # name goes last unpadded; ID and size have bounded widths.
+  print "  ${(r:12:)cand_id[$i]}  ${(l:8:)id_size[${cand_id[$i]}]}  ${cand_label[$i]}"
+done
+
+if (( DRY_RUN )); then
+  log_info "Dry run — nothing removed."
+  exit 0
+fi
+
+if (( ! ASSUME_YES )); then
+  printf "Remove these %d image(s)? [y/N] " "${#cand_id[@]}"
+  read -r answer
+  if [[ $answer != [yY]* ]]; then
+    log_info "Aborted."
+    exit 0
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Removal
+# ---------------------------------------------------------------------------
+rmi_flags=()
+(( FORCE )) && rmi_flags+=(-f)
+
+removed=0
+failed=0
+for refs in "${cand_refs[@]}"; do
+  if docker rmi "${rmi_flags[@]}" ${(z)refs} &>/dev/null; then
+    removed=$(( removed + 1 ))
+  else
+    failed=$(( failed + 1 ))
+    log_error "Failed to remove: ${(j: , :)refs}"
+  fi
+done
+
+log_info "Removed ${removed} image(s), ${failed} failed."
+exit $(( failed > 0 ? 1 : 0 ))
