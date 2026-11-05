@@ -1,17 +1,18 @@
 # opencode harness sync (`ldx opencode`)
 
 This command configures the local [opencode](https://opencode.ai) harness (`~/.config/opencode/opencode.jsonc`) to
-use the LLM models routed by [agentgateway](./agentgateway.md) as a provider named `local`, joined with the per-model
-generation settings from the local oMLX server (`~/.omlx/model_settings.json`).
+use the LLM models and MCP tools routed by [agentgateway](./agentgateway.md). LLM models are configured as a provider
+named `local`, joined with the per-model generation settings from the local oMLX server (`~/.omlx/model_settings.json`),
+and MCP tools are configured as the `agentgateway` MCP server at `https://agentgateway.rd.localhost/mcp`.
 
-agentgateway is the single entry point: opencode talks only to `https://agentgateway.rd.localhost/v1` with the gateway's
-virtual client API key, and the gateway injects the real upstream (oMLX) credentials server-side.
+agentgateway is the single entry point: opencode talks only to the gateway with its virtual client API key, and the
+gateway injects the real upstream credentials (oMLX for LLMs, Vault-backed tokens for MCP) server-side.
 
 ## Commands
 
 ### `ldx opencode sync` (alias: `setup`)
 
-Rebuilds the `provider.local` section of `~/.config/opencode/opencode.jsonc`:
+Rebuilds the `provider.local` section and `mcp.agentgateway` section of `~/.config/opencode/opencode.jsonc`:
 
 1. **Model discovery**: Reads the LLM route names from the agentgateway ConfigMap (`agentgateway-llm-models`, in the
    configured agentgateway namespace, `commons` by default) via kubectl (Rancher Desktop context). Helpers (embedding
@@ -32,8 +33,12 @@ Rebuilds the `provider.local` section of `~/.config/opencode/opencode.jsonc`:
 6. **Virtual API key**: The gateway client key (see `ldx agentgateway api-key`) is provisioned if missing and written
    to `provider.local.options.apiKey`. The sync refuses to run while models are configured but no key can be
    obtained.
-7. **Safe merge**: Everything else in `opencode.jsonc` (other providers, MCP servers, plugins, `disabled_providers`,
-   …) is preserved. A timestamped `.bak` copy is written first, and the update is atomic.
+7. **MCP endpoint**: Configures `mcp.agentgateway` in the opencode config with the gateway's `/mcp` endpoint
+   (`https://agentgateway.rd.localhost/mcp`) and the same virtual API key as `Authorization: Bearer <key>`. The
+   gateway validates the key and handles upstream authentication (Vault-backed credentials) transparently. Any other
+   MCP servers in the config are preserved.
+8. **Safe merge**: Everything else in `opencode.jsonc` (other providers, other MCP servers, plugins,
+   `disabled_providers`, …) is preserved. A timestamped `.bak` copy is written first, and the update is atomic.
 
 Models that previously existed in the config but are no longer routed by the gateway are pruned with a warning
 (`--keep-stale` keeps them).

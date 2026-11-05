@@ -57,6 +57,7 @@ show_help() {
     echo "  unseal      Unseal the Vault using stored keys."
     echo "  seal        Seal the Vault."
     echo "  create-user Create (or update) a userpass user with entity metadata."
+    echo "  enable-secrets  Enable the KV v2 secrets engine and Kubernetes auth method."
     echo "  upgrade     Upgrade Vault to a chart version (default: latest) with a snapshot + checks."
     echo "  snapshot    Save a storage snapshot (Raft or file backend; Vault must be unsealed)."
     echo "  uninstall   Remove Vault and its stored keys."
@@ -71,6 +72,9 @@ show_help() {
     echo "  --full-name <name>     Display name exposed to OIDC clients via the profile scope"
     echo "  --email <email>        Email exposed to OIDC clients via the profile scope"
     echo "  --policies <list>      Vault policies for the user (default: default)"
+    echo ""
+    echo "Options for enable-secrets:"
+    echo "  (none required; enables KV v2 at 'secret', Kubernetes auth, and the mcp-secrets-read policy)"
     echo ""
     echo "Options for upgrade:"
     echo "  <chart-version>        Target chart version (e.g. 0.34.1, app Vault 2.0.4)."
@@ -181,6 +185,8 @@ setup_vault() {
     unseal_vault
 
     configure_default_user
+
+    enable_secrets_vault
 
     log_info "Vault UI and API are accessible at: https://vault.rd.localhost"
     if [ "${DISABLE_USERPASS:-false}" != "true" ]; then
@@ -490,6 +496,63 @@ create_user_vault() {
     else
         log_info "Entity: ${entity_id}"
     fi
+}
+
+# --- Secrets engine and auth method setup -----------------------------------
+# Enables the KV v2 secrets engine (path: secret), the Kubernetes auth method,
+# and the mcp-secrets-read policy. Idempotent: safe to re-run. Called by
+# 'enable-secrets' and by 'setup' for new installs.
+enable_secrets_vault() {
+    require_command "kubectl"
+    require_command "jq"
+
+    require_unsealed_vault
+
+    local namespace
+    namespace="$(ldx_namespace vault)"
+
+    # --- Enable KV v2 secrets engine at 'secret' path ---
+    # Check if it's already enabled (idempotent).
+    if vault_cli secrets list -format=json 2>/dev/null | jq -e '.["secret/"]' >/dev/null 2>&1; then
+        log_info "KV v2 secrets engine already enabled at 'secret'."
+    else
+        log_info "Enabling KV v2 secrets engine at 'secret'..."
+        vault_cli secrets enable -path=secret -version=2 kv >/dev/null
+        log_info "KV v2 secrets engine enabled at 'secret'."
+    fi
+
+    # --- Enable Kubernetes auth method ---
+    # The Vault pod is in the cluster and can reach the API server at the
+    # in-cluster DNS name. Skip TLS verification: Rancher Desktop uses a
+    # self-signed cert that Vault does not trust.
+    if vault_cli auth list -format=json 2>/dev/null | jq -e '.["kubernetes/"]' >/dev/null 2>&1; then
+        log_info "Kubernetes auth method already enabled."
+    else
+        log_info "Enabling Kubernetes auth method..."
+        vault_cli auth enable kubernetes >/dev/null
+        vault_cli write auth/kubernetes/config \
+            kubernetes_host="https://kubernetes.default.svc:443" \
+            skip_tls_verify=true >/dev/null
+        log_info "Kubernetes auth method enabled (host: https://kubernetes.default.svc:443)."
+    fi
+
+    # --- Create the mcp-secrets-read policy ---
+    # Grants read/list on the MCP secrets subtree. This is the minimal policy
+    # the Vault Agent sidecar needs to read MCP credentials.
+    cat <<POLICY | vault_cli policy write mcp-secrets-read - >/dev/null
+path "secret/data/mcp/*" {
+  capabilities = ["read", "list"]
+}
+path "secret/metadata/mcp/*" {
+  capabilities = ["read", "list"]
+}
+POLICY
+    log_info "Policy 'mcp-secrets-read' created."
+
+    log_info "Vault secrets engine and auth method setup complete."
+    log_info "  - KV v2 at 'secret' (MCP credentials go to secret/data/mcp/<name>/token)"
+    log_info "  - Kubernetes auth (Vault Agent sidecars authenticate with their SA JWT)"
+    log_info "  - Policy 'mcp-secrets-read' (minimal read access for the Vault Agent)"
 }
 
 # --- Version tracking ---------------------------------------------------------
@@ -809,6 +872,9 @@ main() {
             ;;
         create-user)
             create_user_vault "$@"
+            ;;
+        enable-secrets)
+            enable_secrets_vault "$@"
             ;;
         upgrade)
             upgrade_vault "$@"

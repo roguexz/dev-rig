@@ -47,8 +47,9 @@ show_help() {
     echo "Usage: $(basename "$0") <sync>"
     echo ""
     echo "Commands:"
-    echo "  sync        Sync agentgateway model routes + omlx settings into the"
-    echo "              local opencode config (~/.config/opencode/opencode.jsonc)."
+    echo "  sync        Sync agentgateway model routes + omlx settings + MCP"
+    echo "              endpoint into the local opencode config"
+    echo "              (~/.config/opencode/opencode.jsonc)."
     echo ""
     echo "Options for sync:"
     echo "  --dry-run             Show the merged config without writing it."
@@ -61,7 +62,9 @@ show_help() {
     echo "  - The gateway list comes from the ConfigMap written by"
     echo "    'ldx agentgateway sync-omlx'; run that first (or re-run it to refresh)."
     echo "  - The gateway injects the omlx API key upstream, so the opencode"
-    echo "    config uses a placeholder key."
+    echo "    config uses a virtual client key for both LLM and MCP routes."
+    echo "  - The MCP endpoint (https://${AGENTGATEWAY_HOST}/mcp) is configured"
+    echo "    with the same virtual key; add tools with 'ldx agentgateway mcp add'."
     echo "  - JSONC comments in the existing config are not preserved; a backup is"
     echo "    written to opencode.jsonc.bak before overwriting."
 }
@@ -71,7 +74,8 @@ show_help() {
 # ---------------------------------------------------------------------------
 
 # Reads the synced oMLX model route names from the gateway's ConfigMap,
-# one per line, helpers excluded.
+# one per line, helpers excluded. Strips the 'agw-' prefix (gateway-facing
+# names carry it to avoid collisions; omlx ids don't).
 get_gateway_models() {
     local fragment
     fragment=$(kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n "$(ldx_namespace agentgateway)" \
@@ -79,7 +83,7 @@ get_gateway_models() {
     if [ -z "$fragment" ]; then
         return 1
     fi
-    printf '%s\n' "$fragment" | sed -n 's/^[[:space:]]*- name:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p'
+    printf '%s\n' "$fragment" | sed -n 's/^[[:space:]]*- name:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' | sed 's/^agw-//'
 }
 
 # Reads the current default model id (without provider prefix or #variant)
@@ -261,6 +265,7 @@ merge_config() {
     PROVIDER_ID="$PROVIDER_ID" \
     LDX_LIB_DIR="${SCRIPT_DIR}/lib" \
     GATEWAY_BASE_URL="https://${AGENTGATEWAY_HOST}/v1" \
+    MCP_URL="https://${AGENTGATEWAY_HOST}/mcp" \
     python3 - <<'PY'
 import json, os, sys
 sys.path.insert(0, os.environ["LDX_LIB_DIR"])
@@ -268,6 +273,8 @@ import jsonc
 
 provider_id = os.environ["PROVIDER_ID"]
 base_url = os.environ["GATEWAY_BASE_URL"]
+mcp_url = os.environ["MCP_URL"]
+client_key = os.environ.get("CLIENT_KEY") or ""
 default_id = os.environ["DEFAULT_ID"]
 keep_stale = os.environ.get("KEEP_STALE") == "true"
 path = os.environ["OPENCODE_CONFIG"]
@@ -356,6 +363,16 @@ key = default_id if default_id.startswith("agw-") else "agw-" + default_id
 suffix = "#low" if "variants" in provider["models"][key] else ""
 cfg["model"] = f"{provider_id}/{key}{suffix}"
 
+# MCP endpoint: the gateway's /mcp path, secured with the same virtual key.
+# Merging preserves any other MCP servers the user has configured.
+cfg.setdefault("mcp", {})["agentgateway"] = {
+    "type": "remote",
+    "url": mcp_url,
+    "headers": {
+        "Authorization": f"Bearer {client_key}" if client_key else ""
+    },
+}
+
 out = json.dumps(cfg, indent=2) + "\n"
 meta = {"pruned": pruned, "had_comments": had_comments, "model": cfg["model"]}
 print(json.dumps({"config": out, "meta": meta}))
@@ -435,7 +452,7 @@ sync_opencode() {
 
     if [ "$dry_run" = true ]; then
         log_info "Dry run — merged config would be:"
-        jq . <<<"$(jq -r '.config' <<<"$result")" | sed -E 's/("apiKey"[[:space:]]*:[[:space:]]*")[^"]+(")/\1***REDACTED***\2/'
+        jq . <<<"$(jq -r '.config' <<<"$result")" | sed -E 's/("apiKey"[[:space:]]*:[[:space:]]*")[^"]+(")/\1***REDACTED***\2/' | sed -E 's/(Bearer )[a-zA-Z0-9_-]+/\1***REDACTED***/'
         [ -n "$pruned" ] && log_info "Would prune stale models: ${pruned}"
         return 0
     fi
@@ -453,6 +470,7 @@ sync_opencode() {
 
     log_info "Wrote provider '${PROVIDER_ID}' with ${count} models to ${OPENCODE_CONFIG}."
     log_info "Default model: ${model_ref}"
+    log_info "Configured MCP endpoint: https://${AGENTGATEWAY_HOST}/mcp"
     [ -n "$pruned" ] && log_warn "Pruned stale models (no longer served by the gateway): ${pruned}"
     log_info "Done. Verify with: opencode models | grep ${PROVIDER_ID}/"
 }

@@ -10,21 +10,31 @@ a pod in the Kubernetes cluster and exposes it via Traefik Ingress and an intern
 This command installs agentgateway into the configured namespace (default `commons`, see
 [Configuration](./ldx.md#configuration)):
 
-1. **Configuration**: Creates a ConfigMap (`agentgateway-config`) with a declarative configuration: a SQLite database at
+1. **Service account**: Creates a dedicated `agentgateway` ServiceAccount (replacing the `default` SA), which is bound
+   to a Vault role that grants the Vault Agent sidecar permission to read MCP credentials.
+2. **Vault role**: Creates the `agentgateway-mcp` Vault role (bound to the gateway's ServiceAccount) so the Vault
+   Agent sidecar can authenticate to Vault via Kubernetes auth and read MCP secrets. Requires `ldx vault enable-secrets`
+   to have been run first.
+3. **Configuration**: Creates a ConfigMap (`agentgateway-config`) with a declarative configuration: a SQLite database at
    `/data/data.db` in `hybrid` storage mode, a `default` gateway on port 4000, and the built-in UI served on that
    gateway. Previously synced oMLX models and an already-configured Vault SSO policy are preserved across re-installs.
-2. **Persistent data**: Creates a PersistentVolumeClaim (`agentgateway-data`, 1Gi) mounted at `/data` for the SQLite
+4. **Persistent data**: Creates a PersistentVolumeClaim (`agentgateway-data`, 1Gi) mounted at `/data` for the SQLite
    database (LLM analytics, logs, sessions, and runtime data).
-3. **Runtime secrets**: The Deployment loads the `agentgateway-secrets` Secret (optional) into the pod environment; the
+5. **Runtime secrets**: The Deployment loads the `agentgateway-secrets` Secret (optional) into the pod environment; the
    config file references values such as `$OMLX_API_KEY` and `$UI_CLIENT_SECRET` and agentgateway expands them at load
    time, so no secret material is stored in the ConfigMap.
-4. **Deployment**: Deploys the pinned agentgateway image (`cr.agentgateway.dev/agentgateway:v1.7.0`) with the config
+6. **Vault Agent sidecar**: Adds a `vault-agent` container (same image as the Vault server, runs as uid 1000) to the
+   Deployment. It authenticates to Vault via Kubernetes auth, reads MCP secrets, and writes them to files in the shared
+   `/etc/agentgateway/mcp-credentials` directory with `0400` permissions. The gateway reads these files via
+   `backendAuth.key.value.file` — the credential never appears in the gateway's config, environment, or as a response
+   to the harness.
+7. **Deployment**: Deploys the pinned agentgateway image (`cr.agentgateway.dev/agentgateway:v1.7.0`) with the config
    mounted read-only at `/etc/agentgateway/config.yaml`.
-5. **Client API key**: Ensures the gateway's virtual client API key exists (generated once as `agw-<48 hex>`, cached
+8. **Client API key**: Ensures the gateway's virtual client API key exists (generated once as `agw-<48 hex>`, cached
    at `~/.cache/local-dev/agentgateway/api_key` with mode `0600`, stored in the Secret under `AGENTGATEWAY_API_KEY`)
    and wires the `llm.policies.apiKey` policy into the config so every LLM request must present it — see
    [`api-key`](#ldx-agentgateway-api-key).
-6. **Service & Ingress Exposure**: Exposes the gateway via Traefik Ingress (`https://agentgateway.rd.localhost`) and
+9. **Service & Ingress Exposure**: Exposes the gateway via Traefik Ingress (`https://agentgateway.rd.localhost`) and
    an internal ClusterIP for in-cluster clients.
 
 After installation, the gateway UI is available at `https://agentgateway.rd.localhost`. LLM endpoints are protected by
@@ -57,10 +67,11 @@ Use `--dry-run` to print the generated configuration without applying it.
 
 ### `ldx agentgateway api-key`
 
-Manages the gateway's virtual client API key — the credential every LLM client must present:
+Manages the gateway's virtual client API key — the credential clients must present to access both LLM and MCP routes:
 
-- **Enforcement**: `llm.policies.apiKey` (mode `strict`) is always configured by `install` and `sync-omlx`; requests
-  to `/v1/...` without a valid key get `401`. The UI and its OIDC flow are not affected.
+- **Enforcement**: `apiKey` policies (mode `strict`) are configured on both the LLM routes (`llm.policies.apiKey`) and
+  the `/mcp` route (`routes[].policies.apiKey`) by `install` and `sync-omlx`. Requests to `/v1/...` or `/mcp` without a
+  valid key get `401`. The UI and its OIDC flow are not affected.
 - **Generation**: On first use, a key `agw-<48 hex>` is generated, written to
   `~/.cache/local-dev/agentgateway/api_key` (mode `0600`), and stored in the `agentgateway-secrets` Secret under
   `AGENTGATEWAY_API_KEY`. The config references it as `$AGENTGATEWAY_API_KEY` (expanded by agentgateway at load time),
@@ -68,7 +79,8 @@ Manages the gateway's virtual client API key — the credential every LLM client
 - **Reuse and rotation**: Re-running the command is idempotent (reuses the cached key, repairs the Secret/config if
   they drifted). Delete the cache file first to generate a fresh key. `--dry-run` prints without applying.
 
-Clients such as `ldx opencode sync` pick the key up from the cache file or the Secret automatically.
+Clients such as `ldx opencode sync` pick the key up from the cache file or the Secret automatically, and configure it
+for both the LLM provider and the MCP endpoint.
 
 ### `ldx agentgateway sso`
 
@@ -96,10 +108,78 @@ Vault must be unsealed before running this command (`ldx vault unseal`).
 > **Note:** Vault-side resources (`identity/oidc/{key,client,assignment,provider}/agentgateway*`,
 > `identity/group/name/agentgateway-ui-users`) are left in place by `uninstall`; clean them up manually if desired.
 
+### `ldx agentgateway mcp`
+
+Manages MCP tools with Vault-backed credentials. This is the primary way to configure MCP servers for the gateway so
+that harnesses (OpenCode, etc.) can use them without ever seeing the credentials:
+
+```bash
+# Add a new MCP tool (credential stored in Vault, target registered with the gateway)
+ldx agentgateway mcp add <name> --url <url> --token <token>
+
+# List all configured MCP tools
+ldx agentgateway mcp list
+
+# Remove an MCP tool and its Vault credential
+ldx agentgateway mcp remove <name>
+
+# Rotate a tool's credential (Vault Agent refreshes the file automatically)
+ldx agentgateway mcp rotate <name> --token <new-token>
+```
+
+#### How it works
+
+1. **`mcp add`**:
+   - Stores the credential in Vault at `secret/mcp/<name>` (KV v2, `token` field).
+   - Registers an `mcp.target` resource with the gateway via the admin API, with `backendAuth.key.value.file` pointing
+     to `/etc/agentgateway/mcp-credentials/<name>.token`.
+   - Regenerates the Vault Agent ConfigMap (adds a template block for the new tool).
+   - Restarts the gateway pod to pick up the new config.
+
+2. **`mcp list`**: Queries the gateway's admin API and displays all configured MCP targets (name, URL, resource ID).
+
+3. **`mcp remove`**:
+   - Deletes the Vault secret (all versions).
+   - Deletes the `mcp.target` resource from the gateway's config.
+   - Regenerates the Vault Agent ConfigMap (removes the template block).
+   - Restarts the gateway pod.
+
+4. **`mcp rotate`**: Updates the Vault secret in place. The Vault Agent detects the change and refreshes the file
+   automatically — no gateway restart is needed because the gateway reads the file on each request.
+
+#### Security model
+
+- **Vault** stores the credential encrypted at rest. Access is controlled by the `mcp-secrets-read` policy, which only
+  grants read/list on `secret/data/mcp/*`.
+- The **Vault Agent sidecar** (in the gateway pod) authenticates to Vault via Kubernetes auth using the pod's service
+  account token, gets a short-lived token (1h TTL), and templates the secret into a file with `0400` permissions, owned
+  by uid 1000.
+- The **gateway** reads the file via `backendAuth.key.value.file` and injects the credential into outbound MCP requests.
+  The credential never appears in the gateway's config file, environment variables, or responses to the harness.
+- The **harness** (OpenCode, etc.) sends MCP requests to the gateway with a virtual API key
+  (`Authorization: Bearer <key>`). The gateway validates the key (same key used for LLM routes) and handles
+  authentication to the upstream MCP server transparently. The `ldx-opencode sync` command configures the MCP endpoint
+  with this key automatically.
+- **Credential rotation** is seamless: `mcp rotate` updates Vault, the Vault Agent detects the change and refreshes
+  the file, and the next request from the gateway uses the new credential.
+
+#### Prerequisites
+
+- Vault must be set up with `ldx vault setup` (or `ldx vault enable-secrets` on an existing install) so that the KV v2
+  secrets engine, Kubernetes auth method, and `mcp-secrets-read` policy are in place.
+- The gateway must be installed with `ldx agentgateway install` (which creates the dedicated ServiceAccount, Vault
+  role, and Vault Agent sidecar).
+
+#### Tool naming
+
+Tool names are used as path components in Vault and as filenames on disk, so they must contain only alphanumeric
+characters, hyphens, and underscores (e.g., `github`, `my-tool`, `my_tool`).
+
 ### `ldx agentgateway uninstall`
 
 This command cleans up the agentgateway deployment, services, ingress, configuration, runtime secrets, the SQLite
-PVC, and the cached client API key file, leaving the namespace intact.
+PVC, the Vault Agent ConfigMap, the dedicated ServiceAccount, and the cached client API key file, leaving the
+namespace intact. It also deletes all MCP secrets from Vault (if any exist).
 
 ## Accessing agentgateway
 

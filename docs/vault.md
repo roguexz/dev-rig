@@ -8,7 +8,9 @@ unseal process.
 
 ### `ldx vault setup`
 
-This command installs Vault, creates a default admin user, and exposes the UI via a Traefik Ingress.
+This command installs Vault, creates a default admin user, enables the KV v2 secrets engine and Kubernetes auth method,
+and exposes the UI via a Traefik Ingress. The secrets engine and auth method are also enabled by `enable-secrets`,
+which can be run separately on existing installs.
 
 ### `ldx vault status`
 
@@ -48,6 +50,33 @@ cached in `~/.cache/local-dev/vault/keys.json`; that host is on the mkcert wildc
 installs into the system trust store, so the CLI verifies it without `-k`. If the user has no identity entity yet (they never
 logged in), the command creates one and binds its `userpass` alias, so the first login maps onto that entity. Existing
 metadata keys and the entity name Vault assigned are preserved.
+
+### `ldx vault enable-secrets`
+
+Enables the secrets engine and auth method components needed for the agentgateway's Vault-backed MCP credentials:
+
+1. **KV v2 secrets engine** at path `secret` — the standard path for application secrets. MCP credentials are stored
+   under `secret/mcp/<name>` (data at `secret/data/mcp/<name>`, metadata at `secret/metadata/mcp/<name>`).
+2. **Kubernetes auth method** — configured with `kubernetes_host=https://kubernetes.default.svc:443` (the in-cluster
+   API server URL) and `skip_tls_verify=true` (Rancher Desktop's self-signed cert is not in Vault's trust store). This
+   allows pods to authenticate to Vault using their service account tokens, getting short-lived Vault tokens.
+3. **Policy `mcp-secrets-read`** — a minimal policy that grants `read` and `list` on `secret/data/mcp/*` and
+   `secret/metadata/mcp/*`. This is the only access the Vault Agent sidecar needs to read MCP credentials.
+
+This command is idempotent: it is safe to re-run, and it skips steps that are already in place. It requires Vault to
+be running and unsealed (`ldx vault unseal` first if sealed).
+
+For new installs, `setup` runs this automatically. For existing installs (created before this command existed), run it
+once before using `ldx agentgateway mcp`.
+
+#### What the agentgateway needs from Vault
+
+The agentgateway's Vault Agent sidecar (added by `ldx agentgateway install`) needs three things from Vault:
+
+- **A role** (`agentgateway-mcp`) that binds the gateway's service account to the `mcp-secrets-read` policy. This
+  is created by `ldx agentgateway install`, not by this command.
+- **Kubernetes auth method** configured so the role can be used by pods. This command enables and configures it.
+- **KV v2 secrets engine** at `secret` so MCP credentials can be stored. This command enables it.
 
 ### OIDC profile scope
 
