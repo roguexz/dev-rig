@@ -1,0 +1,107 @@
+# Example: End-to-End TLS (TLS Re-Encryption)
+# In this scenario, the pod itself gets a TLS certificate from cert-manager.
+# Traefik terminates the client's TLS connection, then initiates a new TLS
+# connection to the pod (verifying the pod's cert with the mkcert CA).
+# The application inside the pod is responsible for handling TLS.
+#
+# Prerequisites:
+#   - 'ldx certmanager install' (creates ClusterIssuer + Traefik ServersTransport)
+#   - 'ldx tls install' (creates the default TLS Secret for Traefik)
+#
+# Usage:
+#   kubectl apply -f tls-pod-termination.yaml
+#   curl -k https://whoami-e2e.rd.localhost
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoami-e2e
+  labels:
+    app: whoami-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whoami-e2e
+  template:
+    metadata:
+      labels:
+        app: whoami-e2e
+    spec:
+      containers:
+      - name: whoami
+        image: stefanprodan/podinfo:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - ./podinfo
+        - --port=80
+        - --secure-port=443
+        - --cert-path=/etc/tls
+        ports:
+        - containerPort: 443
+          name: https
+        - containerPort: 80
+          name: http
+        volumeMounts:
+        - name: certs
+          mountPath: /etc/tls
+          readOnly: true
+      volumes:
+      - name: certs
+        secret:
+          secretName: whoami-e2e-cert # The secret created by the Certificate object
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami-e2e
+  annotations:
+    # TLS re-encryption: Traefik terminates client TLS, then connects to the
+    # pod via HTTPS (verifying the pod's cert with the mkcert CA).
+    traefik.ingress.kubernetes.io/service.passhostheader: "true"
+    traefik.ingress.kubernetes.io/service.serverstransport: kube-system-mkcert-ca@kubernetescrd
+spec:
+  selector:
+    app: whoami-e2e
+  ports:
+  - port: 443
+    targetPort: https
+    name: https
+  - port: 80
+    targetPort: http
+    name: http
+---
+# Create a Certificate object to request a cert from our issuer
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: whoami-e2e-cert
+spec:
+  secretName: whoami-e2e-cert
+  dnsNames:
+  - whoami-e2e.rd.localhost
+  issuerRef:
+    name: mkcert-issuer
+    kind: ClusterIssuer
+---
+# Use a standard Ingress (Traefik terminates client TLS, re-encrypts to the pod)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: whoami-e2e
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: whoami-e2e.rd.localhost
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: whoami-e2e
+            port:
+              name: https
