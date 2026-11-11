@@ -114,7 +114,8 @@ The `ldx` CLI is modular, with each command managing a specific capability.
 | `ldx redis <subcommand>`        | Deploys a Redis instance accessible from the host.                                          | `ldx-redis`        |
 | `ldx postgres <subcommand>`     | Deploys a PostgreSQL instance with pgvector extension.                                      | `ldx-postgres`     |
 | `ldx vault <subcommand>`        | Manages a local HashiCorp Vault deployment for secrets management.                          | `ldx-vault`        |
-| `ldx agentgateway <subcommand>` | Deploys agentgateway (LLM/MCP/A2A gateway) with built-in UI, Vault SSO and oMLX model sync. | `ldx-agentgateway` |
+| `ldx authelia <subcommand>`     | Deploys Authelia (OIDC provider with WebAuthn/Touch ID support) for SSO.                    | `ldx-authelia`     |
+| `ldx agentgateway <subcommand>` | Deploys agentgateway (LLM/MCP/A2A gateway) with built-in UI, Authelia SSO and oMLX model sync. | `ldx-agentgateway` |
 | `ldx opencode <subcommand>`     | Configures the local opencode harness from agentgateway models.                             | `ldx-opencode`     |
 
 For detailed usage of each command, see the documentation below.
@@ -137,6 +138,7 @@ See [Configuration](./docs/ldx.md#configuration).
 - [**Redis (`redis`)**](./docs/redis.md)
 - [**PostgreSQL (`postgres`)**](./docs/postgres.md)
 - [**Vault (`vault`)**](./docs/vault.md)
+- [**Authelia (`authelia`)**](./docs/authelia.md)
 - [**agentgateway (`agentgateway`)**](./docs/agentgateway.md)
 
 All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each

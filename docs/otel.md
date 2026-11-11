@@ -51,11 +51,19 @@ to send all OTLP telemetry to:
 Once installed, you can access the Grafana dashboard to view your logs, traces, and metrics.
 
 - **URL:** `https://otel.rd.localhost`
+
+### Authentication
+
+If Authelia is deployed (`ldx authelia install`), Grafana uses OIDC SSO: login redirects to `auth.rd.localhost`, which
+prompts Touch ID. The admin password (`admin/changeit`) remains available as a fallback.
+
+If Authelia is not deployed, Grafana uses the default credentials:
+
 - **Username:** `admin`
 - **Password:** `changeit`
 
-The service is exposed via a Traefik Ingress and uses the locally trusted TLS certificate, so you can access it directly
-without needing to use `kubectl port-forward`.
+The service is exposed via a Traefik Ingress and uses the locally trusted TLS certificate, so you can access it
+directly without needing to use `kubectl port-forward`.
 
 > **See:** [`examples/quarkus-otel-lgtm.md`](../examples/quarkus-otel-lgtm.md) for detailed instructions on configuring
 > a Quarkus application to send telemetry data to this stack.
