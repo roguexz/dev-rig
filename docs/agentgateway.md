@@ -84,29 +84,24 @@ for both the LLM provider and the MCP endpoint.
 
 ### `ldx agentgateway sso`
 
-Enables Vault (deployed by `ldx vault setup`) as the OIDC identity provider for the agentgateway UI:
+Enables Authelia (deployed by `ldx authelia install`) as the OIDC identity provider for the agentgateway UI:
 
-1. Checks that Vault is published at `vault.rd.localhost`, which `ldx vault setup` does with its own ingress, and
-   removes
-   the duplicate `vault-rd` Ingress that older rigs created for the same host.
-2. Inside the Vault pod, provisions the OIDC resources: signing key (`agentgateway-ui`), OIDC client (`agentgateway-ui`,
-   redirect URI `https://agentgateway.rd.localhost/oauth/callback`), group (`agentgateway-ui-users`), assignment, and
-   provider (`agentgateway`). The provider advertises
-   `scopes_supported=profile` (the shared scope created by `ldx vault setup` / `create-user`).
-3. Logs in with the Vault userpass backend (default `admin`/`changeit`, overridable with `--vault-username` /
-   `--vault-password`) to discover the user's entity id and adds it to the group, then restarts the gateway.
+1. Checks that Authelia is running and its OIDC discovery endpoint responds.
+2. Reads the agentgateway client secret from the Authelia cache (`~/.cache/local-dev/authelia/client_secrets`).
+3. Stores the client secret and OIDC configuration in the `agentgateway-secrets` Secret.
+4. Updates the gateway's `ui.policies.oidc` block to point at Authelia's endpoints.
+5. Restarts the gateway.
 
 The generated `ui.policies.oidc` block uses explicit provider mode: the `issuer` and `authorizationEndpoint` are the
-browser-facing `vault.rd.localhost` URLs, while `tokenEndpoint` and `jwks` point at the in-cluster Vault service
-(`http://vault.<vault-namespace>.svc.cluster.local:8200`, `commons` by default), because pods resolve `*.rd.localhost`
-to loopback and do not trust the
-mkcert CA. It also requests `scopes: [profile]`, so the UI shows each user's name and email (from Vault entity
-metadata) instead of the raw entity UUID. Provision or update that metadata with `ldx vault create-user`.
+browser-facing `auth.rd.localhost` URLs, while `tokenEndpoint` and `jwks` point at the in-cluster Authelia service
+(`http://authelia.authelia.svc.cluster.local:9091`), because pods resolve `*.rd.localhost` to loopback and do not trust
+the mkcert CA. It requests `scopes: [openid, profile, email, groups]`, so the UI shows each user's name and email.
 
-Vault must be unsealed before running this command (`ldx vault unseal`).
+Authelia must be running before running this command (`ldx authelia install`).
 
-> **Note:** Vault-side resources (`identity/oidc/{key,client,assignment,provider}/agentgateway*`,
-> `identity/group/name/agentgateway-ui-users`) are left in place by `uninstall`; clean them up manually if desired.
+> **Note:** This replaces the previous Vault-based SSO. If you previously ran `ldx agentgateway sso` with the old
+> Vault-based implementation, Vault-side OIDC resources (`identity/oidc/{key,client,assignment,provider}/agentgateway*`,
+> `identity/group/name/agentgateway-ui-users`) may still exist; clean them up manually if desired.
 
 ### `ldx agentgateway mcp`
 
@@ -193,8 +188,8 @@ redirect, and the certificate from `ldx tls install` is trusted by the system ke
 The UI is served on the gateway port. The admin interface (port 15000) binds to the pod's loopback interface and is
 intentionally not reachable from outside the pod; the gateway-port UI is the supported, authenticatable path.
 
-After `ldx agentgateway sso`, opening the UI redirects to `https://vault.rd.localhost` for login and back once the
-Vault session is established.
+After `ldx agentgateway sso`, opening the UI redirects to `https://auth.rd.localhost` for login (Touch ID) and back
+once the Authelia session is established.
 
 ### From Inside the Kubernetes Cluster
 
