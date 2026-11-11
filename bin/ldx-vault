@@ -19,37 +19,17 @@ SCRIPT_DIR="$(get_script_dir)"
 # upgrade handles version moves deliberately (snapshot + checks).
 VAULT_CHART_VERSION="0.34.1"
 
-# The --set flags that define this rig's Vault deployment. Shared by setup and
-# upgrade so an upgrade never relies on --reuse-values: chart 0.34.x added new
-# value sections (server.httproute) whose templates blow up when the old
-# release's values are reused without the new chart's defaults.
-VAULT_HELM_SET_ARGS=(
-    --set "server.dev.enabled=false"
-    --set "server.ha.enabled=false"
-    --set "server.standalone.enabled=true"
-    --set "server.dataStorage.size=1Gi"
-    --set "server.ingress.enabled=true"
-    --set "server.ingress.ingressClassName=traefik"
-    --set "server.ingress.hosts[0].host=vault.rd.localhost"
-    --set "server.ingress.hosts[0].paths[0]=/"
-    --set "server.ingress.tls[0].secretName=default-tls-secret"
-    --set "server.ingress.tls[0].hosts[0]=vault.rd.localhost"
-    # Chart 0.34.x hard-codes *required* pod anti-affinity on hostname for the agent
-    # injector (its own comment says to clear it for single-node clusters). On Rancher
-    # Desktop a rolling update can then never place its surge pod: the running pod
-    # rejects the new one too, so `helm upgrade --wait` dies with
-    # "Progress deadline exceeded". Surge 0 / unavailable 1 makes the old pod leave
-    # before the new one schedules, which is what a single node needs. (type: Recreate
-    # would do the same, but server-side apply then refuses the leftover
-    # spec.strategy.rollingUpdate.)
-    --set "injector.affinity="
-    --set "injector.strategy.rollingUpdate.maxSurge=0"
-    --set "injector.strategy.rollingUpdate.maxUnavailable=1"
-)
 source "${SCRIPT_DIR}/lib/common.sh"
 
+# Helm values file that defines this rig's Vault deployment. Shared by setup
+# and upgrade so an upgrade never relies on --reuse-values: chart 0.34.x added
+# new value sections (server.httproute) whose templates blow up when the old
+# release's values are reused without the new chart's defaults.
+# See config/vault-values.yaml for the full values and rationale.
+VAULT_HELM_VALUES="${CONFIG_DIR}/vault-values.yaml"
+
 show_help() {
-    echo "Usage: $(basename "$0") <setup|status|unseal|seal|create-user|upgrade|snapshot|uninstall> [options]"
+    echo "Usage: $(basename "$0") <setup|status|unseal|seal|create-user|sso|upgrade|snapshot|uninstall> [options]"
     echo ""
     echo "Commands:"
     echo "  setup       Install Vault, initialize it, and store keys."
@@ -58,6 +38,7 @@ show_help() {
     echo "  seal        Seal the Vault."
     echo "  create-user Create (or update) a userpass user with entity metadata."
     echo "  enable-secrets  Enable the KV v2 secrets engine and Kubernetes auth method."
+    echo "  sso         Configure Vault to use Authelia as its OIDC provider (Touch ID login)."
     echo "  upgrade     Upgrade Vault to a chart version (default: latest) with a snapshot + checks."
     echo "  snapshot    Save a storage snapshot (Raft or file backend; Vault must be unsealed)."
     echo "  uninstall   Remove Vault and its stored keys."
@@ -75,6 +56,9 @@ show_help() {
     echo ""
     echo "Options for enable-secrets:"
     echo "  (none required; enables KV v2 at 'secret', Kubernetes auth, and the mcp-secrets-read policy)"
+    echo ""
+    echo "Options for sso:"
+    echo "  (none required; requires 'ldx authelia install' to have been run first)"
     echo ""
     echo "Options for upgrade:"
     echo "  <chart-version>        Target chart version (e.g. 0.34.1, app Vault 2.0.4)."
@@ -135,6 +119,44 @@ report_unready_pods() {
         awk '$1 == "Warning"' | tail -n 5 | sed 's/^/  /'
 }
 
+# Finds the Traefik Service ClusterIP so we can configure hostAliases in the
+# Vault pod. This allows Vault to reach Authelia through Traefik (so the Host
+# header matches the OIDC issuer) without relying on external DNS.
+get_traefik_cluster_ip() {
+    local traefik_ns="" traefik_svc="" ip=""
+
+    # Try common namespaces where Traefik might be deployed
+    for ns in kube-system traefik ingress; do
+        traefik_svc=$(kubectl get svc -n "$ns" -l app.kubernetes.io/name=traefik -o 'jsonpath={.items[0].metadata.name}' 2>/dev/null) || true
+        if [ -n "$traefik_svc" ]; then
+            traefik_ns="$ns"
+            break
+        fi
+    done
+
+    # If not found by label, try by name
+    if [ -z "$traefik_svc" ]; then
+        for ns in kube-system traefik ingress; do
+            if kubectl get svc -n "$ns" traefik 2>/dev/null >/dev/null; then
+                traefik_ns="$ns"
+                traefik_svc="traefik"
+                break
+            fi
+        done
+    fi
+
+    if [ -n "$traefik_ns" ] && [ -n "$traefik_svc" ]; then
+        ip=$(kubectl get svc -n "$traefik_ns" "$traefik_svc" -o 'jsonpath={.spec.clusterIP}' 2>/dev/null) || true
+    fi
+
+    if [ -z "$ip" ] || [ "$ip" = "None" ]; then
+        # Last resort: look for any Service with Type=LoadBalancer or the default TLS secret
+        ip=$(kubectl get svc -A -o json 2>/dev/null | jq -r '.items[] | select(.spec.clusterIP != "None") | select(.metadata.name == "traefik" or .metadata.labels."app.kubernetes.io/name" == "traefik") | .spec.clusterIP' 2>/dev/null | head -1) || true
+    fi
+
+    printf '%s' "$ip"
+}
+
 setup_vault() {
     require_command "helm"
     require_command "kubectl"
@@ -151,11 +173,25 @@ setup_vault() {
     # Cache the version before installing so it survives even if init is interrupted.
     record_vault_version "$VAULT_CHART_VERSION" "$(vault_app_version_for_chart "$VAULT_CHART_VERSION")"
 
+    # Configure hostAliases so auth.rd.localhost resolves to Traefik's ClusterIP
+    # inside the Vault pod. This allows Vault to reach Authelia through Traefik
+    # (so the Host header matches the OIDC issuer) without relying on external DNS.
+    local helm_flags=("--values" "$VAULT_HELM_VALUES")
+    local traefik_ip
+    traefik_ip=$(get_traefik_cluster_ip)
+    if [ -n "$traefik_ip" ]; then
+        log_info "Configuring Vault pod to resolve auth.rd.localhost to Traefik (${traefik_ip})..."
+        helm_flags+=("--set" "server.hostAliases[0].ip=${traefik_ip}")
+        helm_flags+=("--set" "server.hostAliases[0].hostnames[0]=auth.rd.localhost")
+    else
+        log_warn "Could not determine Traefik ClusterIP. Vault may not be able to reach Authelia for OIDC."
+    fi
+
     log_info "Installing Vault via Helm (chart ${VAULT_CHART_VERSION})..."
     if ! helm upgrade --install vault hashicorp/vault \
         --version "$VAULT_CHART_VERSION" \
         --namespace "$namespace" \
-        "${VAULT_HELM_SET_ARGS[@]}" \
+        "${helm_flags[@]}" \
         --force-conflicts \
         --wait; then
         log_error "Vault install/upgrade did not finish. Pods that are not ready:"
@@ -341,19 +377,29 @@ vault_cli() {
 # Loads the cached root token and requires a reachable, unsealed Vault.
 # Reads `.sealed` as a raw boolean: jq's `//` treats `false` as absent, so
 # `.sealed // empty` would report a healthy Vault as unreachable.
+# Retries for up to 60 seconds to handle the case where Traefik isn't ready yet
+# (e.g., during 'setup' when the ingress is still being configured).
 require_unsealed_vault() {
     if [ ! -f "${VAULT_DIR}/keys.json" ]; then
         fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
     fi
     VAULT_ROOT_TOKEN=$(jq -r .root_token "${VAULT_DIR}/keys.json")
 
-    local sealed
-    sealed=$(vault_cli status -format=json 2>/dev/null | jq -r '.sealed') || true
-    case "$sealed" in
-        false) ;;
-        true) fatal "Vault is sealed. Run 'unseal' first." ;;
-        *) fatal "Cannot reach Vault at ${VAULT_API_URL}. Is the cluster up and 'ldx vault setup' done?" ;;
-    esac
+    local sealed="" attempts=0
+    while [ $attempts -lt 12 ]; do
+        sealed=$(vault_cli status -format=json 2>/dev/null | jq -r '.sealed') || true
+        case "$sealed" in
+            false) return ;;
+            true) fatal "Vault is sealed. Run 'unseal' first." ;;
+        esac
+        attempts=$((attempts + 1))
+        if [ $attempts -lt 12 ]; then
+            echo -n "."
+            sleep 5
+        fi
+    done
+    echo ""
+    fatal "Cannot reach Vault at ${VAULT_API_URL} after 60s. Is 'ldx tls install' done and the cluster up?"
 }
 
 create_user_vault() {
@@ -555,6 +601,128 @@ POLICY
     log_info "  - Policy 'mcp-secrets-read' (minimal read access for the Vault Agent)"
 }
 
+# --- Authelia SSO ---------------------------------------------------------------
+# Configures Vault's OIDC auth method to point at Authelia (deployed by 'ldx
+# authelia install'). After this, Vault logins redirect to Authelia, which
+# presents Touch ID (WebAuthn) after the initial password+enrollment setup.
+# Userpass stays enabled as a fallback.
+AUTHELIA_SECRETS_DIR="${CACHE_DIR}/authelia"
+AUTHELIA_SECRETS_FILE="${AUTHELIA_SECRETS_DIR}/client_secrets"
+AUTHELIA_HOST="auth.rd.localhost"
+
+sso_vault() {
+    require_command "kubectl"
+    require_command "jq"
+    require_command "curl"
+
+    # Read the Vault client secret from the Authelia cache (created by 'ldx authelia install')
+    if [ ! -f "$AUTHELIA_SECRETS_FILE" ]; then
+        fatal "Authelia client secrets not found at ${AUTHELIA_SECRETS_FILE}. Run 'ldx authelia install' first."
+    fi
+    local vault_client_secret
+    vault_client_secret=$(grep "^VAULT_CLIENT_SECRET=" "$AUTHELIA_SECRETS_FILE" | cut -d= -f2-)
+    if [ -z "$vault_client_secret" ]; then
+        fatal "VAULT_CLIENT_SECRET not found in ${AUTHELIA_SECRETS_FILE}."
+    fi
+
+    # Check that Authelia is running and its OIDC discovery endpoint responds
+    local authelia_namespace
+    authelia_namespace="$(ldx_namespace authelia)"
+    local phase
+    phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || phase="NotFound"
+    if [ "$phase" != "Running" ]; then
+        fatal "Authelia is not running (pod phase: ${phase}). Run 'ldx authelia install' first."
+    fi
+
+    local discovery_url="https://${AUTHELIA_HOST}/.well-known/openid-configuration"
+    if ! curl -sf "${discovery_url}" > /dev/null 2>&1; then
+        fatal "Cannot reach Authelia OIDC discovery at ${discovery_url}. Is Traefik configured with TLS?"
+    fi
+
+    require_unsealed_vault
+
+    local namespace
+    namespace="$(ldx_namespace vault)"
+
+    log_info "Configuring Vault OIDC auth method to use Authelia..."
+
+    local authelia_external_url="https://${AUTHELIA_HOST}"
+
+    # Read the CA from the ClusterTrustBundle (created by 'ldx certmanager install').
+    # The PEM content is safe to embed in the heredoc (only base64 chars and newlines).
+    local ca_pem=""
+    ca_pem=$(kubectl get clustertrustbundle mkcert-ca -o jsonpath='{.spec.trustBundle}' 2>/dev/null || true)
+    if [ -n "$ca_pem" ]; then
+        log_info "Using mkcert root CA from ClusterTrustBundle for TLS verification."
+    else
+        log_warn "ClusterTrustBundle 'mkcert-ca' not found or empty. Vault may fail to verify Authelia's TLS certificate."
+        log_warn "Run 'ldx certmanager install' first."
+    fi
+
+    # Run the Vault API calls inside the pod (same pattern as configure_default_user).
+    # The image has no jq, so we avoid relying on it.
+    cat <<EOF | kubectl exec -i -n "$namespace" vault-0 -- sh
+        export VAULT_TOKEN="${VAULT_ROOT_TOKEN}"
+
+        # Enable OIDC auth method if not already enabled
+        if ! vault auth list | grep -q "oidc/"; then
+            vault auth enable oidc
+        fi
+
+        # Use the external URL (base URL, without the discovery path) for the discovery
+        # endpoint. Vault appends /.well-known/openid-configuration automatically.
+        # All other endpoints use the full URL.
+        #
+        # The Vault pod resolves auth.rd.localhost to Traefik's ClusterIP via CoreDNS
+        # (glibc queries DNS for .localhost, unlike musl which follows RFC 6761 strictly).
+        # This ensures the Host header matches the OIDC issuer (Authelia validates it),
+        # and the request goes through Traefik for proper TLS termination.
+        #
+        # CA certificates are passed as PEM content using the correct parameter names:
+        # oidc_discovery_ca_pem for the discovery URL and jwks_ca_pem for the JWKS URL.
+        if [ -n "${ca_pem}" ]; then
+            vault write auth/oidc/config \\
+                oidc_discovery_url="${authelia_external_url}" \\
+                oidc_discovery_ca_pem="${ca_pem}" \\
+                oidc_authorization_url="${authelia_external_url}/api/oidc/authorization" \\
+                oidc_token_url="${authelia_external_url}/api/oidc/token" \\
+                oidc_jwks_url="${authelia_external_url}/.well-known/jwks.json" \\
+                jwks_ca_pem="${ca_pem}" \\
+                oidc_client_id="vault" \\
+                oidc_client_secret="${vault_client_secret}" \\
+                default_role="admin"
+        else
+            vault write auth/oidc/config \\
+                oidc_discovery_url="${authelia_external_url}" \\
+                oidc_authorization_url="${authelia_external_url}/api/oidc/authorization" \\
+                oidc_token_url="${authelia_external_url}/api/oidc/token" \\
+                oidc_jwks_url="${authelia_external_url}/.well-known/jwks.json" \\
+                oidc_client_id="vault" \\
+                oidc_client_secret="${vault_client_secret}" \\
+                default_role="admin"
+        fi
+
+        # Create role for Authelia logins. The email claim from Authelia maps to
+        # the Vault entity. The admin entity has email admin@rd.localhost (set by
+        # 'setup'), which matches the Authelia admin user's email.
+        #
+        # oidc_scopes requests the email and profile scopes so Authelia includes
+        # the email claim in the token (required by user_claim="email").
+        vault write auth/oidc/role/admin \\
+            bound_audiences="vault" \\
+            allowed_redirect_uris="https://vault.rd.localhost/ui/vault/auth/oidc/oidc/callback" \\
+            allowed_redirect_uris="http://localhost:8250/oidc/callback" \\
+            user_claim="email" \\
+            oidc_scopes="openid,email,profile" \\
+            policies="admin"
+EOF
+
+    log_info "Vault OIDC login is now wired to Authelia."
+    log_info "Open https://vault.rd.localhost and choose 'Authelia' (or 'OIDC') as the login method."
+    log_info "After the first login, you will be prompted by Touch ID."
+    log_info "Userpass (admin/changeit) remains available as a fallback."
+}
+
 # --- Version tracking ---------------------------------------------------------
 # ${VAULT_DIR}/version.json records the chart/app version this workspace's
 # setup pins and what the cluster actually runs, so later upgrades (or a
@@ -717,7 +885,7 @@ upgrade_vault() {
         helm upgrade vault hashicorp/vault \
             --version "$target" \
             --namespace "$namespace" \
-            "${VAULT_HELM_SET_ARGS[@]}" \
+            --values "$VAULT_HELM_VALUES" \
             --dry-run=client >/dev/null
         log_info "--dry-run: manifest rendered successfully; no changes applied."
         return
@@ -742,7 +910,7 @@ upgrade_vault() {
     if ! helm upgrade vault hashicorp/vault \
         --version "$target" \
         --namespace "$namespace" \
-        "${VAULT_HELM_SET_ARGS[@]}" \
+        --values "$VAULT_HELM_VALUES" \
         --force-conflicts; then
         log_error "helm upgrade failed. Pods that are not ready:"
         report_unready_pods "$namespace"
@@ -875,6 +1043,9 @@ main() {
             ;;
         enable-secrets)
             enable_secrets_vault "$@"
+            ;;
+        sso)
+            sso_vault "$@"
             ;;
         upgrade)
             upgrade_vault "$@"

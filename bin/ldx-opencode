@@ -231,7 +231,7 @@ select_default_model() {
     while IFS= read -r line; do
         i=$((i + 1))
         local flags=""
-        [ "$(jq -r '.parser or .budget_enabled' <<<"$line")" = "true" ] && flags="${flags}thinking "
+        [ "$(jq -r '.budget_enabled' <<<"$line")" = "true" ] && flags="${flags}thinking "
         [ "$(jq -r '.vision' <<<"$line")" = "true" ] && flags="${flags}vision "
         local ctx
         ctx=$(jq -r '.context' <<<"$line")
@@ -284,19 +284,16 @@ if not models:
     sys.exit("no models in manifest")
 
 def variants_for(m):
-    if not (m["parser"] or m["budget_enabled"]):
+    if not m["budget_enabled"]:
         return None
     budget = m["budget"]
-    output = m["output"]
-    if m["parser"]:
-        low = max(budget // 4, 1024)
-        high = min(output, budget * 4)
-        return {
-            level: {"options": {"thinking": {"type": "enabled", "budgetTokens": tokens}}}
-            for level, tokens in (("low", low), ("medium", budget), ("high", high))
-        }
-    # Thinking-capable without a parseable reasoning stream: effort levels.
-    return {level: {"options": {"reasoningEffort": level}} for level in ("low", "medium", "high")}
+    low = min(int(budget * 0.25), 1024)
+    medium = int(budget * 0.5)
+    high = budget
+    return {
+        level: {"options": {"thinking": {"type": "enabled", "budgetTokens": tokens}}}
+        for level, tokens in (("low", low), ("medium", medium), ("high", high))
+    }
 
 def model_entry(m):
     entry = {

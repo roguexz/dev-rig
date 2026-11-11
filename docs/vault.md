@@ -51,6 +51,18 @@ installs into the system trust store, so the CLI verifies it without `-k`. If th
 logged in), the command creates one and binds its `userpass` alias, so the first login maps onto that entity. Existing
 metadata keys and the entity name Vault assigned are preserved.
 
+### `ldx vault sso`
+
+Configures Vault's OIDC auth method to use Authelia (deployed by `ldx authelia install`) as its identity provider.
+After this, Vault logins redirect to Authelia, which presents Touch ID (WebAuthn) after the initial
+password+enrollment setup.
+
+Requires:
+- Authelia deployed (`ldx authelia install`)
+- Vault running and unsealed (`ldx vault setup`, `ldx vault unseal`)
+
+Userpass (`admin/changeit`) remains available as a fallback.
+
 ### `ldx vault enable-secrets`
 
 Enables the secrets engine and auth method components needed for the agentgateway's Vault-backed MCP credentials:
