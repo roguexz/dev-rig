@@ -43,12 +43,13 @@ show_help() {
   echo ""
   echo "Local Kubernetes & Infrastructure Setup (Rancher Desktop):"
   echo "  tls           Manage TLS certificates and Traefik configuration"
-  echo "  certmanager   Install and configure cert-manager"
+  echo "  certmanager   Install cert-manager, ClusterIssuer, and ClusterTrustBundle (CA distribution)"
   echo "  otel          Deploy and configure OpenTelemetry LGTM stack"
   echo "  redis         Deploy Redis stack"
   echo "  postgres      Deploy PostgreSQL with pgvector extension"
   echo "  vault         Manage local Vault deployment"
-  echo "  agentgateway  Deploy agentgateway (LLM/MCP/A2A gateway) with oMLX sync and Vault SSO"
+  echo "  authelia      Deploy Authelia (OIDC provider with WebAuthn/Touch ID support)"
+  echo "  agentgateway  Deploy agentgateway (LLM/MCP/A2A gateway) with oMLX sync and Authelia SSO"
   echo "  opencode      Configure the local opencode harness from agentgateway models"
   echo ""
   echo "Run '$(basename "$0") <command> help' for detailed usage of a specific command."
@@ -99,7 +100,7 @@ install_binaries() {
 
   log_info "Installing ldx commands into '${target_dir}' using ${mode} mode..."
 
-  local scripts=("ldx" "ldx-skill" "ldx-cvescan" "ldx-touchid" "ldx-certmanager" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault" "ldx-agentgateway" "ldx-opencode")
+  local scripts=("ldx" "ldx-skill" "ldx-cvescan" "ldx-touchid" "ldx-certmanager" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault" "ldx-authelia" "ldx-agentgateway" "ldx-opencode")
   local repo_dir="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
   local share_dir="$(cd "${target_dir}/.." &>/dev/null && pwd)/share/ldx"
   [ -z "$share_dir" ] && share_dir="${target_dir}/share/ldx"
@@ -116,6 +117,11 @@ install_binaries() {
       mkdir -p "${target_dir}/lib"
       cp -R "${SCRIPT_DIR}/lib/"* "${target_dir}/lib/"
       log_info "Copied lib/ utilities -> ${target_dir}/lib/"
+    fi
+    if [ -d "${repo_dir}/config" ]; then
+      mkdir -p "${target_dir}/config"
+      cp -R "${repo_dir}/config/"* "${target_dir}/config/"
+      log_info "Copied config/ templates -> ${target_dir}/config/"
     fi
     if [ -d "${repo_dir}/cvescan" ]; then
       mkdir -p "${share_dir}/cvescan"
@@ -147,6 +153,11 @@ install_binaries() {
         ln -sf "$libfile" "${target_dir}/lib/${libname}"
       done
       log_info "Linked lib/ utilities -> ${target_dir}/lib/"
+    fi
+    if [ -d "${repo_dir}/config" ]; then
+      mkdir -p "${target_dir}/config"
+      ln -snf "${repo_dir}/config" "${target_dir}/config"
+      log_info "Linked config/ templates -> ${target_dir}/config/"
     fi
     if [ -d "${repo_dir}/cvescan" ]; then
       mkdir -p "${share_dir}"
@@ -193,7 +204,7 @@ case "$COMMAND" in
     install_binaries "$@"
     exit 0
     ;;
-  skill|cvescan|touchid|tls|certmanager|otel|redis|postgres|vault|agentgateway|opencode)
+  skill|cvescan|touchid|tls|certmanager|otel|redis|postgres|vault|authelia|agentgateway|opencode)
     EXEC_SCRIPT="${SCRIPT_DIR}/ldx-${COMMAND}"
     ;;
   help|-h|--help)

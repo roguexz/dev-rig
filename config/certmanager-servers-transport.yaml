@@ -1,0 +1,17 @@
+# Traefik ServersTransport: defines the TLS transport for backend connections.
+# Uses the mkcert CA Secret for verifying pod certificates. Referenced by
+# Service annotations:
+#   traefik.ingress.kubernetes.io/service.serverstransport: kube-system-mkcert-ca@kubernetescrd
+#
+# Note: insecureSkipVerify is required because the rootCAsSecrets field (used
+# to provide the CA) does not enable verification in this Traefik version.
+# Connections are still encrypted (HTTPS), just not verified.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: mkcert-ca
+  namespace: kube-system
+spec:
+  insecureSkipVerify: true
+  rootCAsSecrets:
+    - mkcert-ca-bundle

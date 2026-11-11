@@ -2,6 +2,89 @@
 
 set -euo pipefail
 
+# --- Config directory ---------------------------------------------------------
+# The repository's config/ directory holds K8s templates (.yaml.tpl) and Helm
+# values files. Scripts locate it relative to their own directory:
+#   - Running from the repo:   repo/bin/ldx-*  → repo/config/
+#   - Installed (copy mode):   ~/.local/bin/   → ~/.local/bin/config/
+#   - Installed (link mode):   ~/.local/bin/   → repo/config/ (symlinked)
+#
+# The resolver checks alongside the script first, then one level up (repo root).
+# The caller sets SCRIPT_DIR before sourcing this file.
+get_config_dir() {
+    local script_dir="${1:-.}"
+    # Check alongside the script (copy-mode install puts config/ here)
+    if [ -d "${script_dir}/config" ]; then
+        echo "${script_dir}/config"
+        return
+    fi
+    # Check the repo root (running from the repo, or link-mode install)
+    local parent="$(cd "${script_dir}/.." 2>/dev/null && pwd)"
+    if [ -d "${parent}/config" ]; then
+        echo "${parent}/config"
+        return
+    fi
+    # Fallback: alongside the script (will fail gracefully later if missing)
+    echo "${script_dir}/config"
+}
+
+export CONFIG_DIR="$(get_config_dir "${SCRIPT_DIR:-.}")"
+
+# Renders a K8s template file, substituting {{VAR}} placeholders with the given
+# VAR=value pairs. Uses sed with escaped special characters for safety.
+# All values must be single-line; multi-line content (PEM keys, YAML blocks)
+# belongs in the template file itself, not passed as substitutions.
+# Usage: render_template path/to/file.yaml.tpl NAMESPACE="foo" IMAGE="bar"
+render_template() {
+    local file="$1"; shift
+    [ -f "$file" ] || fatal "Template file not found: $file"
+
+    local content
+    content=$(cat "$file")
+
+    for kv in "$@"; do
+        local var="${kv%%=*}"
+        local val="${kv#*=}"
+        # Escape sed replacement special characters: &, /, \
+        val=$(printf '%s' "$val" | sed 's/[&/\]/\\&/g')
+        content=$(printf '%s' "$content" | sed "s/{{${var}}}/${val}/g")
+    done
+
+    printf '%s\n' "$content"
+}
+
+# Injects multi-line content at a {{MARKER}} line in a rendered template,
+# then removes the marker line. If content is empty, just removes the marker.
+# Usage: inject_block "$rendered_template" "{{OIDC_ENV}}" "$multi_line_content"
+inject_block() {
+    local template="$1"
+    local marker="$2"
+    local content="$3"
+
+    if [ -z "$content" ]; then
+        # No content: just remove the marker line
+        printf '%s\n' "$template" | sed "/${marker}/d"
+        return
+    fi
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    printf '%s\n' "$content" > "$tmpfile"
+
+    # Use awk to insert the file content at the marker line and skip the marker.
+    # awk handles multi-line insertion cleanly across both GNU and BSD systems.
+    awk -v marker="$marker" -v file="$tmpfile" '
+    $0 == marker {
+        while ((getline line < file) > 0) print line
+        close(file)
+        next
+    }
+    { print }
+    ' <<< "$template"
+
+    rm -f "$tmpfile"
+}
+
 # Global Configuration
 export CACHE_DIR="${HOME}/.cache/local-dev"
 export CERTS_DIR="${CACHE_DIR}/certs"

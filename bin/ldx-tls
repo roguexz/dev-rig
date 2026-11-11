@@ -113,16 +113,7 @@ install_certs() {
         --dry-run=client -o yaml | kubectl apply -f -
 
     log_info "Creating Traefik TLSStore..."
-    cat <<EOF | kubectl apply -f -
-apiVersion: traefik.io/v1alpha1
-kind: TLSStore
-metadata:
-  name: default
-  namespace: kube-system
-spec:
-  defaultCertificate:
-    secretName: default-tls-secret
-EOF
+    kubectl apply -f "${CONFIG_DIR}/tlsstore.yaml"
 
     log_info "TLS setup complete."
 }
