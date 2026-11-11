@@ -48,6 +48,7 @@ routes:
       - key: ${{API_KEY_NAME}}
         metadata:
           user: local
+          name: Local Access
   backends:
   - mcp:
 {{MCP_TARGETS}}

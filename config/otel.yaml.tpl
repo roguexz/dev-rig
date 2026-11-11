@@ -22,13 +22,10 @@ spec:
         # Override the default Grafana admin password
         - name: GF_SECURITY_ADMIN_PASSWORD
           value: "changeit"
-        # CA bundle for verifying TLS certificates (Authelia, etc.).
-        # The mkcert CA is distributed via a ClusterTrustBundle (created by
-        # 'ldx certmanager install') and referenced via volume projection.
-        - name: SSL_CERT_FILE
-          value: "/etc/ssl/trust/ca-bundle.pem"
-        - name: CURL_CA_BUNDLE
-          value: "/etc/ssl/trust/ca-bundle.pem"
+        # Extra CA certificates (mkcert CA for local services like Authelia).
+        # Mounted as SSL_CERT_DIR so they're added to the system root store.
+        - name: SSL_CERT_DIR
+          value: "/etc/ssl/extra-cas"
 {{OIDC_ENV}}
         ports:
         - containerPort: 3000
@@ -38,18 +35,14 @@ spec:
         - containerPort: 4318
           name: otlp-http
         volumeMounts:
-        # mkcert CA bundle (from ClusterTrustBundle volume projection).
-        - name: trust-bundle
-          mountPath: /etc/ssl/trust
+        # Extra CA certificates (mkcert CA) mounted as a directory for SSL_CERT_DIR.
+        - name: extra-cas
+          mountPath: /etc/ssl/extra-cas
           readOnly: true
       volumes:
-      - name: trust-bundle
-        projected:
-          sources:
-          - clusterTrustBundle:
-              name: mkcert-ca
-              path: ca-bundle.pem
-              optional: true
+      - name: extra-cas
+        configMap:
+          name: extra-cas
 ---
 apiVersion: v1
 kind: Service

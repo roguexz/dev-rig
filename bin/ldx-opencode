@@ -296,10 +296,11 @@ def variants_for(m):
     }
 
 def model_entry(m):
+    # Wire id must match the gateway's model name (with 'agw-' prefix); the
+    # gateway strips the prefix when forwarding to oMLX via params.model.
+    wire_id = m["id"] if m["id"].startswith("agw-") else "agw-" + m["id"]
     entry = {
-        # Wire id: the gateway routes on the un-prefixed name; the config key
-        # carries the 'agw-' prefix so ids can't collide with other providers.
-        "id": m["id"],
+        "id": wire_id,
         "name": m["name"],
         "capabilities": {"vision": m["vision"]},
         "limit": {"context": m["context"], "output": m["output"]},
@@ -319,8 +320,9 @@ provider = {
         "baseURL": base_url,
         "apiKey": os.environ.get("CLIENT_KEY") or "omlx",
     },
-    # Config key: 'agw-' prefix keeps ids from colliding with other providers'
-    # models in opencode's catalog; 'id' above keeps the wire name intact.
+    # Config key and wire id both carry the 'agw-' prefix: the config key
+    # avoids collisions with other providers' models in opencode's catalog,
+    # and the wire id must match the gateway's model name for routing.
     "models": {("agw-" + m["id"] if not m["id"].startswith("agw-") else m["id"]): model_entry(m) for m in models},
 }
 

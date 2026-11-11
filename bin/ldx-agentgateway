@@ -313,9 +313,10 @@ ${providers_line}
     apiKey:
       mode: strict
       keys:
-      - key: $${AGENTGATEWAY_API_KEY_NAME}
+      - key: \$${AGENTGATEWAY_API_KEY_NAME}
         metadata:
           user: local
+          name: Local Access
 ${models_line}
 EOF
 )
@@ -609,6 +610,10 @@ install_agentgateway() {
 
     # Apply the Vault Agent ConfigMap (auto-auth + templates).
     apply_vault_agent_config
+
+    # Create the extra CAs ConfigMap (mkcert CA) so the gateway can verify
+    # local services (Authelia) while using system roots for public CAs.
+    create_extra_cas_configmap "$namespace"
 
     log_info "Creating agentgateway Deployment, Service, and Ingress..."
     local rendered

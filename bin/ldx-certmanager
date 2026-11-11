@@ -16,11 +16,13 @@ SCRIPT_DIR="$(get_script_dir)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo "Usage: $(basename "$0") <install|uninstall|ca-bundle>"
     echo ""
     echo "Commands:"
-    echo "  install    Install cert-manager via Helm and configure local ClusterIssuer."
-    echo "  uninstall  Remove cert-manager and its configurations."
+    echo "  install       Install cert-manager via Helm and configure local ClusterIssuer."
+    echo "  uninstall     Remove cert-manager and its configurations."
+    echo "  ca-bundle <ns> Create/update the 'extra-cas' ConfigMap in namespace <ns>"
+    echo "                 with hash-named local CA files (mkcert) for SSL_CERT_DIR."
 }
 
 install_certmanager() {
@@ -212,6 +214,14 @@ main() {
             ;;
         uninstall)
             uninstall_certmanager
+            ;;
+        ca-bundle)
+            if [ $# -eq 0 ]; then
+                log_error "ca-bundle requires a namespace argument"
+                show_help
+                exit 1
+            fi
+            create_extra_cas_configmap "$1"
             ;;
         *)
             log_error "Unknown subcommand: $subcommand"

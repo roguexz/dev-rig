@@ -50,13 +50,11 @@ spec:
             name: {{AGENTGATEWAY_SECRET}}
             optional: true
         env:
-        # CA bundle for verifying TLS certificates (Authelia, etc.).
-        # The mkcert CA is distributed via a ClusterTrustBundle (created by
-        # 'ldx certmanager install') and referenced via volume projection.
-        - name: SSL_CERT_FILE
-          value: "/etc/ssl/trust/ca-bundle.pem"
-        - name: CURL_CA_BUNDLE
-          value: "/etc/ssl/trust/ca-bundle.pem"
+        # Extra CA certificates (mkcert CA for local services like Authelia).
+        # Mounted as SSL_CERT_DIR so they're added to the system root store
+        # rather than replacing it; public CAs continue to come from the image.
+        - name: SSL_CERT_DIR
+          value: "/etc/ssl/extra-cas"
         ports:
         - containerPort: 4000
           name: http
@@ -70,9 +68,11 @@ spec:
         - name: mcp-credentials
           mountPath: {{MCP_CREDENTIALS_DIR}}
           readOnly: true
-        # mkcert CA bundle (from ClusterTrustBundle volume projection).
-        - name: trust-bundle
-          mountPath: /etc/ssl/trust
+        # Extra CA certificates (mkcert CA for local services like Authelia).
+        # Mounted as a directory for SSL_CERT_DIR; these are added to the system
+        # root store rather than replacing it.
+        - name: extra-cas
+          mountPath: /etc/ssl/extra-cas
           readOnly: true
         # The admin port (15000) binds to the pod's loopback only, so probe
         # the gateway port instead.
@@ -128,14 +128,12 @@ spec:
       # emptyDir for the Vault Agent's token file and state.
       - name: vault-agent-state
         emptyDir: {}
-      # mkcert CA bundle (from ClusterTrustBundle volume projection).
-      - name: trust-bundle
-        projected:
-          sources:
-          - clusterTrustBundle:
-              name: mkcert-ca
-              path: ca-bundle.pem
-              optional: true
+      # Extra CA certificates (mkcert CA) as a ConfigMap, created by 'ldx certmanager install'.
+      # Mounted as a directory for SSL_CERT_DIR; these are added to the system root
+      # store so public CAs continue to come from the container image.
+      - name: extra-cas
+        configMap:
+          name: extra-cas
       # The pod's service account token (automatically mounted by Kubernetes,
       # but we mount it explicitly here for clarity).
       - name: vault-token

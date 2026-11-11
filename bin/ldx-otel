@@ -89,6 +89,10 @@ EOF
 )
     fi
 
+    # Create the extra CAs ConfigMap (mkcert CA) so the LGTM pod can verify
+    # local services while using system roots for public CAs.
+    create_extra_cas_configmap "$namespace"
+
     local rendered
     rendered=$(render_template "${CONFIG_DIR}/otel.yaml.tpl" NAMESPACE="$namespace")
     inject_block "$rendered" "{{OIDC_ENV}}" "$oidc_env" | kubectl apply -f -

@@ -232,3 +232,46 @@ helm() {
     fi
     command helm --kube-context="$RD_KUBE_CONTEXT" "$@"
 }
+
+# Creates (or updates) the 'extra-cas' ConfigMap in the given namespace with
+# hash-named CA certificate files (for SSL_CERT_DIR). This adds local CAs
+# (like mkcert) to the system root store without replacing it, so public CAs
+# continue to come from the container image. The ConfigMap is small and stable
+# (only contains local CAs), so it rarely needs refreshing.
+# Usage: create_extra_cas_configmap <namespace>
+create_extra_cas_configmap() {
+    local namespace="${1:?namespace is required}"
+
+    local ca_root
+    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
+    local root_cert="${ca_root}/rootCA.pem"
+
+    if [ ! -f "$root_cert" ]; then
+        log_warn "mkcert root CA not found at ${root_cert}; skipping extra CAs ConfigMap."
+        return 0
+    fi
+
+    # Create a temp directory with hash-named CA files (OpenSSL format).
+    local tmpdir
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/extra-cas.XXXXXX")
+
+    # Copy the mkcert CA and compute its hash for the filename.
+    cp "$root_cert" "${tmpdir}/mkcert-ca.pem"
+    local hash
+    hash=$(openssl x509 -hash -noout -in "$root_cert" 2>/dev/null || true)
+    if [ -n "$hash" ]; then
+        mv "${tmpdir}/mkcert-ca.pem" "${tmpdir}/${hash}.0"
+    else
+        log_warn "Could not compute hash for mkcert CA; using plain filename."
+    fi
+
+    log_info "Creating extra CAs ConfigMap for namespace '${namespace}'..."
+
+    # Create/update the ConfigMap from the directory. Each file becomes a key.
+    kubectl create configmap extra-cas -n "$namespace" \
+        --from-file="$tmpdir" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    rm -rf "$tmpdir"
+    log_info "Extra CAs ConfigMap 'extra-cas' updated in namespace '${namespace}'."
+}
