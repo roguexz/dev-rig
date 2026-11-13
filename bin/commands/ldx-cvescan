@@ -1,25 +1,16 @@
 #!/usr/bin/env bash
+# ldx-help: tools Manage system-wide automated Grype vulnerability scanner
 
 set -euo pipefail
 
-get_script_dir() {
-  local SOURCE="${BASH_SOURCE[0]}"
-  while [ -L "$SOURCE" ]; do
-    local DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
-    SOURCE="$(readlink "$SOURCE")"
-    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
-  done
-  cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd
-}
-
-SCRIPT_DIR="$(get_script_dir)"
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 find_cvescan_dir() {
   local candidates=(
-    "$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)/cvescan"
-    "$(cd "${SCRIPT_DIR}/../share/ldx" &>/dev/null && pwd)/cvescan"
-    "$(cd "${SCRIPT_DIR}/share/ldx" &>/dev/null && pwd)/cvescan"
-    "${SCRIPT_DIR}/cvescan"
+    "${LDX_HOME}/cvescan"
     "${HOME}/.local/share/ldx/cvescan"
     "/usr/local/share/ldx/cvescan"
   )
@@ -34,15 +25,7 @@ find_cvescan_dir() {
 
 CVESCAN_SRC_DIR="$(find_cvescan_dir || true)"
 
-# Source common utilities if available
-if [ -f "${SCRIPT_DIR}/lib/common.sh" ]; then
-  source "${SCRIPT_DIR}/lib/common.sh"
-else
-  log_info() { echo -e "\033[0;32m[INFO]\033[0m $1"; }
-  log_warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
-  log_error() { echo -e "\033[0;31m[ERROR]\033[0m $1"; }
-  fatal() { log_error "$1"; exit 1; }
-fi
+source "${LDX_HOME}/bin/lib/common.sh"
 
 PLIST_DEST="/Library/LaunchDaemons/com.system.cvescan.plist"
 SCRIPT_DEST="/usr/local/bin/cvescan.sh"

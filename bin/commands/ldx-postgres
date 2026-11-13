@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
+# ldx-help: infra Deploy PostgreSQL with pgvector extension
 
 set -euo pipefail
 
-get_script_dir() {
-  local SOURCE="${BASH_SOURCE[0]}"
-  while [ -L "$SOURCE" ]; do
-    local DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
-    SOURCE="$(readlink "$SOURCE")"
-    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
-  done
-  cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd
-}
-
-SCRIPT_DIR="$(get_script_dir)"
-source "${SCRIPT_DIR}/lib/common.sh"
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
 
 show_help() {
     echo "Usage: $(basename "$0") <install|uninstall>"
@@ -37,8 +31,8 @@ install_postgres() {
     if ! DOCKER_HOST="" docker --context rancher-desktop image inspect "$local_image" &>/dev/null; then
         log_info "Local pgvector image '$local_image' not found. Building it now..."
         
-        local tmp_dir="${SCRIPT_DIR}/.tmp-postgres-build"
-        mkdir -p "$tmp_dir"
+        local tmp_dir
+        tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ldx-pgvector-build.XXXXXX")"
         
         cat <<'EOF' > "${tmp_dir}/Dockerfile"
 FROM pgvector/pgvector:pg18 AS builder

@@ -1,25 +1,19 @@
 #!/usr/bin/env bash
+# ldx-help: infra Manage local Vault deployment
 
 set -euo pipefail
 
-get_script_dir() {
-  local SOURCE="${BASH_SOURCE[0]}"
-  while [ -L "$SOURCE" ]; do
-    local DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
-    SOURCE="$(readlink "$SOURCE")"
-    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
-  done
-  cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd
-}
-
-SCRIPT_DIR="$(get_script_dir)"
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Base version guard: the chart pins the Vault app version
 # (0.34.1 -> Vault 2.0.4). Never silently pull a newer chart; ldx vault
 # upgrade handles version moves deliberately (snapshot + checks).
 VAULT_CHART_VERSION="0.34.1"
 
-source "${SCRIPT_DIR}/lib/common.sh"
+source "${LDX_HOME}/bin/lib/common.sh"
 
 # Helm values file that defines this rig's Vault deployment. Shared by setup
 # and upgrade so an upgrade never relies on --reuse-values: chart 0.34.x added

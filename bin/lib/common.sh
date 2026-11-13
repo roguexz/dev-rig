@@ -4,31 +4,33 @@ set -euo pipefail
 
 # --- Config directory ---------------------------------------------------------
 # The repository's config/ directory holds K8s templates (.yaml.tpl) and Helm
-# values files. Scripts locate it relative to their own directory:
-#   - Running from the repo:   repo/bin/ldx-*  → repo/config/
-#   - Installed (copy mode):   ~/.local/bin/   → ~/.local/bin/config/
-#   - Installed (link mode):   ~/.local/bin/   → repo/config/ (symlinked)
+# values files. Scripts locate it through LDX_HOME, the dev-rig checkout root
+# exported by the command bootstrap:
+#   - Running from the repo:   LDX_HOME=repo       -> repo/config/
+#   - Symlink install:         realpath -> repo    -> repo/config/
+#   - Package install (brew):  LDX_HOME=<libexec>  -> <libexec>/config/
 #
-# The resolver checks alongside the script first, then one level up (repo root).
-# The caller sets SCRIPT_DIR before sourcing this file.
+# The resolver checks the checkout root first, then falls back to a
+# repo-layout parent lookup. The caller exports LDX_HOME (or sets
+# SCRIPT_DIR) before sourcing this file.
 get_config_dir() {
-    local script_dir="${1:-.}"
-    # Check alongside the script (copy-mode install puts config/ here)
-    if [ -d "${script_dir}/config" ]; then
-        echo "${script_dir}/config"
+    local root="${1:-.}"
+    # Checkout/package root (link installs and brew libexec keep
+    # config/ next to the installed tree)
+    if [ -d "${root}/config" ]; then
+        echo "${root}/config"
         return
     fi
-    # Check the repo root (running from the repo, or link-mode install)
-    local parent="$(cd "${script_dir}/.." 2>/dev/null && pwd)"
+    # Repo layout: sourced with only SCRIPT_DIR known (bin/ -> repo root)
+    local parent="$(cd "${root}/.." 2>/dev/null && pwd)"
     if [ -d "${parent}/config" ]; then
         echo "${parent}/config"
         return
     fi
-    # Fallback: alongside the script (will fail gracefully later if missing)
-    echo "${script_dir}/config"
+    # Fallback: alongside the root (will fail gracefully later if missing)
+    echo "${root}/config"
 }
-
-export CONFIG_DIR="$(get_config_dir "${SCRIPT_DIR:-.}")"
+export CONFIG_DIR="$(get_config_dir "${LDX_HOME:-${SCRIPT_DIR:-.}}")"
 
 # Renders a K8s template file, substituting {{VAR}} placeholders with the given
 # VAR=value pairs. Uses sed with escaped special characters for safety.
