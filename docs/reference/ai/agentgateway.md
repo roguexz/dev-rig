@@ -43,7 +43,7 @@ the client API key policy; the UI itself is authenticated separately (Vault SSO 
 > **Note:** The ConfigMap mount is read-only, so the gateway runs with `config.storage.mode: hybrid`: the ConfigMap is
 > the baseline and resources managed through the UI or API are stored in the SQLite database on the PVC and merged over
 > it, surviving pod restarts. Saving the *whole* config file from the UI's config editor is still not possible (the
-> mounted file itself stays read-only). To change the baseline permanently, edit the manifest in `bin/ldx-agentgateway`
+> mounted file itself stays read-only). To change the baseline permanently, edit the manifest in `bin/commands/ldx-agentgateway`
 > and re-run `ldx agentgateway install`, or use `sync-omlx` / `sso` below.
 
 ### `ldx agentgateway sync-omlx`

@@ -11,7 +11,8 @@ automation and host security utilities.
 ldx <command> [subcommand] [flags]
 ```
 
-You can also run individual capability binaries directly, such as `ldx-vault unseal`, `ldx-postgres install`, etc.
+You can also run individual command scripts directly from the repository, such as `bin/commands/ldx-vault unseal`,
+`bin/commands/ldx-postgres install`, etc. Commands are auto-discovered as `bin/commands/ldx-<command>` executables.
 
 ---
 
@@ -61,7 +62,7 @@ alphanumeric, at most 63 characters).
 
 | Command            | Category                | Description                                                           | Documentation                        |
 |:-------------------|:------------------------|:----------------------------------------------------------------------|:-------------------------------------|
-| `ldx install`      | Management              | Install `ldx` commands to local bin (`--copy` default, `--link` flag) | [README.md](../README.md)            |
+| `ldx install`      | Management              | Symlink `ldx` into local bin (`--dir` to choose target)              | [README.md](../README.md)            |
 | `ldx skill`        | Agent Skills            | Manage agent skills (install, uninstall, list, info)                  | [skill.md](./reference/ai/skill.md)               |
 | `ldx cvescan`      | Host Security           | System-wide automated Grype vulnerability scanner daemon              | [cvescan.md](./reference/security/cvescan.md)           |
 | `ldx touchid`      | Host Security           | Touch ID (biometric) authentication for `git push` via pre-push hook  | [touchid.md](./reference/security/touchid.md)           |
@@ -79,17 +80,14 @@ alphanumeric, at most 63 characters).
 
 ## Installation to User PATH
 
-You can install all `ldx` tools to your user's bin directory (`$HOME/.local/bin` or `$HOME/bin`) by executing:
+Install `ldx` into your user's bin directory (`$HOME/.local/bin` or `$HOME/bin`) by executing:
 
 ```bash
 ldx install
 ```
 
-To create symlinks back to this git repository instead of copying files:
-
-```bash
-ldx install --link
-```
+This symlinks the `ldx` dispatcher into the target directory; commands and assets resolve through the checkout, so
+`git pull` in the repository is the upgrade. Use `--dir <path>` to choose a different target.
 
 Ensure `$HOME/.local/bin` (or your installation target) is in your shell's configuration (`~/.zshrc` or `~/.bashrc`):
 

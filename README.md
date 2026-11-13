@@ -1,9 +1,9 @@
 # Local Development Experience CLI (`ldx`)
 
 **`ldx` (Local Development Experience)** is a lightweight CLI toolkit designed to streamline local infrastructure and
-system security workflows on macOS. Powered by modular scripts (`ldx-*`), it provides a unified command line to spin up
-local Kubernetes environments, manage developer services (PostgreSQL, Vault), and execute security checks effortlessly.
-Direct usage of individual binaries (`ldx-vault`, `ldx-postgres`, etc.) is also fully supported.
+system security workflows on macOS. Powered by modular command scripts (`bin/commands/ldx-*`), it provides a unified
+command line to spin up local Kubernetes environments, manage developer services (PostgreSQL, Vault), and execute
+security checks effortlessly. The individual command scripts can also be run directly from the repository.
 
 > [!NOTE]
 > This repository reflects my personal development preferences and opinions, built to maintain a consistent workflow
@@ -11,7 +11,13 @@ when working across multiple laptops.
 
 ## Prerequisites
 
-Before using these scripts, ensure you have the following command-line tools installed:
+All command-line prerequisites are pinned in the [Brewfile](./Brewfile):
+
+```bash
+brew bundle --file Brewfile
+```
+
+The same tools, if you prefer installing them by hand:
 
 - [Grype](https://github.com/anchore/grype) (for `cvescan` vulnerability scanner)
 - [terminal-notifier](https://formulae.brew.sh/formula/terminal-notifier) (optional, for `cvescan` desktop
@@ -38,7 +44,19 @@ Before using these scripts, ensure you have the following command-line tools ins
 
 ## Quick Start & Installation
 
-### Option 1: Remote One-Liner Installation (Recommended)
+### Option 1: Homebrew (Recommended)
+
+This repository doubles as a Homebrew tap:
+
+```bash
+brew tap roguexz/dev-rig
+brew install roguexz/dev-rig/ldx
+```
+
+Upgrades are then just `brew upgrade roguexz/dev-rig/ldx`. The formula installs the whole toolkit under Homebrew's
+prefix and symlinks `ldx` onto your PATH; the command scripts live under that prefix and are resolved at run time.
+
+### Option 2: Remote One-Liner Installation
 
 Install directly via `curl`:
 
@@ -52,12 +70,13 @@ Or via GitHub CLI (`gh`):
 gh api repos/roguexz/dev-rig/contents/install.sh --jq '.content' | base64 -d | bash
 ```
 
-This downloads the latest release tarball to a temporary directory, executes `ldx install` (copying executables into
-`$HOME/.local/bin`), and automatically cleans up temporary files.
+This uses Homebrew when it is available. Without Homebrew it clones the repository into `~/.local/share/ldx` (a stable
+location, since `ldx` installs by symlink) and runs `ldx install`, which symlinks the `ldx` dispatcher into
+`$HOME/.local/bin`.
 
 ---
 
-### Option 2: Local Repository Installation
+### Option 3: Local Repository Installation
 
 1. **Clone the repository:**
    ```bash
@@ -67,19 +86,16 @@ This downloads the latest release tarball to a temporary directory, executes `ld
 
 2. **Make the scripts executable:**
    ```bash
-   chmod +x bin/* install.sh cvescan/*.sh
+   chmod +x bin/ldx bin/commands/* install.sh cvescan/*.sh
    ```
 
-3. **Install `ldx` binaries to your local PATH:**
+3. **Install `ldx` into your local PATH:**
    ```bash
    ./bin/ldx install
    ```
-   By default, this copies `ldx` and all `ldx-*` binaries to `$HOME/.local/bin` (or `$HOME/bin`).
+    This symlinks the `ldx` dispatcher into `$HOME/.local/bin` (or `$HOME/bin`). Commands and assets resolve through
+    the checkout, so **`git pull` is the upgrade** - no reinstall step.
 
-    - **Symlink option**: To keep installed binaries in sync with `git pull`, pass `--link`:
-      ```bash
-      ./bin/ldx install --link
-      ```
     - **Custom target directory**:
       ```bash
       ./bin/ldx install --dir /custom/path/bin
@@ -97,26 +113,27 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 After reloading your shell (`source ~/.zshrc`), `ldx` commands will be accessible from anywhere (e.g.,
-`ldx-vault unseal`, `ldx postgres install`).
+`ldx vault unseal`, `ldx postgres install`).
 
 ## Available Commands
 
-The `ldx` CLI is modular, with each command managing a specific capability.
+The `ldx` CLI is modular: each command is a script in `bin/commands/ldx-*`, auto-discovered by the dispatcher.
+The scripts can also be run directly from the repository (`bin/commands/ldx-vault unseal`).
 
-| Command                         | Description                                                                                 | Direct Binary      |
-|---------------------------------|---------------------------------------------------------------------------------------------|--------------------|
-| `ldx install [flags]`           | Installs `ldx` commands into `$HOME/.local/bin` (`--copy` default, `--link` flag).          | `ldx install`      |
-| `ldx cvescan <subcommand>`      | System-wide automated Grype vulnerability scanner LaunchDaemon.                             | `ldx-cvescan`      |
-| `ldx touchid <subcommand>`      | Touch ID (biometric) authentication for `git push` via a global pre-push hook.              | `ldx-touchid`      |
-| `ldx tls <subcommand>`          | Manages local TLS certificates and Java keystores.                                          | `ldx-tls`          |
-| `ldx certmanager <subcommand>`  | Installs and configures `cert-manager` for in-cluster certificates.                         | `ldx-certmanager`  |
-| `ldx otel <subcommand>`         | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).                               | `ldx-otel`         |
-| `ldx redis <subcommand>`        | Deploys a Redis instance accessible from the host.                                          | `ldx-redis`        |
-| `ldx postgres <subcommand>`     | Deploys a PostgreSQL instance with pgvector extension.                                      | `ldx-postgres`     |
-| `ldx vault <subcommand>`        | Manages a local HashiCorp Vault deployment for secrets management.                          | `ldx-vault`        |
-| `ldx authelia <subcommand>`     | Deploys Authelia (OIDC provider with WebAuthn/Touch ID support) for SSO.                    | `ldx-authelia`     |
-| `ldx agentgateway <subcommand>` | Deploys agentgateway (LLM/MCP/A2A gateway) with built-in UI, Authelia SSO and oMLX model sync. | `ldx-agentgateway` |
-| `ldx opencode <subcommand>`     | Configures the local opencode harness from agentgateway models.                             | `ldx-opencode`     |
+| Command                         | Description                                                                                 | Command script         |
+|---------------------------------|---------------------------------------------------------------------------------------------|------------------------|
+| `ldx install [flags]`           | Symlinks `ldx` into `$HOME/.local/bin` (`--dir` to choose the target).                       | `ldx install`          |
+| `ldx cvescan <subcommand>`      | System-wide automated Grype vulnerability scanner LaunchDaemon.                             | `bin/commands/ldx-cvescan` |
+| `ldx touchid <subcommand>`      | Touch ID (biometric) authentication for `git push` via a global pre-push hook.              | `bin/commands/ldx-touchid` |
+| `ldx tls <subcommand>`          | Manages local TLS certificates and Java keystores.                                          | `bin/commands/ldx-tls` |
+| `ldx certmanager <subcommand>`  | Installs and configures `cert-manager` for in-cluster certificates.                         | `bin/commands/ldx-certmanager` |
+| `ldx otel <subcommand>`         | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).                               | `bin/commands/ldx-otel` |
+| `ldx redis <subcommand>`        | Deploys a Redis instance accessible from the host.                                          | `bin/commands/ldx-redis` |
+| `ldx postgres <subcommand>`     | Deploys a PostgreSQL instance with pgvector extension.                                      | `bin/commands/ldx-postgres` |
+| `ldx vault <subcommand>`        | Manages a local HashiCorp Vault deployment for secrets management.                          | `bin/commands/ldx-vault` |
+| `ldx authelia <subcommand>`     | Deploys Authelia (OIDC provider with WebAuthn/Touch ID support) for SSO.                    | `bin/commands/ldx-authelia` |
+| `ldx agentgateway <subcommand>` | Deploys agentgateway (LLM/MCP/A2A gateway) with built-in UI, Authelia SSO and oMLX model sync. | `bin/commands/ldx-agentgateway` |
+| `ldx opencode <subcommand>`     | Configures the local opencode harness from agentgateway models.                             | `bin/commands/ldx-opencode` |
 
 For detailed usage of each command, see the documentation below.
 
