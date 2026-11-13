@@ -36,3 +36,8 @@ dependencies:
     version: 0.1.0
     repository: "file://charts/authelia"
     condition: autheliaStack.enabled
+  - name: agentgateway
+    alias: agentgatewayStack
+    version: 0.1.0
+    repository: "file://charts/agentgateway"
+    condition: agentgatewayStack.enabled

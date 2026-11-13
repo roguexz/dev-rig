@@ -56,6 +56,12 @@ otelStack:
   # .oidc and image settings are supplied by 'ldx k8s up' (Authelia probe,
   # host secret store); override any of them with -f.
 
+agentgatewayStack:
+  enabled: false
+  # Gateway config, Vault Agent templates (per MCP tool) and the runtime
+  # Secret are CLI-owned; the chart carries the static deployment. The
+  # prehook supplies hostAliases and pins the image from the CLI constant.
+
 autheliaStack:
   enabled: false
   # Core secrets, hashed OIDC client secrets, JWKS key and Traefik

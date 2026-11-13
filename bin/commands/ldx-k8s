@@ -50,13 +50,13 @@ show_help() {
 }
 
 services_supported() {
-    echo "redis, postgres, otel, vault, authelia, certmanager"
+    echo "redis, postgres, otel, vault, authelia, agentgateway, certmanager"
 }
 
 # Services owned by the main 'ldx' umbrella release (certmanager is a
 # separate release: it spans namespaces and cluster-scoped resources).
 main_services_supported() {
-    echo "redis, postgres, otel, vault, authelia"
+    echo "redis, postgres, otel, vault, authelia, agentgateway"
 }
 
 # Release-scoped service: the cert-manager chart lives in its own release
@@ -80,6 +80,7 @@ service_key() {
         otel)     echo "otelStack" ;;
         vault)    echo "vaultStack" ;;
         authelia) echo "autheliaStack" ;;
+        agentgateway) echo "agentgatewayStack" ;;
         *)        return 1 ;;
     esac
 }
@@ -478,7 +479,7 @@ parse_common_options() {
             *)
                 # Bare words are service names: 'up redis postgres'.
                 case "$1" in
-                    redis|postgres|otel|vault|authelia|certmanager)
+                    redis|postgres|otel|vault|authelia|agentgateway|certmanager)
                         SERVICES_CSV="${SERVICES_CSV:+${SERVICES_CSV},}$1"
                         shift
                         ;;
@@ -502,7 +503,7 @@ parse_services() {
         service="${service//[[:space:]]/}"
         [ -n "$service" ] || continue
         case "$service" in
-            redis|postgres|otel|vault|authelia|certmanager) ;;
+            redis|postgres|otel|vault|authelia|agentgateway|certmanager) ;;
             *) fatal "Unknown service: ${service} (supported: $(services_supported))" ;;
         esac
         local seen
@@ -545,6 +546,36 @@ NAMESPACE=""
 TMP_FILES=()
 trap '[ "${#TMP_FILES[@]}" -gt 0 ] && rm -f "${TMP_FILES[@]}" || true' EXIT
 
+# Pre-apply: agentgateway's chart carries the static deployment; the dynamic
+# parts (config with merged models/SSO, Vault Agent per-tool templates, the
+# runtime Secret, extra CAs) are CLI-owned and (re)created idempotently by
+# 'ldx agentgateway prepare-support'. Legacy installs were kubectl-applied:
+# adopt the static resources first.
+prehook_agentgateway() {
+    "${LDX_HOME}/bin/ldx" agentgateway prepare-support \
+        || fatal "Failed to prepare agentgateway support resources."
+
+    adopt_resources "$RELEASE" "$NAMESPACE" \
+        "deployment/agentgateway" "service/agentgateway" "ingress/agentgateway" \
+        "pvc/agentgateway-data" "serviceaccount/agentgateway"
+
+    local values_file
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-agentgateway.XXXXXX.yaml")"
+    TMP_FILES+=("$values_file")
+    if ! "${LDX_HOME}/bin/ldx" agentgateway prepare-values > "$values_file"; then
+        fatal "Failed to render agentgateway values ('ldx agentgateway prepare-values')."
+    fi
+    chmod 600 "$values_file"
+    APPLY_VALUES+=(--values "$values_file")
+    record_service_values agentgateway "$values_file"
+}
+
+# Post-apply: the gateway (plus Vault Agent sidecar) must become Available.
+posthook_agentgateway() {
+    kubectl rollout status deployment/agentgateway -n "$NAMESPACE" --timeout=120s \
+        || log_warn "agentgateway rollout did not finish in time; check 'ldx agentgateway status'."
+}
+
 # Persist a service's generated values next to the state file so every later
 # reconcile (plain 'up', 'down') renders the chart identically. Secrets live
 # in ~/.config/ldx (mode 600), same trust level as the Keychain file backend.
@@ -562,9 +593,10 @@ service_prehooks() {
     local s
     for s in "$@"; do
         case "$s" in
-            otel)     prehook_otel ;;
-            vault)    prehook_vault ;;
-            authelia) prehook_authelia ;;
+            otel)         prehook_otel ;;
+            vault)        prehook_vault ;;
+            authelia)     prehook_authelia ;;
+            agentgateway) prehook_agentgateway ;;
         esac
     done
 }
@@ -672,12 +704,8 @@ k8s_up() {
         for service in "${main_desired[@]}"; do
             [ "$service" = "postgres" ] && ensure_postgres_image
             adopt_legacy "$service" "$NAMESPACE"
-            case "$service" in
-                otel)     prehook_otel ;;
-                vault)    prehook_vault ;;
-                authelia) prehook_authelia ;;
-            esac
         done
+        service_prehooks "${main_desired[@]}"
 
         log_info "Applying ${RELEASE} (${main_desired[*]}) ..."
         apply_release "${main_desired[@]}"
@@ -690,8 +718,9 @@ k8s_up() {
 
     for service in "${main_desired[@]}"; do
         case "$service" in
-            vault)    posthook_vault ;;
-            authelia) posthook_authelia ;;
+            vault)        posthook_vault ;;
+            authelia)     posthook_authelia ;;
+            agentgateway) posthook_agentgateway ;;
         esac
     done
 
@@ -705,6 +734,7 @@ k8s_up() {
             otel)        log_info "Grafana/LGTM  -> https://otel.rd.localhost (OTLP: localhost:4317/4318)" ;;
             vault)       log_info "Vault         -> https://vault.rd.localhost (UI + API)" ;;
             authelia)    log_info "Authelia      -> https://auth.rd.localhost (OIDC + WebAuthn)" ;;
+            agentgateway) log_info "agentgateway  -> https://agentgateway.rd.localhost (UI /ui, LLM /v1, MCP /mcp)" ;;
             certmanager) log_info "cert-manager  -> release '${CM_RELEASE}' in namespace '${CM_NAMESPACE}', ClusterIssuer 'mkcert-issuer'" ;;
         esac
     done
@@ -813,6 +843,9 @@ k8s_down() {
                     ;;
                 authelia)
                     kubectl delete pvc -n "$(ldx_namespace authelia)" authelia-data --ignore-not-found
+                    ;;
+                agentgateway)
+                    kubectl delete pvc -n "$NAMESPACE" agentgateway-data --ignore-not-found
                     ;;
             esac
         done

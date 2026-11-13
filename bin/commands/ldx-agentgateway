@@ -41,6 +41,12 @@ VAULT_AGENT_CONFIG_CM="agentgateway-vault-agent-config"
 # Gateway Service Account (dedicated, bound to the Vault role).
 AGENTGATEWAY_SA="agentgateway"
 
+# Vault operator init JSON (root token + unseal keys): host secret store
+# (Keychain), imported from the legacy cache file on first read.
+vault_keys_json() {
+    ldx_secret_get_blob vault "${VAULT_DIR}/keys.json" init_json
+}
+
 # Authelia OIDC provider (deployed by 'ldx authelia install').
 AUTHELIA_HOST="auth.rd.localhost"
 AUTHELIA_NAMESPACE="$(ldx_namespace authelia)"
@@ -170,12 +176,12 @@ get_traefik_cluster_ip() {
 # name per line. Used to populate the route's backend targets in hybrid mode,
 # where file-owned routes and database-owned targets are not automatically merged.
 list_mcp_tools_from_vault() {
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+    if ! vault_keys_json >/dev/null 2>&1; then
         return 0
     fi
     local vault_namespace="$VAULT_NAMESPACE"
     local root_token
-    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json" 2>/dev/null) || true
+    root_token=$(vault_keys_json 2>/dev/null | jq -r .root_token 2>/dev/null) || true
     if [ -z "$root_token" ]; then
         return 0
     fi
@@ -397,8 +403,8 @@ require_vault_unsealed() {
     sealed=$(kubectl exec -n "$vault_namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
     [ "$sealed" = "false" ] || fatal "Vault is sealed. Run 'ldx vault unseal' first."
 
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
-        fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'ldx vault setup' first."
+    if ! vault_keys_json >/dev/null 2>&1; then
+        fatal "Vault init keys not found (ldx/vault/init_json). Run 'ldx vault setup' first."
     fi
 }
 
@@ -411,7 +417,7 @@ ensure_vault_role() {
     local vault_namespace="$VAULT_NAMESPACE"
     local gateway_namespace="$NAMESPACE"
     local root_token
-    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+    root_token=$(vault_keys_json | jq -r .root_token)
 
     # Check if the policy exists (created by 'ldx vault enable-secrets').
     local policy_check
@@ -448,7 +454,7 @@ REMOTE_EOF
 # Returns nothing if Vault is not running or sealed (graceful handling).
 list_mcp_tools_in_vault() {
     # Check if the root token exists. If not, there are no tools.
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+    if ! vault_keys_json >/dev/null 2>&1; then
         return 0
     fi
 
@@ -469,7 +475,7 @@ list_mcp_tools_in_vault() {
     fi
 
     local root_token
-    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+    root_token=$(vault_keys_json | jq -r .root_token)
 
     # List the metadata under secret/metadata/mcp/ to get tool names.
     # The response is a list of paths like "secret/metadata/mcp/<name>".
@@ -583,51 +589,64 @@ apply_vault_agent_config() {
     fi
 }
 
+# Internal: create/update the CLI-owned resources the chart's Deployment
+# references by name (config ConfigMap, Vault Agent ConfigMap, runtime
+# Secret, extra CAs). Idempotent; run by 'ldx k8s' as the agentgateway
+# pre-apply hook and by 'install' before the chart apply.
+prepare_support() {
+    require_command "kubectl"
+    ldx_save_namespace agentgateway "$NAMESPACE"
+    kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+    ensure_api_key
+    apply_config
+    apply_vault_agent_config
+    create_extra_cas_configmap "$NAMESPACE"
+}
+
+# Internal: render the chart values (stdout). Logs go to stderr; the values
+# file is consumed by 'ldx k8s'. The image follows the LIVE deployment when
+# one exists, so 'ldx agentgateway upgrade' (kubectl set image) survives
+# later reconciles; the pinned constant is only the initial value.
+prepare_values() {
+    exec 3>&1 1>&2
+
+    local live_image="" host_aliases=""
+    live_image=$(agentgateway_running_image 2>/dev/null) || true
+
+    # Resolve auth.rd.localhost to Traefik's ClusterIP so the gateway reaches
+    # Authelia through Traefik (Host header matches the OIDC issuer) without
+    # relying on external DNS.
+    local traefik_ip
+    traefik_ip=$(get_traefik_cluster_ip)
+    if [ -n "$traefik_ip" ]; then
+        host_aliases="    - ip: \"${traefik_ip}\"
+      hostnames: [\"auth.rd.localhost\"]"
+        log_info "Configuring agentgateway to resolve auth.rd.localhost to Traefik (${traefik_ip})..."
+    else
+        log_warn "Could not determine Traefik ClusterIP; the gateway may not reach Authelia for OIDC."
+    fi
+
+    cat >&3 <<EOF
+agentgatewayStack:
+  image: ${live_image:-$AGENTGATEWAY_IMAGE}
+  hostAliases:
+${host_aliases:-"  []"}
+EOF
+}
+
 install_agentgateway() {
     require_command "kubectl"
 
-    local namespace="$NAMESPACE"
-    ldx_save_namespace agentgateway "$namespace"
-    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
+    ldx_save_namespace agentgateway "$NAMESPACE"
 
-    log_info "Deploying agentgateway..."
-
-    # Create a dedicated service account (bound to the Vault role).
-    log_info "Creating service account '${AGENTGATEWAY_SA}'..."
-    kubectl create serviceaccount "$AGENTGATEWAY_SA" -n "$namespace" \
-        --dry-run=client -o yaml | kubectl apply -f -
-
-    # Ensure the Vault role exists (binds the SA to the MCP secrets policy).
+    # Vault role binding (SA -> MCP secrets policy); needs an unsealed Vault.
     ensure_vault_role
 
-    # Render the base config (plus any previously synced models / SSO policy)
-    # and apply it before the Deployment so the pod starts with a valid config.
-    # LLM routes always require a virtual client key - ensure one exists first.
-    ensure_api_key
-    apply_config
-
-    # Apply the Vault Agent ConfigMap (auto-auth + templates).
-    apply_vault_agent_config
-
-    # Create the extra CAs ConfigMap (mkcert CA) so the gateway can verify
-    # local services (Authelia) while using system roots for public CAs.
-    create_extra_cas_configmap "$namespace"
-
-    log_info "Creating agentgateway Deployment, Service, and Ingress..."
-    local rendered
-    rendered=$(render_template "${CONFIG_DIR}/agentgateway.yaml.tpl" \
-        NAMESPACE="$namespace" \
-        SERVICE_ACCOUNT="$AGENTGATEWAY_SA" \
-        AGENTGATEWAY_IMAGE="$AGENTGATEWAY_IMAGE" \
-        AGENTGATEWAY_SECRET="$AGENTGATEWAY_SECRET" \
-        MCP_CREDENTIALS_DIR="$MCP_CREDENTIALS_DIR" \
-        VAULT_AGENT_IMAGE="$VAULT_AGENT_IMAGE" \
-        VAULT_AGENT_CONFIG_CM="$VAULT_AGENT_CONFIG_CM" \
-        AGENTGATEWAY_HOST="$AGENTGATEWAY_HOST")
-    inject_block "$rendered" "{{HOST_ALIASES}}" "" | kubectl apply -f -
-
-    log_info "Waiting for agentgateway deployment to be ready..."
-    kubectl wait --for=condition=available deployment/agentgateway -n "$namespace" --timeout=120s
+    # CLI-owned config/secret/agent-templates, then the static deployment via
+    # the ldx-local-platform chart (service 'agentgateway'; prehook
+    # agentgateway re-runs prepare_support and supplies hostAliases).
+    prepare_support
+    "${LDX_HOME}/bin/ldx" k8s up --services agentgateway
 
     log_info "agentgateway installation complete."
     log_info "agentgateway UI is accessible at: https://${AGENTGATEWAY_HOST}/ui"
@@ -647,17 +666,15 @@ uninstall_agentgateway() {
     local namespace="$NAMESPACE"
 
     log_info "Uninstalling agentgateway..."
-    kubectl delete ingress agentgateway -n "$namespace" --ignore-not-found
-    kubectl delete service agentgateway -n "$namespace" --ignore-not-found
-    kubectl delete deployment agentgateway -n "$namespace" --ignore-not-found
+    # Chart teardown (Deployment, Service, Ingress, ServiceAccount, PVC).
+    "${LDX_HOME}/bin/ldx" k8s down --services agentgateway --purge-data
+
+    # CLI-owned resources (not chart-managed by design: they carry dynamic
+    # state assembled by sync-omlx / sso / mcp).
     kubectl delete configmap agentgateway-config -n "$namespace" --ignore-not-found
     kubectl delete configmap "$AGENTGATEWAY_MODELS_CM" -n "$namespace" --ignore-not-found
     kubectl delete configmap "$VAULT_AGENT_CONFIG_CM" -n "$namespace" --ignore-not-found
     kubectl delete secret "$AGENTGATEWAY_SECRET" -n "$namespace" --ignore-not-found
-    kubectl delete serviceaccount "$AGENTGATEWAY_SA" -n "$namespace" --ignore-not-found
-
-    log_info "Removing agentgateway PVC to ensure clean re-install..."
-    kubectl delete pvc agentgateway-data -n "$namespace" --ignore-not-found
 
     # Delete MCP secrets from Vault.
     local tools
@@ -1039,31 +1056,10 @@ sso_agentgateway() {
         "OIDC_ISSUER=${issuer}" \
         "OIDC_CLIENT_ID=${client_id}"
 
-    # Configure hostAliases so auth.rd.localhost resolves to Traefik's ClusterIP.
-    # This allows the gateway to reach Authelia through Traefik (so the Host
-    # header matches the OIDC issuer) without relying on external DNS.
-    local traefik_ip
-    traefik_ip=$(get_traefik_cluster_ip)
-    if [ -n "$traefik_ip" ]; then
-        log_info "Configuring gateway pod to resolve ${AUTHELIA_HOST} to Traefik (${traefik_ip})..."
-        local host_aliases="      hostAliases:"
-        host_aliases+=$'\n'"      - ip: ${traefik_ip}"
-        host_aliases+=$'\n'"        hostnames:"
-        host_aliases+=$'\n'"        - ${AUTHELIA_HOST}"
-        local rendered
-        rendered=$(render_template "${CONFIG_DIR}/agentgateway.yaml.tpl" \
-            NAMESPACE="$NAMESPACE" \
-            SERVICE_ACCOUNT="$AGENTGATEWAY_SA" \
-            AGENTGATEWAY_IMAGE="$AGENTGATEWAY_IMAGE" \
-            AGENTGATEWAY_SECRET="$AGENTGATEWAY_SECRET" \
-            MCP_CREDENTIALS_DIR="$MCP_CREDENTIALS_DIR" \
-            VAULT_AGENT_IMAGE="$VAULT_AGENT_IMAGE" \
-            VAULT_AGENT_CONFIG_CM="$VAULT_AGENT_CONFIG_CM" \
-            AGENTGATEWAY_HOST="$AGENTGATEWAY_HOST")
-        inject_block "$rendered" "{{HOST_ALIASES}}" "$host_aliases" | kubectl apply -f -
-    fi
-
-    apply_config
+    # Reconcile through the ldx platform chart: the prehook resolves
+    # Traefik's ClusterIP for hostAliases and re-applies the CLI-owned
+    # config/secret, so no direct manifest apply here.
+    "${LDX_HOME}/bin/ldx" k8s up --services agentgateway
 
     log_info "Restarting agentgateway to enable OIDC..."
     rollout_agentgateway
@@ -1127,7 +1123,7 @@ vault_write_mcp_secret() {
 
     local vault_namespace="$VAULT_NAMESPACE"
     local root_token
-    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+    root_token=$(vault_keys_json | jq -r .root_token)
 
     # Write the secret to Vault (KV v2).
     kubectl exec -i -n "$vault_namespace" vault-0 -- sh -s "$root_token" "$tool" "$token" <<'REMOTE_EOF' >/dev/null
@@ -1145,7 +1141,7 @@ vault_delete_mcp_secret() {
     local tool="$1"
 
     # Check if Vault is set up (root token exists). If not, there's nothing to delete.
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+    if ! vault_keys_json >/dev/null 2>&1; then
         return 0
     fi
 
@@ -1167,7 +1163,7 @@ vault_delete_mcp_secret() {
     fi
 
     local root_token
-    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+    root_token=$(vault_keys_json | jq -r .root_token)
 
     # Delete the secret metadata (which deletes all versions).
     kubectl exec -i -n "$vault_namespace" vault-0 -- sh -s "$root_token" "$tool" <<'REMOTE_EOF' >/dev/null
@@ -1594,6 +1590,10 @@ main() {
     shift
 
     case "$subcommand" in
+        prepare-support)
+            prepare_support ;;
+        prepare-values)
+            prepare_values ;;
         install)
             install_agentgateway
             ;;

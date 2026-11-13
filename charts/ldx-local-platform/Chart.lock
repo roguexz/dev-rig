@@ -14,5 +14,8 @@ dependencies:
 - name: authelia
   repository: file://charts/authelia
   version: 0.1.0
-digest: sha256:19d1cd48361f504e822141ca022458dc449133f26dd50241c7f43110a8bd6021
-generated: "2026-11-12T23:07:20.935803-08:00"
+- name: agentgateway
+  repository: file://charts/agentgateway
+  version: 0.1.0
+digest: sha256:ca97ff205ca98505213ff3ef8f9d423d32eaafa74f11b38d1b15a2531bd6df57
+generated: "2026-11-13T09:39:33.070925-08:00"
