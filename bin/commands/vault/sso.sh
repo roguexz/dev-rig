@@ -94,7 +94,7 @@ sso_vault() {
 
         # Create role for Authelia logins. The email claim from Authelia maps to
         # the Vault entity. The admin entity has email admin@rd.localhost (set by
-        # 'setup'), which matches the Authelia admin user's email.
+        # 'install'), which matches the Authelia admin user's email.
         #
         # oidc_scopes requests the email and profile scopes so Authelia includes
         # the email claim in the token (required by user_claim="email").

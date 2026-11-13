@@ -6,7 +6,7 @@ unseal process.
 
 ## Commands
 
-### `ldx vault setup`
+### `ldx vault install`
 
 This command installs Vault, creates a default admin user, enables the KV v2 secrets engine and Kubernetes auth method,
 and exposes the UI via a Traefik Ingress. The secrets engine and auth method are also enabled by `enable-secrets`,
@@ -60,7 +60,7 @@ password+enrollment setup.
 
 Requires:
 - Authelia deployed (`ldx authelia install`)
-- Vault running and unsealed (`ldx vault setup`, `ldx vault unseal`)
+- Vault running and unsealed (`ldx vault install`, `ldx vault unseal`)
 
 Userpass (`admin/changeit`) remains available as a fallback.
 
@@ -161,7 +161,7 @@ accessing the UI in your browser, use the following address:
 
 `vault.rd.localhost` resolves to loopback on its own and is covered by the certificate `ldx tls` issues, so the UI and the
 CLI work without an `/etc/hosts` entry or `-k`. An install made before this host was used still publishes
-`vault.rogue.io` on the ingress; `ldx vault setup` moves it.
+`vault.rogue.io` on the ingress; `ldx vault install` moves it.
 
 With the `vault` CLI (see Prerequisites in the README):
 

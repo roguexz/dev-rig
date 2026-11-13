@@ -350,14 +350,14 @@ require_vault_unsealed() {
 
     local phase
     phase=$(kubectl get pods vault-0 -n "$vault_namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) || true
-    [ "$phase" = "Running" ] || fatal "Vault pod is not running in namespace '${vault_namespace}'. Run 'ldx vault setup' first."
+    [ "$phase" = "Running" ] || fatal "Vault pod is not running in namespace '${vault_namespace}'. Run 'ldx vault install' first."
 
     local sealed
     sealed=$(kubectl exec -n "$vault_namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
     [ "$sealed" = "false" ] || fatal "Vault is sealed. Run 'ldx vault unseal' first."
 
     if ! vault_keys_json >/dev/null 2>&1; then
-        fatal "Vault init keys not found (ldx/vault/init_json). Run 'ldx vault setup' first."
+        fatal "Vault init keys not found (ldx/vault/init_json). Run 'ldx vault install' first."
     fi
 }
 

@@ -34,7 +34,7 @@ status_vault() {
     phase=$(kubectl get pods vault-0 -n "$namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) || true
 
     if [ -z "$phase" ]; then
-        log_info "Vault is not installed. Run 'setup' to install it."
+        log_info "Vault is not installed. Run 'install' to install it."
         return
     fi
 
@@ -120,11 +120,11 @@ vault_cli() {
 # Reads `.sealed` as a raw boolean: jq's `//` treats `false` as absent, so
 # `.sealed // empty` would report a healthy Vault as unreachable.
 # Retries for up to 60 seconds to handle the case where Traefik isn't ready yet
-# (e.g., during 'setup' when the ingress is still being configured).
+# (e.g., during 'install' when the ingress is still being configured).
 require_unsealed_vault() {
     local keys_json
     keys_json=$(vault_keys_json 2>/dev/null) \
-        || fatal "Vault root token not found (ldx/vault/init_json). Run 'setup' first."
+        || fatal "Vault root token not found (ldx/vault/init_json). Run 'install' first."
     VAULT_ROOT_TOKEN=$(jq -r .root_token <<<"$keys_json")
 
     local sealed="" attempts=0

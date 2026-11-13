@@ -22,9 +22,9 @@ The same tools, if you prefer installing them by hand:
 - [Grype](https://github.com/anchore/grype) (for `cvescan` vulnerability scanner)
 - [terminal-notifier](https://formulae.brew.sh/formula/terminal-notifier) (optional, for `cvescan` desktop
   notifications)
-- [Rancher Desktop](https://rancherdesktop.io/) (for local k8s infrastructure)
+- [Rancher Desktop](https://rancherdesktop.io/) (for local k8s infrastructure; ships `kubectl` — expose it by
+  adding `~/.rd/bin` to your PATH)
 - [mkcert](https://github.com/FiloSottile/mkcert)
-- [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl/)
 - [helm](https://helm.sh/docs/intro/install/)
 - [jq](https://stedolan.github.io/jq/download/)
 - [Vault CLI](https://developer.hashicorp.com/vault/install) (for `ldx vault create-user`, which drives Vault over
@@ -74,12 +74,7 @@ Upgrades are `git -C ~/.local/share/ldx pull`.
    cd dev-rig
    ```
 
-2. **Make the scripts executable:**
-   ```bash
-   chmod +x bin/ldx bin/commands/* cvescan/*.sh
-   ```
-
-3. **Install `ldx` into your local PATH:**
+2. **Install `ldx` into your local PATH:**
    ```bash
    ./bin/ldx install
    ```

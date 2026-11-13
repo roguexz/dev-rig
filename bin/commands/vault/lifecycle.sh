@@ -63,7 +63,7 @@ unseal_vault() {
 
     local keys_json
     keys_json=$(vault_keys_json 2>/dev/null) \
-        || fatal "Vault keys not found (ldx/vault/init_json). Run 'setup' first."
+        || fatal "Vault keys not found (ldx/vault/init_json). Run 'install' first."
 
     local sealed
     sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
@@ -252,7 +252,7 @@ create_user_vault() {
         vault_cli auth enable userpass >/dev/null
     fi
 
-    # Ensure the shared OIDC `profile` scope exists (canonical owner: 'setup';
+    # Ensure the shared OIDC `profile` scope exists (canonical owner: 'install';
     # this also repairs installs that predate it). Idempotent.
     vault_cli write identity/oidc/scope/profile \
         description="Profile information (name, email)" \
@@ -335,7 +335,7 @@ create_user_vault() {
 # --- Secrets engine and auth method setup -----------------------------------
 # Enables the KV v2 secrets engine (path: secret), the Kubernetes auth method,
 # and the mcp-secrets-read policy. Idempotent: safe to re-run. Called by
-# 'enable-secrets' and by 'setup' for new installs.
+# 'enable-secrets' and by 'install' for new installs.
 enable_secrets_vault() {
     require_command "kubectl"
     require_command "jq"

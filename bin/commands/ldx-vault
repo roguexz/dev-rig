@@ -17,10 +17,10 @@ VAULT_MODULE_DIR="${LDX_HOME}/bin/commands/vault"
 
 
 show_help() {
-    echo "Usage: $(basename "$0") <setup|status|unseal|seal|create-user|sso|upgrade|snapshot|uninstall> [options]"
+    echo "Usage: $(basename "$0") <install|status|unseal|seal|create-user|sso|upgrade|snapshot|uninstall> [options]"
     echo ""
     echo "Commands:"
-    echo "  setup       Install Vault, initialize it, and store keys."
+    echo "  install     Install Vault, initialize it, and store keys. ('setup' is an alias)"
     echo "  status      Show the current status of the Vault installation."
     echo "  unseal      Unseal the Vault using stored keys."
     echo "  seal        Seal the Vault."
@@ -31,7 +31,7 @@ show_help() {
     echo "  snapshot    Save a storage snapshot (Raft or file backend; Vault must be unsealed)."
     echo "  uninstall   Remove Vault and its stored keys."
     echo ""
-    echo "Options for setup:"
+    echo "Options for install:"
     echo "  --oidc-client-id <id>          Google OIDC Client ID (enables OIDC login with WebAuthn/Passkeys)"
     echo "  --oidc-client-secret <secret>  Google OIDC Client Secret"
     echo "  --disable-userpass             Disable the default 'admin' userpass login (useful if relying purely on OIDC)"
@@ -69,10 +69,10 @@ main() {
         status)
             status_vault
             ;;
-        setup|unseal|seal|uninstall|create-user|enable-secrets)
+        install|setup|unseal|seal|uninstall|create-user|enable-secrets)
             source "${VAULT_MODULE_DIR}/lifecycle.sh"
             case "$subcommand" in
-                setup)          setup_vault ;;
+                install|setup)  setup_vault ;;
                 unseal)         unseal_vault ;;
                 seal)           seal_vault ;;
                 uninstall)      uninstall_vault ;;

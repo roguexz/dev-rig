@@ -46,7 +46,7 @@ upgrade_vault() {
     local current status
     current=$(vault_release_chart)
     status=$(vault_release_status)
-    [ -n "$current" ] || fatal "Vault is not installed. Run 'setup' first."
+    [ -n "$current" ] || fatal "Vault is not installed. Run 'install' first."
 
     if [ -z "$target" ]; then
         target=$(helm search repo hashicorp/vault -l 2>/dev/null | awk 'NR==2 {print $2}')

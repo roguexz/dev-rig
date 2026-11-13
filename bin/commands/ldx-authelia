@@ -521,16 +521,14 @@ enroll_authelia() {
         log_warn "Unexpected notification. Enrollment may still be in progress."
     fi
 
-    # --- Step 5: Verify (API + Browser) ---
+    # --- Step 5: Verify (API) ---
     echo ""
-    echo "Step 5: Verify Touch ID login"
-    echo "-------------------------------"
-    echo "Let's verify everything works."
-    echo ""
-    read -rp "Press Enter to run the verification..."
-    echo ""
+    echo "Step 5: Verify"
+    echo "---------------"
 
-    # API test: check the health endpoint and verify the user has a registered credential
+    # API test: check the health endpoint. The real Touch ID prompt is part
+    # of the wizard you just completed; a browser re-open on an existing
+    # session would not exercise it, so we do not run a browser test here.
     log_info "Running API test..."
     local health
     health=$(curl -sf "https://${AUTHELIA_HOST}/api/health" 2>&1) || health=""
@@ -539,19 +537,6 @@ enroll_authelia() {
     else
         log_warn "⚠️ API health check failed. Touch ID enrollment may not be complete."
     fi
-
-    # Browser test: re-open the browser to trigger the Touch ID prompt
-    log_info "Running browser test..."
-    echo "I'll re-open your browser to https://${AUTHELIA_HOST}."
-    echo "You should see the Touch ID prompt appear (no password needed)."
-    echo ""
-    read -rp "Press Enter to open the browser..."
-    echo ""
-    echo "Opening browser..."
-    open "https://${AUTHELIA_HOST}" 2>/dev/null || log_warn "Could not open browser automatically. Please open https://${AUTHELIA_HOST} manually."
-    echo ""
-    read -rp "Press Enter when you've confirmed Touch ID works in the browser..."
-    echo ""
 
     # --- Final ---
     echo ""

@@ -15,7 +15,6 @@ class Ldx < Formula
 
   depends_on "helm"
   depends_on "jq"
-  depends_on "kubectl"
   depends_on "mkcert"
   depends_on "anchore/tap/grype"
   depends_on "hashicorp/tap/vault"
@@ -44,8 +43,8 @@ class Ldx < Formula
       sure your shell PATH includes ~/.local/bin.
 
       Not installed by Homebrew (install manually):
-        * Rancher Desktop (cask: brew install --cask rancher-desktop) - the
-          local k8s context used by ldx infra commands
+        * Rancher Desktop (https://rancherdesktop.io, no Homebrew cask exists) - the
+          local k8s context used by ldx infra commands; it also provides kubectl
         * Xcode Command Line Tools (xcode-select --install) - needed by
           `ldx touchid` to compile the Touch ID helper
         * A JDK - needed by `ldx tls keystore`

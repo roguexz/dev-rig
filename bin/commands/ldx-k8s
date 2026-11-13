@@ -384,7 +384,7 @@ posthook_authelia() {
 }
 
 # Post-apply: vault must become Available before unsealing; a fresh (never
-# initialized) vault is left for 'ldx vault setup', an initialized-but-sealed
+# initialized) vault is left for 'ldx vault install', an initialized-but-sealed
 # vault is unsealed from the host secret store.
 posthook_vault() {
     log_info "Waiting for vault-0..."
@@ -404,7 +404,7 @@ posthook_vault() {
             log_info "Vault is running and unsealed."
             ;;
         *)
-            log_info "Vault is not initialized yet. Run 'ldx vault setup'."
+            log_info "Vault is not initialized yet. Run 'ldx vault install'."
             ;;
     esac
 }

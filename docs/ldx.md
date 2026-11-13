@@ -36,7 +36,7 @@ One-off override:
 
 ```bash
 LDX_NAMESPACE=devtools ldx redis install     # Redis into 'devtools'
-LDX_VAULT_NAMESPACE=secrets ldx vault setup  # Vault into 'secrets', other tools unaffected
+LDX_VAULT_NAMESPACE=secrets ldx vault install  # Vault into 'secrets', other tools unaffected
 ```
 
 ### Local config file

@@ -163,7 +163,7 @@ ldx agentgateway mcp rotate <name> --token <new-token>
 
 #### Prerequisites
 
-- Vault must be set up with `ldx vault setup` (or `ldx vault enable-secrets` on an existing install) so that the KV v2
+- Vault must be set up with `ldx vault install` (or `ldx vault enable-secrets` on an existing install) so that the KV v2
   secrets engine, Kubernetes auth method, and `mcp-secrets-read` policy are in place.
 - The gateway must be installed with `ldx agentgateway install` (which creates the dedicated ServiceAccount, Vault
   role, and Vault Agent sidecar).
