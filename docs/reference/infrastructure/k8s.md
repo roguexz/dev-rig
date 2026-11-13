@@ -46,6 +46,7 @@ recorded names (one per line, for scripting). `diff` previews the next `up` (nee
 | `redis`       | Bitnami Redis                   | `localhost:6379`, NodePort 30379 |
 | `postgres`    | Bitnami PostgreSQL + pgvector   | `localhost:5432`, NodePort 30432 |
 | `otel`        | Grafana OTel LGTM (all-in-one)  | `https://otel.rd.localhost` (Grafana), OTLP `localhost:4317/4318` |
+| `vault` | hashicorp vault 0.34.1 (Vault 2.0.4): single-node + agent injector, auto-unseal post-apply | `https://vault.rd.localhost` |
 | `certmanager` | cert-manager + mkcert CA (own release) | ClusterIssuer `mkcert-issuer` |
 
 `certmanager` runs as its own release (`ldx-cert-manager`, namespace `cert-manager`, chart
@@ -96,5 +97,5 @@ Anything the chart cannot express:
   reference them, the CLI supplies them.
 - **Dynamic state** - oMLX model sync, Vault unseal, MCP tool registration, port-forward helpers.
 
-The remaining services (vault, authelia, agentgateway, tls) are still driven imperatively and will move onto the chart
+The remaining services (authelia, agentgateway) are still driven imperatively, and `tls` is a host-side tool and will move onto the chart
 service by service; `ldx <service> install` keeps working in the meantime.
