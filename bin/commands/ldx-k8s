@@ -328,6 +328,7 @@ prehook_vault() {
         log_warn "Could not determine Traefik ClusterIP. Vault may not be able to reach Authelia for OIDC."
     fi
     APPLY_VALUES+=(--values "$values_file")
+    record_service_values vault "$values_file"
 }
 
 # Pre-apply: Authelia keeps its own namespace; the CLI supplies the dynamic
@@ -355,6 +356,7 @@ prehook_authelia() {
     # ('ldx authelia prepare' emits namespaceOverride inside its single
     # autheliaStack block; appending a second block here would override it.)
     APPLY_VALUES+=(--values "$values_file")
+    record_service_values authelia "$values_file"
 
     # Pre-apply the rendered subchart. Authelia mounts its ConfigMap/Secret as
     # files at pod creation; pods scheduled during the helm apply must mount
@@ -542,6 +544,30 @@ recorded_values_args() {
 NAMESPACE=""
 TMP_FILES=()
 trap '[ "${#TMP_FILES[@]}" -gt 0 ] && rm -f "${TMP_FILES[@]}" || true' EXIT
+
+# Persist a service's generated values next to the state file so every later
+# reconcile (plain 'up', 'down') renders the chart identically. Secrets live
+# in ~/.config/ldx (mode 600), same trust level as the Keychain file backend.
+record_service_values() {
+    local service="$1" src="$2" dst
+    mkdir -p "$VALUES_DIR"
+    chmod 700 "$VALUES_DIR" 2>/dev/null || true
+    dst="${VALUES_DIR}/${NAMESPACE}-${service}.values"
+    cp "$src" "$dst"
+    chmod 600 "$dst"
+}
+
+# Run the pre-apply hooks for a list of main-scope services.
+service_prehooks() {
+    local s
+    for s in "$@"; do
+        case "$s" in
+            otel)     prehook_otel ;;
+            vault)    prehook_vault ;;
+            authelia) prehook_authelia ;;
+        esac
+    done
+}
 
 # Builds the helm --set flags for the main release, given a main-scope
 # service list (stdout, one arg per line).
@@ -763,6 +789,9 @@ k8s_down() {
     done
 
     if [ "${#remaining_main[@]}" -gt 0 ]; then
+        # Kept services (authelia, vault) supply dynamic values through
+        # prehooks; without them the chart renders with empty defaults.
+        service_prehooks "${remaining_main[@]}"
         apply_release "${remaining_main[@]}"
     elif [ "$release_exists" = true ]; then
         helm uninstall "$RELEASE" -n "$NAMESPACE"

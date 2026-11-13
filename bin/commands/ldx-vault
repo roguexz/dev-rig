@@ -594,11 +594,10 @@ sso_vault() {
     require_command "curl"
 
     # Read the Vault client secret from the Authelia cache (created by 'ldx authelia install')
-    if [ ! -f "$AUTHELIA_SECRETS_FILE" ]; then
-        fatal "Authelia client secrets not found at ${AUTHELIA_SECRETS_FILE}. Run 'ldx authelia install' first."
-    fi
     local vault_client_secret
-    vault_client_secret=$(grep "^VAULT_CLIENT_SECRET=" "$AUTHELIA_SECRETS_FILE" | cut -d= -f2-)
+    # Host secret store (Keychain); the pre-Keychain file (KEY=VALUE lines)
+    # is imported on first read.
+    vault_client_secret=$(ldx_secret_get_kv "authelia/client_secrets" "$AUTHELIA_SECRETS_FILE" VAULT_CLIENT_SECRET 2>/dev/null) || true
     if [ -z "$vault_client_secret" ]; then
         fatal "VAULT_CLIENT_SECRET not found in ${AUTHELIA_SECRETS_FILE}."
     fi
