@@ -101,7 +101,7 @@ install_binaries() {
         shift # symlinks are now the only mode; flag kept for compatibility
         ;;
       --copy|--mode=copy)
-        log_warn "Copy mode is removed; ldx installs by symlink now. Continuing with link mode."
+        fatal "Copy mode was removed; ldx installs by symlink (the checkout IS the install). Run 'bin/ldx' directly from the repo for development."
         shift
         ;;
       --help|-h)

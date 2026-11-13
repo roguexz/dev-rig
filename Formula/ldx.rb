@@ -1,11 +1,16 @@
 class Ldx < Formula
   desc "Local Development Experience CLI: local k8s stacks, TLS, secrets and security tools"
   homepage "https://github.com/roguexz/dev-rig"
-  # Self-hosted tap: this repo is the tap. Tag a release, then update
-  # url/sha256 here (sha: `shasum -a 256` on the tarball URL):
-  #   git tag v0.1.0 && git push origin v0.1.0
-  url "https://github.com/roguexz/dev-rig/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "REPLACE_WITH_TARBALL_SHA256"
+  # This repo is its own tap (brew tap roguexz/dev-rig). RELEASE PROCESS:
+  #   1. git tag 0.7.0 && git push origin 0.7.0   # GitHub builds the archive
+  # 2. shasum -a 256 https://github.com/roguexz/dev-rig/archive/refs/tags/0.7.0.tar.gz
+  #   3. update url + sha256 below, commit to main  # the tap IS this repo
+  #   4. consumers: brew update && brew upgrade roguexz/dev-rig/ldx
+  # A placeholder sha256 makes 'brew install' fail loudly, so an untagged
+  # release cannot half-install.
+  url "https://github.com/roguexz/dev-rig/archive/refs/tags/0.7.0.tar.gz"
+  sha256 "REPLACE_WITH_TARBALL_SHA256_BEFORE_PUSHING"
+  version "0.7.0"
   head "https://github.com/roguexz/dev-rig.git", branch: "main"
 
   depends_on "helm"

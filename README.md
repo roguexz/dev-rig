@@ -56,27 +56,17 @@ brew install roguexz/dev-rig/ldx
 Upgrades are then just `brew upgrade roguexz/dev-rig/ldx`. The formula installs the whole toolkit under Homebrew's
 prefix and symlinks `ldx` onto your PATH; the command scripts live under that prefix and are resolved at run time.
 
-### Option 2: Remote One-Liner Installation
+### Option 2: Local Repository Installation
 
-Install directly via `curl`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/roguexz/dev-rig/main/install.sh | bash
-```
-
-Or via GitHub CLI (`gh`):
+Without Homebrew, clone the repository to a stable location (the install is a symlink, so the checkout must persist)
+and run the installer from it:
 
 ```bash
-gh api repos/roguexz/dev-rig/contents/install.sh --jq '.content' | base64 -d | bash
+git clone --depth 1 https://github.com/roguexz/dev-rig.git ~/.local/share/ldx
+~/.local/share/ldx/bin/ldx install
 ```
 
-This uses Homebrew when it is available. Without Homebrew it clones the repository into `~/.local/share/ldx` (a stable
-location, since `ldx` installs by symlink) and runs `ldx install`, which symlinks the `ldx` dispatcher into
-`$HOME/.local/bin`.
-
----
-
-### Option 3: Local Repository Installation
+Upgrades are `git -C ~/.local/share/ldx pull`.
 
 1. **Clone the repository:**
    ```bash
@@ -86,7 +76,7 @@ location, since `ldx` installs by symlink) and runs `ldx install`, which symlink
 
 2. **Make the scripts executable:**
    ```bash
-   chmod +x bin/ldx bin/commands/* install.sh cvescan/*.sh
+   chmod +x bin/ldx bin/commands/* cvescan/*.sh
    ```
 
 3. **Install `ldx` into your local PATH:**
