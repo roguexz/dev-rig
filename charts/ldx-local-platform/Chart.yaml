@@ -26,3 +26,8 @@ dependencies:
     version: 0.1.0
     repository: "file://charts/otel"
     condition: otelStack.enabled
+  - name: vault
+    alias: vaultStack
+    version: "0.34.1"
+    repository: "https://helm.releases.hashicorp.com"
+    condition: vaultStack.enabled

@@ -431,7 +431,7 @@ sync_opencode() {
 
     local client_key=""
     client_key=$(
-        ldx_secret_get_kv agentgateway "$AGENTGATEWAY_KEY_CACHE" api_key 2>/dev/null
+        ldx_secret_get_blob agentgateway "$AGENTGATEWAY_KEY_CACHE" api_key 2>/dev/null
     ) || true
     [ -n "$client_key" ] || fatal "No cached gateway API key (ldx/agentgateway/api_key). The gateway enforces API keys; run 'ldx agentgateway api-key' (or 'ldx agentgateway sync-omlx') first."
 

@@ -5,5 +5,11 @@ dependencies:
 - name: postgresql
   repository: file://charts/postgresql
   version: 0.1.0
-digest: sha256:1f0adb74a59012fdeba6e85616e734c1666ba92790ca1bc00f128c4e1d511fe1
-generated: "2026-11-12T21:28:46.337285-08:00"
+- name: otel
+  repository: file://charts/otel
+  version: 0.1.0
+- name: vault
+  repository: https://helm.releases.hashicorp.com
+  version: 0.34.1
+digest: sha256:da2fe5da32af9241fde9de88db5f962a2b9974291b73679bc3c2ff4e04cd95b6
+generated: "2026-11-12T22:32:39.374533-08:00"

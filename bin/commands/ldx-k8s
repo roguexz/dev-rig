@@ -50,13 +50,13 @@ show_help() {
 }
 
 services_supported() {
-    echo "redis, postgres, otel, certmanager"
+    echo "redis, postgres, otel, vault, certmanager"
 }
 
 # Services owned by the main 'ldx' umbrella release (certmanager is a
 # separate release: it spans namespaces and cluster-scoped resources).
 main_services_supported() {
-    echo "redis, postgres, otel"
+    echo "redis, postgres, otel, vault"
 }
 
 # Release-scoped service: the cert-manager chart lives in its own release
@@ -78,6 +78,7 @@ service_key() {
         redis)    echo "redisStack" ;;
         postgres) echo "postgresqlStack" ;;
         otel)     echo "otelStack" ;;
+        vault)    echo "vaultStack" ;;
         *)        return 1 ;;
     esac
 }
@@ -89,6 +90,7 @@ legacy_release() {
     case "$1" in
         redis)    echo "redis" ;;
         postgres) echo "postgresql" ;;
+        vault)    echo "vault" ;;
         *)        return 1 ;;
     esac
 }
@@ -294,6 +296,62 @@ apply_certmanager() {
         -l app.kubernetes.io/instance="$CM_RELEASE" --timeout=120s || true
 }
 
+# Pre-apply: vault's pod must resolve auth.rd.localhost to Traefik's
+# ClusterIP (so Vault reaches Authelia through Traefik and the OIDC issuer
+# Host header matches, without external DNS). Moved from 'ldx vault setup'.
+prehook_vault() {
+    local traefik_ip="" ns svc ip
+    for ns in kube-system traefik ingress; do
+        svc=$(kubectl get svc -n "$ns" -l app.kubernetes.io/name=traefik -o 'jsonpath={.items[0].metadata.name}' 2>/dev/null) || true
+        if [ -n "$svc" ]; then
+            ip=$(kubectl get svc -n "$ns" "$svc" -o 'jsonpath={.spec.clusterIP}' 2>/dev/null) || true
+            [ -n "$ip" ] && [ "$ip" != "None" ] && traefik_ip="$ip" && break
+        fi
+    done
+
+    local values_file
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-vault.XXXXXX.yaml")"
+    TMP_FILES+=("$values_file")
+    {
+        echo "vaultStack:"
+        if [ -n "$traefik_ip" ]; then
+            echo "  server:"
+            echo "    hostAliases:"
+            echo "      - ip: \"${traefik_ip}\""
+            echo "        hostnames: [\"auth.rd.localhost\"]"
+        fi
+    } > "$values_file"
+    if [ -n "$traefik_ip" ]; then
+        log_info "Configuring Vault pod to resolve auth.rd.localhost to Traefik (${traefik_ip})..."
+    else
+        log_warn "Could not determine Traefik ClusterIP. Vault may not be able to reach Authelia for OIDC."
+    fi
+    APPLY_VALUES+=(--values "$values_file")
+}
+
+# Post-apply: vault must become Available before unsealing; a fresh (never
+# initialized) vault is left for 'ldx vault setup', an initialized-but-sealed
+# vault is unsealed from the host secret store.
+posthook_vault() {
+    log_info "Waiting for vault-0..."
+    kubectl rollout status statefulset/vault -n "$NAMESPACE" --timeout=120s &>/dev/null || true
+
+    local sealed=""
+    sealed=$(kubectl exec -n "$NAMESPACE" vault-0 -- vault status -format=json 2>/dev/null         | jq -r .sealed 2>/dev/null) || true
+    case "$sealed" in
+        true)
+            log_info "Vault is sealed (existing data detected). Unsealing from the host secret store..."
+            "${LDX_HOME}/bin/ldx" vault unseal
+            ;;
+        false)
+            log_info "Vault is running and unsealed."
+            ;;
+        *)
+            log_info "Vault is not initialized yet. Run 'ldx vault setup'."
+            ;;
+    esac
+}
+
 # Uninstalls a legacy release that the chart is about to take over. PVCs are
 # left in place (helm uninstall does not delete them) and rebound by name.
 adopt_legacy() {
@@ -364,7 +422,7 @@ parse_common_options() {
             *)
                 # Bare words are service names: 'up redis postgres'.
                 case "$1" in
-                    redis|postgres|otel|certmanager)
+                    redis|postgres|otel|vault|certmanager)
                         SERVICES_CSV="${SERVICES_CSV:+${SERVICES_CSV},}$1"
                         shift
                         ;;
@@ -388,7 +446,7 @@ parse_services() {
         service="${service//[[:space:]]/}"
         [ -n "$service" ] || continue
         case "$service" in
-            redis|postgres|otel|certmanager) ;;
+            redis|postgres|otel|vault|certmanager) ;;
             *) fatal "Unknown service: ${service} (supported: $(services_supported))" ;;
         esac
         local seen
@@ -534,7 +592,8 @@ k8s_up() {
             [ "$service" = "postgres" ] && ensure_postgres_image
             adopt_legacy "$service" "$NAMESPACE"
             case "$service" in
-                otel) prehook_otel ;;
+                otel)  prehook_otel ;;
+                vault) prehook_vault ;;
             esac
         done
 
@@ -547,6 +606,12 @@ k8s_up() {
         apply_certmanager
     fi
 
+    for service in "${main_desired[@]}"; do
+        case "$service" in
+            vault) posthook_vault ;;
+        esac
+    done
+
     state_set "$NAMESPACE" "${desired[@]}"
 
     log_info "Platform is up."
@@ -555,6 +620,7 @@ k8s_up() {
             redis)       log_info "Redis         -> localhost:6379" ;;
             postgres)    log_info "PostgreSQL    -> localhost:5432 (postgres/changeit)" ;;
             otel)        log_info "Grafana/LGTM  -> https://otel.rd.localhost (OTLP: localhost:4317/4318)" ;;
+            vault)       log_info "Vault         -> https://vault.rd.localhost (UI + API)" ;;
             certmanager) log_info "cert-manager  -> release '${CM_RELEASE}' in namespace '${CM_NAMESPACE}', ClusterIssuer 'mkcert-issuer'" ;;
         esac
     done
@@ -654,6 +720,9 @@ k8s_down() {
                     ;;
                 postgres)
                     kubectl delete pvc -n "$NAMESPACE" -l app.kubernetes.io/name=postgresql --ignore-not-found
+                    ;;
+                vault)
+                    kubectl delete pvc -n "$NAMESPACE" data-vault-0 --ignore-not-found
                     ;;
             esac
         done

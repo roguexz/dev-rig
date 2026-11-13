@@ -17,9 +17,10 @@ source "${LDX_HOME}/bin/lib/common.sh"
 
 # Vault operator init JSON (unseal keys + root token) lives in the host
 # secret store as ldx/vault/init_json. Legacy installs kept it in
-# ${VAULT_DIR}/keys.json; it is imported on first read and the file removed.
+# ${VAULT_DIR}/keys.json; the whole file is imported on first read (blob,
+# not KEY=VALUE) and removed after verification.
 vault_keys_json() {
-    ldx_secret_get_kv vault "${VAULT_DIR}/keys.json" init_json
+    ldx_secret_get_blob vault "${VAULT_DIR}/keys.json" init_json
 }
 
 # Helm values file that defines this rig's Vault deployment. Shared by setup
@@ -162,43 +163,18 @@ setup_vault() {
     require_command "helm"
     require_command "kubectl"
 
-    log_info "Adding HashiCorp Helm repository..."
-    helm repo add hashicorp https://helm.releases.hashicorp.com --force-update
-    helm repo update hashicorp
-
     local namespace
-    namespace="$(ldx_namespace vault)"
+    namespace="$(ldx_namespace k8s)"
     ldx_save_namespace vault "$namespace"
-    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
 
     # Cache the version before installing so it survives even if init is interrupted.
     record_vault_version "$VAULT_CHART_VERSION" "$(vault_app_version_for_chart "$VAULT_CHART_VERSION")"
 
-    # Configure hostAliases so auth.rd.localhost resolves to Traefik's ClusterIP
-    # inside the Vault pod. This allows Vault to reach Authelia through Traefik
-    # (so the Host header matches the OIDC issuer) without relying on external DNS.
-    local helm_flags=("--values" "$VAULT_HELM_VALUES")
-    local traefik_ip
-    traefik_ip=$(get_traefik_cluster_ip)
-    if [ -n "$traefik_ip" ]; then
-        log_info "Configuring Vault pod to resolve auth.rd.localhost to Traefik (${traefik_ip})..."
-        helm_flags+=("--set" "server.hostAliases[0].ip=${traefik_ip}")
-        helm_flags+=("--set" "server.hostAliases[0].hostnames[0]=auth.rd.localhost")
-    else
-        log_warn "Could not determine Traefik ClusterIP. Vault may not be able to reach Authelia for OIDC."
-    fi
-
-    log_info "Installing Vault via Helm (chart ${VAULT_CHART_VERSION})..."
-    if ! helm upgrade --install vault hashicorp/vault \
-        --version "$VAULT_CHART_VERSION" \
-        --namespace "$namespace" \
-        "${helm_flags[@]}" \
-        --force-conflicts \
-        --wait; then
-        log_error "Vault install/upgrade did not finish. Pods that are not ready:"
-        report_unready_pods "$namespace"
-        fatal "Release 'vault' in namespace '${namespace}' may be half-applied. Fix the pods above and re-run 'setup'; it is idempotent."
-    fi
+    # Deployment lives in the ldx-local-platform chart (release 'ldx', service
+    # 'vault'): the chart is pinned there, values and the Traefik hostAlias are
+    # supplied by 'ldx k8s', and a sealed vault is auto-unsealed afterwards.
+    # Everything below is the one-time imperative initialization.
+    "${LDX_HOME}/bin/ldx" k8s up --services vault
 
     log_info "Waiting for Vault pod to be created and running..."
     while [[ $(kubectl get pods vault-0 -n "$namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) != "Running" ]]; do
@@ -833,6 +809,15 @@ upgrade_vault() {
     require_command "kubectl"
     require_command "jq"
 
+    # Guard: post-chart-workspace upgrades go through the umbrella chart.
+    local k8s_ns
+    k8s_ns="$(ldx_namespace k8s)"
+    if helm status "ldx" -n "$k8s_ns" &>/dev/null &&
+       helm get values "ldx" -n "$k8s_ns" -a -o json 2>/dev/null \
+           | jq -e '.vaultStack.enabled == true' &>/dev/null; then
+        fatal "Vault is managed by the ldx-local-platform chart (pinned in charts/ldx-local-platform/Chart.yaml). Upgrade flow: 'ldx vault snapshot', bump the vault dependency version in Chart.yaml, run 'helm dependency update .' in that chart, then 'ldx k8s up --services vault' and 'ldx vault status'."
+    fi
+
     local namespace
     namespace="$(ldx_namespace vault)"
     local target="" dry_run=false
@@ -974,26 +959,17 @@ seal_vault() {
 }
 
 uninstall_vault() {
-    require_command "helm"
     require_command "kubectl"
 
-    local namespace
-    namespace="$(ldx_namespace vault)"
-
-    log_info "Uninstalling Vault Helm release..."
-    helm uninstall vault -n "$namespace" || true
-
-    log_info "Removing MutatingWebhookConfiguration..."
-    kubectl delete mutatingwebhookconfiguration vault-agent-injector-cfg --ignore-not-found
-
-    log_info "Removing Vault PVC to ensure clean re-install..."
-    kubectl delete pvc -n "$namespace" data-vault-0 --ignore-not-found
+    # Deployment teardown via the platform release (removes the webhook
+    # config and, with --purge-data, the PVC); keys are host-side.
+    "${LDX_HOME}/bin/ldx" k8s down --services vault --purge-data
 
     log_info "Removing local Vault keys..."
     rm -rf "${VAULT_DIR}"
     ldx_secret_delete vault init_json
 
-    log_info "Vault uninstall complete. The '${namespace}' namespace was not deleted."
+    log_info "Vault uninstall complete. The namespace was not deleted."
 }
 
 main() {

@@ -287,18 +287,45 @@ ldx_secret_delete() {
 # Usage: ldx_secret_get_kv <namespace> <legacy_file> <key>
 # Reads <key> from the backend. If the backend has no entry yet and
 # <legacy_file> (KEY=VALUE lines, the pre-Keychain cache format) exists,
-# imports every line first and removes the file.
+# imports every line first. The file is removed ONLY after at least one
+# line imported successfully - a file in the wrong format is kept, never
+# silently destroyed.
 ldx_secret_get_kv() {
     local ns="$1" legacy_file="$2" key="$3"
     if ! ldx_secret_has "$ns" "$key" && [ -f "$legacy_file" ]; then
-        local line
+        local line imported=0
         while IFS= read -r line || [ -n "$line" ]; do
             [ -n "$line" ] || continue
             [ "${line#*=}" != "$line" ] || continue
             ldx_secret_put "$ns" "${line%%=*}" "${line#*=}"
+            imported=$((imported + 1))
         done < "$legacy_file"
-        rm -f "$legacy_file"
-        log_info "Migrated ${legacy_file} into $(ldx_secret_backend) storage (ldx/${ns}/*)." >&2
+        if [ "$imported" -gt 0 ] && ldx_secret_has "$ns" "$key"; then
+            rm -f "$legacy_file"
+            log_info "Migrated ${legacy_file} (${imported} entries) into $(ldx_secret_backend) storage (ldx/${ns}/*)." >&2
+        else
+            log_warn "Not migrating ${legacy_file}: no KEY=VALUE lines recognized (file kept; use ldx_secret_get_blob for whole-file secrets)." >&2
+        fi
+    fi
+    ldx_secret_get "$ns" "$key"
+}
+
+# Usage: ldx_secret_get_blob <namespace> <legacy_file> <key>
+# Same migration idea, for whole-file values (JSON blobs, single tokens).
+# The entire file becomes one secret under <key>; the file is removed only
+# after the stored value is verified to match.
+ldx_secret_get_blob() {
+    local ns="$1" legacy_file="$2" key="$3"
+    if ! ldx_secret_has "$ns" "$key" && [ -f "$legacy_file" ]; then
+        local content
+        content=$(cat "$legacy_file")
+        ldx_secret_put "$ns" "$key" "$content"
+        if [ "$(ldx_secret_get "$ns" "$key")" = "$content" ]; then
+            rm -f "$legacy_file"
+            log_info "Migrated ${legacy_file} into $(ldx_secret_backend) storage (ldx/${ns}/${key})." >&2
+        else
+            log_warn "Verification failed after migrating ${legacy_file}; keeping the file." >&2
+        fi
     fi
     ldx_secret_get "$ns" "$key"
 }
