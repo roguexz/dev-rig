@@ -573,7 +573,7 @@ prehook_agentgateway() {
 # Post-apply: the gateway (plus Vault Agent sidecar) must become Available.
 posthook_agentgateway() {
     kubectl rollout status deployment/agentgateway -n "$NAMESPACE" --timeout=120s \
-        || log_warn "agentgateway rollout did not finish in time; check 'ldx agentgateway status'."
+        || log_warn "agentgateway rollout did not finish in time; check 'kubectl rollout status deployment/agentgateway -n $NAMESPACE'."
 }
 
 # Persist a service's generated values next to the state file so every later
