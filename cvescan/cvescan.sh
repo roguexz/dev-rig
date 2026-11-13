@@ -315,7 +315,7 @@ def app_bucket(real_path):
 
 # Files that merely *declare* a dependency version (a pin or lockfile)
 # rather than containing the artifact itself. A `Django==5.1.5` line in a
-# requirements file proves nothing is installed — just that some tool
+# requirements file proves nothing is installed - just that some tool
 # pinned that version somewhere.
 DECL_BASENAMES = {'go.mod', 'go.sum', 'Cargo.toml', 'build.gradle', 'build.gradle.kts',
                   'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'bun.lockb'}
@@ -327,7 +327,7 @@ def is_declaration(path):
         return True
     return bool(REQ_PIN_RE.match(base))
 
-# One row per (app, package, version) — a package that shows up in
+# One row per (app, package, version) - a package that shows up in
 # several locations (e.g. two Cargo.lock files) stays a single row.
 rows = {}
 

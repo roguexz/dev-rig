@@ -23,11 +23,11 @@ NAMESPACE="$(ldx_namespace agentgateway)"
 VAULT_NAMESPACE="$(ldx_namespace vault)"
 
 # Pinned agentgateway image (standalone distribution).
-AGENTGATEWAY_IMAGE="cr.agentgateway.dev/agentgateway:v1.6.0"
+AGENTGATEWAY_IMAGE="cr.agentgateway.dev/agentgateway:v1.7.0"
+# Image reference without the tag (used by 'upgrade' to build target images).
+AGENTGATEWAY_IMAGE_BASE="cr.agentgateway.dev/agentgateway"
 # Hostname (Traefik Ingress) the gateway and its UI are served on.
 AGENTGATEWAY_HOST="agentgateway.rd.localhost"
-# Hostname Vault is served on (Traefik Ingress) for browser-facing SSO.
-VAULT_OIDC_HOST="vault.rd.localhost"
 # Secret holding runtime credentials (OIDC client secret, oMLX key).
 AGENTGATEWAY_SECRET="agentgateway-secrets"
 # ConfigMap holding the synced oMLX model list (fragment of the gateway config).
@@ -37,40 +37,70 @@ AGENTGATEWAY_MODELS_CM="agentgateway-llm-models"
 AGENTGATEWAY_API_KEY_NAME="AGENTGATEWAY_API_KEY"
 AGENTGATEWAY_KEY_CACHE="${CACHE_DIR}/agentgateway/api_key"
 
+# Vault Agent sidecar (reads MCP credentials from Vault, writes to shared files).
+VAULT_AGENT_IMAGE="hashicorp/vault:2.0.4"
+VAULT_MCP_ROLE="agentgateway-mcp"
+VAULT_MCP_POLICY="mcp-secrets-read"
+MCP_CREDENTIALS_DIR="/etc/agentgateway/mcp-credentials"
+VAULT_AGENT_CONFIG_CM="agentgateway-vault-agent-config"
+
+# Gateway Service Account (dedicated, bound to the Vault role).
+AGENTGATEWAY_SA="agentgateway"
+
+# Authelia OIDC provider (deployed by 'ldx authelia install').
+AUTHELIA_HOST="auth.rd.localhost"
+AUTHELIA_NAMESPACE="$(ldx_namespace authelia)"
+AUTHELIA_PORT=9091
+AUTHELIA_SECRETS_DIR="${CACHE_DIR}/authelia"
+AUTHELIA_SECRETS_FILE="${AUTHELIA_SECRETS_DIR}/client_secrets"
+
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|sso|sync-omlx>"
+    echo "Usage: $(basename "$0") <install|uninstall|upgrade|sso|sync-omlx|api-key|mcp>"
     echo ""
     echo "Commands:"
     echo "  install     Deploy agentgateway (LLM/MCP/A2A gateway) into the cluster."
     echo "  uninstall   Remove agentgateway deployment, services, ingress, config and data."
-    echo "  sso         Enable Vault OIDC login for the agentgateway UI."
+    echo "  upgrade     Upgrade agentgateway to a version (default: pinned) with a rollout."
+    echo "  sso         Enable Authelia OIDC login for the agentgateway UI (Touch ID)."
     echo "  sync-omlx   Sync local oMLX models into the gateway's LLM routes."
-    echo "  api-key     Enforce API-key auth on LLM routes; create/reuse a virtual key."
+    echo "  api-key     Manage the virtual client key. Enforcement is always on."
+    echo "  mcp         Manage MCP tools with Vault-backed credentials."
+    echo ""
+    echo "Options for upgrade:"
+    echo "  <version>    Target version (e.g. 1.7.0 or v1.7.0). Omit to use the pinned version."
+    echo "  --dry-run    Show what would change; do not touch the cluster."
     echo ""
     echo "Options for sso:"
-    echo "  --vault-username <user>  Vault username for entity discovery (default: admin)"
-    echo "  --vault-password <pass>  Vault password (default: changeit)"
+    echo "  (none required; requires 'ldx authelia install' to have been run first)"
     echo ""
     echo "Options for sync-omlx:"
     echo "  --dry-run    Show the generated model configuration without applying it."
     echo ""
+    echo "Options for api-key:"
+    echo "  api-key           Ensure the key exists, cache it locally, apply config and restart."
+    echo "  api-key print     Print the current virtual client key to stdout."
+    echo ""
+    echo "Options for mcp:"
+    echo "  mcp add <name> --url <url> [--token <token|->] [--header <name>]  Add an MCP tool (credential stored in Vault)."
+    echo "                                                                  --token '-' reads from stdin; omit for interactive prompt."
+    echo "                                                                  --header sets a custom header (default: Authorization: Bearer)."
+    echo "  mcp list                                     List all configured MCP tools."
+    echo "  mcp remove <name>                            Remove an MCP tool and its Vault credential."
+    echo "  mcp rotate <name> --token <new-token>       Rotate a tool's credential (Vault Agent refreshes the file)."
+    echo "                                                                  --token '-' reads from stdin (avoids shell history)."
+    echo ""
     echo "Note: install preserves previously synced models and SSO configuration; uninstall removes everything."
-    echo "Note: users are provisioned with 'ldx vault create-user'; the OIDC profile scope"
-    echo "(name/email claims) is created by 'ldx vault setup'."
+    echo "Note: SSO uses Authelia (deployed by 'ldx authelia install') as the OIDC provider."
+    echo "      Users are provisioned in Authelia's users_database.yml."
+    echo "Note: MCP credentials are stored in Vault and read by a Vault Agent sidecar; harnesses never see them."
 }
 
 # ---------------------------------------------------------------------------
 # Config assembly helpers
 # ---------------------------------------------------------------------------
 
-# In-cluster Vault URL. Pods resolve *.rd.localhost to 127.0.0.1 and do not
-# trust the mkcert CA, so the gateway talks to Vault over the plaintext service
-# URL instead; the issuer/authorize URLs stay browser-facing (Traefik + the
-# wildcard cert). Vault derives its OIDC endpoint URLs from the explicit
-# provider issuer, so the in-cluster discovery document still advertises the
-# browser-facing vault.rd.localhost endpoints.
-VAULT_SVC_URL="http://vault.${VAULT_NAMESPACE}.svc.cluster.local:8200"
-VAULT_OIDC_PATH="/v1/identity/oidc/provider/agentgateway"
+# In-cluster Vault URL is referenced directly in the Vault Agent sidecar config
+# (see render_vault_agent_config).
 
 # Reads OIDC state (issuer + clientId) from the runtime Secret. Returns non-zero
 # when SSO has not been configured.
@@ -99,75 +129,225 @@ get_models_fragment() {
     kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n "$NAMESPACE" -o jsonpath='{.data.models\.yaml}' 2>/dev/null || true
 }
 
+# Reads the synced oMLX provider fragment (the `providers:` map) from its ConfigMap.
+get_providers_fragment() {
+    kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n "$NAMESPACE" -o jsonpath='{.data.providers\.yaml}' 2>/dev/null || true
+}
+
+# Finds the Traefik Service ClusterIP so we can configure hostAliases in the
+# gateway pod. This allows the gateway to reach Authelia through Traefik (so
+# the Host header matches the OIDC issuer) without relying on external DNS.
+get_traefik_cluster_ip() {
+    local traefik_ns="" traefik_svc="" ip=""
+
+    # Try common namespaces where Traefik might be deployed
+    for ns in kube-system traefik ingress; do
+        traefik_svc=$(kubectl get svc -n "$ns" -l app.kubernetes.io/name=traefik -o 'jsonpath={.items[0].metadata.name}' 2>/dev/null) || true
+        if [ -n "$traefik_svc" ]; then
+            traefik_ns="$ns"
+            break
+        fi
+    done
+
+    # If not found by label, try by name
+    if [ -z "$traefik_svc" ]; then
+        for ns in kube-system traefik ingress; do
+            if kubectl get svc -n "$ns" traefik 2>/dev/null >/dev/null; then
+                traefik_ns="$ns"
+                traefik_svc="traefik"
+                break
+            fi
+        done
+    fi
+
+    if [ -n "$traefik_ns" ] && [ -n "$traefik_svc" ]; then
+        ip=$(kubectl get svc -n "$traefik_ns" "$traefik_svc" -o 'jsonpath={.spec.clusterIP}' 2>/dev/null) || true
+    fi
+
+    if [ -z "$ip" ] || [ "$ip" = "None" ]; then
+        # Last resort: look for any Service with Type=LoadBalancer or the default TLS secret
+        ip=$(kubectl get svc -A -o json 2>/dev/null | jq -r '.items[] | select(.spec.clusterIP != "None") | select(.metadata.name == "traefik" or .metadata.labels."app.kubernetes.io/name" == "traefik") | .spec.clusterIP' 2>/dev/null | head -1) || true
+    fi
+
+    printf '%s' "$ip"
+}
+
+# Lists registered MCP tool names from Vault (secret/mcp/<tool>). Returns one
+# name per line. Used to populate the route's backend targets in hybrid mode,
+# where file-owned routes and database-owned targets are not automatically merged.
+list_mcp_tools_from_vault() {
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        return 0
+    fi
+    local vault_namespace="$VAULT_NAMESPACE"
+    local root_token
+    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json" 2>/dev/null) || true
+    if [ -z "$root_token" ]; then
+        return 0
+    fi
+    local tmpfile
+    tmpfile=$(mktemp "${TMPDIR:-/tmp}/mcp-tools.XXXXXX")
+    kubectl exec -i -n "$vault_namespace" vault-0 -- sh -s "$root_token" >"$tmpfile" 2>/dev/null <<'REMOTE_EOF'
+root_token="$1"
+export VAULT_TOKEN="$root_token"
+vault kv list secret/mcp/ 2>/dev/null || true
+REMOTE_EOF
+    local rc=$?
+    if [ $rc -ne 0 ]; then
+        rm -f "$tmpfile"
+        return 0
+    fi
+    if [ -s "$tmpfile" ]; then
+        # vault kv list output: "Keys\n----\nname1\nname2\n" - extract lines after the separator.
+        awk 'begin{skip=1} /^[^-]/ && NR>1 && $0 !~ /^Keys$/ {if(!skip) print; next} /^----$/ {skip=0}' "$tmpfile" | sort -u
+    fi
+    rm -f "$tmpfile"
+}
+
+# Generates YAML for the /mcp route's backend targets by querying the gateway's
+# admin API for all registered mcp.target resources. In hybrid storage mode,
+# file-owned routes and database-owned targets are not automatically merged, so
+# the route must explicitly list the targets it should serve. Returns YAML list
+# items (indented with 6 spaces) or an empty string if no targets are found.
+get_mcp_targets_yaml() {
+    local admin_url pf_pid
+    read -r admin_url pf_pid < <(gateway_admin_url)
+    PORT_FORWARD_PID="$pf_pid"
+    trap cleanup_port_forward EXIT
+
+    local api_key
+    api_key=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n "$NAMESPACE" \
+        -o jsonpath="{.data.${AGENTGATEWAY_API_KEY_NAME}}" 2>/dev/null | base64 -d 2>/dev/null) || true
+    if [ -z "$api_key" ]; then
+        cleanup_port_forward
+        return 0
+    fi
+
+    local response
+    response=$(curl -s "${admin_url}/api/config/resources/mcp.target" \
+        -H "Authorization: Bearer ${api_key}" 2>/dev/null) || true
+
+    cleanup_port_forward
+
+    # Parse the response and generate YAML for each target.
+    echo "$response" | jq -r '
+        .resources // []
+        | .[]
+        | .value
+        | "      - name: \(.name)"
+          + "\n        mcp:\n          host: \(.mcp.host)"
+          + (if .policies and .policies.backendAuth then
+                "\n        policies:\n          backendAuth:\n            key:\n              value:\n                file: \(.policies.backendAuth.key.value.file)"
+                + (if .policies.backendAuth.key.location and .policies.backendAuth.key.location.header then
+                      "\n              location:\n                header:\n                  name: \(.policies.backendAuth.key.location.header.name)"
+                      + (if .policies.backendAuth.key.location.header.prefix != null then
+                            "\n                  prefix: \"\(.policies.backendAuth.key.location.header.prefix)\""
+                        else "" end)
+                  else "" end)
+            else "" end)
+    ' 2>/dev/null || true
+}
+
 # Renders the full gateway config.yaml to stdout, preserving optional features
 # that are already configured (Vault SSO, synced oMLX models).
 #
-# Note: this heredoc is intentionally UNQUOTED. Literal agentgateway env-var
-# references (\$UI_CLIENT_SECRET, \$OMLX_API_KEY) are escaped so they reach the
-# config file as $VAR for agentgateway to expand from the pod environment.
+# Uses the config template file for static structure and injects dynamic
+# sections (OIDC policy, LLM routes, MCP targets) at marker positions.
+#
+# Note: literal agentgateway env-var references ($UI_CLIENT_SECRET, etc.) in
+# the template are passed through as-is for agentgateway to expand from the
+# pod environment.
 render_config() {
-    local oidc_enabled=false models_fragment=""
+    local oidc_section="" llm_section="" models_fragment=""
     if get_oidc_state; then
-        oidc_enabled=true
-    fi
-    models_fragment=$(get_models_fragment)
-
-    cat <<EOF
-# yaml-language-server: \$schema=https://agentgateway.dev/schema/config
-config:
-  database:
-    url: sqlite:///data/data.db
-  # The config file is a read-only ConfigMap mount; the default 'file' mode
-  # writes resource changes back into it and fails with
-  # "failed to write to file /etc/agentgateway/config.yaml: Read-only file
-  # system (os error 30)". 'hybrid' keeps this file as the baseline and
-  # stores UI/API-managed resources in the SQLite database above.
-  storage:
-    mode: hybrid
-gateways:
-  default:
-    port: 4000
-EOF
-
-    if [ "$oidc_enabled" = true ]; then
-        cat <<EOF
-ui:
-  gateways: default
+        oidc_section=$(cat <<EOF
   policies:
     oidc:
-      issuer: ${OIDC_ISSUER}
-      authorizationEndpoint: https://${VAULT_OIDC_HOST}/ui/vault/identity/oidc/provider/agentgateway/authorize
-      tokenEndpoint: ${VAULT_SVC_URL}${VAULT_OIDC_PATH}/token
+      issuer: https://${AUTHELIA_HOST}
+      authorizationEndpoint: https://${AUTHELIA_HOST}/api/oidc/authorization
+      tokenEndpoint: https://${AUTHELIA_HOST}/api/oidc/token
       jwks:
-        url: ${VAULT_SVC_URL}${VAULT_OIDC_PATH}/.well-known/keys
+        url: https://${AUTHELIA_HOST}/jwks.json
       clientId: ${OIDC_CLIENT_ID}
       clientSecret: \$UI_CLIENT_SECRET
       redirectURI: https://${AGENTGATEWAY_HOST}/oauth/callback
-      # Ask Vault for the profile scope so the UI shows name/email instead of
-      # the raw entity UUID (see 'ldx vault create-user' / setup metadata).
+      # Ask Authelia for standard scopes so the UI shows name/email.
       scopes:
+      - openid
       - profile
+      - email
+      - groups
 EOF
-    else
-        cat <<EOF
-ui:
-  gateways: default
-EOF
+)
     fi
 
-    if [ -n "$models_fragment" ]; then
-        printf 'llm:\n  gateways:\n  - default\n'
-        # LLM routes are always authenticated with virtual client keys.
-        if ! get_api_key_state; then
-            fatal "No ${AGENTGATEWAY_API_KEY_NAME} in Secret '${AGENTGATEWAY_SECRET}'. Run 'ldx agentgateway api-key' (install/sync-omlx do this automatically)."
-        fi
-        # Virtual client keys: inbound requests must carry one of these in
-        # 'Authorization: Bearer <key>'; the gateway swaps in the provider
-        # key ($OMLX_API_KEY) before forwarding. The raw key stays in the
-        # Secret; the config references it for env expansion.
-        printf '  policies:\n    apiKey:\n      mode: strict\n      keys:\n      - key: $%s\n        metadata:\n          user: local\n' "$AGENTGATEWAY_API_KEY_NAME"
-        printf '%s\n' "$models_fragment"
+    models_fragment=$(get_models_fragment)
+    providers_fragment=$(get_providers_fragment)
+    # LLM routes are always authenticated with virtual client keys, even when
+    # no models are synced. This makes the auth model consistent with MCP
+    # routes and gives harnesses a clear 401 instead of a 404 when hitting
+    # /v1 before models are available.
+    if ! get_api_key_state; then
+        fatal "No ${AGENTGATEWAY_API_KEY_NAME} in Secret '${AGENTGATEWAY_SECRET}'. Run 'ldx agentgateway api-key' (install does this automatically)."
     fi
+    # Build the models line: use the synced fragment, or an empty list.
+    local models_line
+    if [ -n "$models_fragment" ]; then
+        models_line="$models_fragment"
+    else
+        models_line="  models: []"
+    fi
+    # Build the providers line: use the synced fragment, or an empty list.
+    local providers_line
+    if [ -n "$providers_fragment" ]; then
+        providers_line="$providers_fragment"
+    else
+        providers_line="  providers: []"
+    fi
+    # Virtual client keys: inbound requests must carry one of these in
+    # 'Authorization: Bearer <key>'; the gateway swaps in the provider
+    # key ($OMLX_API_KEY) before forwarding. The raw key stays in the
+    # Secret; the config references it for env expansion.
+    llm_section=$(cat <<EOF
+llm:
+  gateways:
+  - default
+${providers_line}
+  policies:
+    apiKey:
+      mode: strict
+      keys:
+      - key: \$${AGENTGATEWAY_API_KEY_NAME}
+        metadata:
+          user: local
+          name: Local Access
+${models_line}
+EOF
+)
+
+    # MCP endpoint is always secured with the same virtual client key as LLM
+    # routes. We use the routing-based mode (not the simplified 'mcp' section)
+    # so that the apiKey policy can be attached to the /mcp route. In hybrid
+    # storage mode, file-owned routes and database-owned targets are not
+    # automatically merged, so we explicitly list registered targets in the
+    # route's backend by querying the gateway's admin API.
+    if ! get_api_key_state; then
+        fatal "No ${AGENTGATEWAY_API_KEY_NAME} in Secret '${AGENTGATEWAY_SECRET}'. Run 'ldx agentgateway api-key' (install/sync-omlx do this automatically)."
+    fi
+    local targets_yaml
+    targets_yaml=$(get_mcp_targets_yaml)
+    if [ -z "$targets_yaml" ]; then
+        targets_yaml="      targets: []"
+    else
+        targets_yaml=$'      targets:\n'"${targets_yaml}"
+    fi
+
+    local rendered
+    rendered=$(render_template "${CONFIG_DIR}/agentgateway-config.yaml.tpl" \
+        API_KEY_NAME="$AGENTGATEWAY_API_KEY_NAME")
+    rendered=$(inject_block "$rendered" "{{OIDC_SECTION}}" "$oidc_section")
+    rendered=$(inject_block "$rendered" "{{LLM_SECTION}}" "$llm_section")
+    inject_block "$rendered" "{{MCP_TARGETS}}" "$targets_yaml"
 }
 
 apply_config() {
@@ -205,8 +385,209 @@ put_secret() {
 }
 
 # ---------------------------------------------------------------------------
-# install / uninstall
+# Vault role setup
 # ---------------------------------------------------------------------------
+
+# Check that Vault is running and unsealed. Fails with a helpful message if not.
+require_vault_unsealed() {
+    require_command "kubectl"
+    require_command "jq"
+
+    local vault_namespace="$VAULT_NAMESPACE"
+
+    local phase
+    phase=$(kubectl get pods vault-0 -n "$vault_namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    [ "$phase" = "Running" ] || fatal "Vault pod is not running in namespace '${vault_namespace}'. Run 'ldx vault setup' first."
+
+    local sealed
+    sealed=$(kubectl exec -n "$vault_namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    [ "$sealed" = "false" ] || fatal "Vault is sealed. Run 'ldx vault unseal' first."
+
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'ldx vault setup' first."
+    fi
+}
+
+# Creates (or updates) the Vault role that allows the gateway's service account
+# to authenticate to Vault and read MCP secrets. Runs inside the Vault pod
+# using the root token (same pattern as the SSO setup).
+ensure_vault_role() {
+    require_vault_unsealed
+
+    local vault_namespace="$VAULT_NAMESPACE"
+    local gateway_namespace="$NAMESPACE"
+    local root_token
+    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+
+    # Check if the policy exists (created by 'ldx vault enable-secrets').
+    local policy_check
+    policy_check=$(kubectl exec -n "$vault_namespace" vault-0 -- sh -c \
+        "VAULT_TOKEN='${root_token}' vault policy read ${VAULT_MCP_POLICY}" 2>/dev/null) || true
+    if [ -z "$policy_check" ]; then
+        fatal "Vault policy '${VAULT_MCP_POLICY}' not found. Run 'ldx vault enable-secrets' first."
+    fi
+
+    # Create/update the role. Binds the gateway's service account to the MCP
+    # secrets policy. Token TTL is short-lived; the Vault Agent refreshes it.
+    log_info "Configuring Vault role '${VAULT_MCP_ROLE}' for service account '${AGENTGATEWAY_SA}' in namespace '${gateway_namespace}'..."
+    kubectl exec -i -n "$vault_namespace" vault-0 -- sh -s "$root_token" "$gateway_namespace" <<'REMOTE_EOF' >/dev/null
+root_token="$1"
+gateway_ns="$2"
+export VAULT_TOKEN="$root_token"
+
+vault write auth/kubernetes/role/agentgateway-mcp \
+    bound_service_account_names="agentgateway" \
+    bound_service_account_namespaces="$gateway_ns" \
+    policies="mcp-secrets-read" \
+    ttl="1h" \
+    max_ttl="24h"
+REMOTE_EOF
+
+    log_info "Vault role '${VAULT_MCP_ROLE}' configured."
+}
+
+# ---------------------------------------------------------------------------
+# Vault Agent sidecar
+# ---------------------------------------------------------------------------
+
+# Lists the MCP tool names stored in Vault (secret/data/mcp/<name>).
+# Returns nothing if Vault is not running or sealed (graceful handling).
+list_mcp_tools_in_vault() {
+    # Check if the root token exists. If not, there are no tools.
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        return 0
+    fi
+
+    local vault_namespace="$VAULT_NAMESPACE"
+
+    # Check if Vault is running. If not, return nothing.
+    local phase
+    phase=$(kubectl get pods vault-0 -n "$vault_namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    if [ "$phase" != "Running" ]; then
+        return 0
+    fi
+
+    # Check if Vault is unsealed. If not, return nothing.
+    local sealed
+    sealed=$(kubectl exec -n "$vault_namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    if [ "$sealed" != "false" ]; then
+        return 0
+    fi
+
+    local root_token
+    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+
+    # List the metadata under secret/metadata/mcp/ to get tool names.
+    # The response is a list of paths like "secret/metadata/mcp/<name>".
+    # Append `|| true` so an empty list doesn't trigger `set -e`.
+    kubectl exec -n "$vault_namespace" vault-0 -- sh -c \
+        "VAULT_TOKEN='${root_token}' vault list secret/metadata/mcp/" 2>/dev/null |
+        grep -v '^Keys$' | grep -v '^----$' | sed 's/[[:space:]]*$//' | sort || true
+}
+
+# Renders the Vault Agent config to stdout. The config authenticates via
+# Kubernetes auth (using the pod's SA JWT) and creates one template block
+# per MCP tool, each writing that tool's token to a separate file.
+render_vault_agent_config() {
+    local tools
+    tools=$(list_mcp_tools_in_vault)
+
+    cat <<EOF
+# Vault Agent auto-auth + template config
+vault {
+  address = "http://vault.${VAULT_NAMESPACE}.svc.cluster.local:8200"
+}
+
+auto_auth {
+  method "kubernetes" {
+    config {
+      role = "${VAULT_MCP_ROLE}"
+      kubernetes_host = "https://kubernetes.default.svc:443"
+    }
+  }
+  sink "file" {
+    config {
+      path = "/vault-agent/token"
+    }
+  }
+}
+EOF
+
+    if [ -n "$tools" ]; then
+        # One template block per tool.
+        while IFS= read -r tool; do
+            [ -n "$tool" ] || continue
+            cat <<EOF
+
+template {
+  source = "/etc/vault-agent/config/template-${tool}.go.tpl"
+  destination = "${MCP_CREDENTIALS_DIR}/${tool}.token"
+  perms = "0400"
+}
+EOF
+        done <<< "$tools"
+    fi
+}
+
+# Renders the Go template for a single MCP tool.
+render_mcp_tool_template() {
+    local tool="$1"
+    # Output just the token value without any trailing newline.
+    # In KV v2, the secret response has data.data.token.
+    printf '{{- with secret "secret/data/mcp/%s" }}{{ .Data.data.token }}{{- end }}\n' "$tool"
+}
+
+# Applies the Vault Agent ConfigMap (config.hcl + one Go template per tool).
+# Uses temporary files for robust handling of multi-line content.
+apply_vault_agent_config() {
+    local config
+    config=$(render_vault_agent_config)
+
+    # Create a temporary directory for the config files.
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    # Clean up on exit (normal or error).
+    local saved_trap
+    saved_trap=$(trap -p EXIT)
+    trap "rm -rf '${tmpdir}'; ${saved_trap:-true}" EXIT
+
+    # Write the main config to a file.
+    printf '%s\n' "$config" > "${tmpdir}/config.hcl"
+
+    # Build the kubectl flags for creating the ConfigMap.
+    local flags=(
+        "--from-file=config.hcl=${tmpdir}/config.hcl"
+    )
+
+    # Write one template file per tool.
+    local tools
+    tools=$(list_mcp_tools_in_vault)
+    if [ -n "$tools" ]; then
+        local tool template
+        while IFS= read -r tool; do
+            [ -n "$tool" ] || continue
+            template=$(render_mcp_tool_template "$tool")
+            printf '%s\n' "$template" > "${tmpdir}/template-${tool}.go.tpl"
+            flags+=("--from-file=template-${tool}.go.tpl=${tmpdir}/template-${tool}.go.tpl")
+        done <<< "$tools"
+    fi
+
+    # Create the ConfigMap from the files.
+    kubectl create configmap "$VAULT_AGENT_CONFIG_CM" -n "$NAMESPACE" \
+        "${flags[@]}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    # Clean up the temporary directory.
+    rm -rf "$tmpdir"
+
+    # Restore the original EXIT trap.
+    if [ -n "$saved_trap" ]; then
+        eval "$saved_trap"
+    else
+        trap - EXIT
+    fi
+}
 
 install_agentgateway() {
     require_command "kubectl"
@@ -217,120 +598,39 @@ install_agentgateway() {
 
     log_info "Deploying agentgateway..."
 
+    # Create a dedicated service account (bound to the Vault role).
+    log_info "Creating service account '${AGENTGATEWAY_SA}'..."
+    kubectl create serviceaccount "$AGENTGATEWAY_SA" -n "$namespace" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    # Ensure the Vault role exists (binds the SA to the MCP secrets policy).
+    ensure_vault_role
+
     # Render the base config (plus any previously synced models / SSO policy)
     # and apply it before the Deployment so the pod starts with a valid config.
-    # LLM routes always require a virtual client key — ensure one exists first.
+    # LLM routes always require a virtual client key - ensure one exists first.
     ensure_api_key
     apply_config
 
-    cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: agentgateway-data
-  namespace: ${namespace}
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: agentgateway
-  namespace: ${namespace}
-  labels:
-    app: agentgateway
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: agentgateway
-  template:
-    metadata:
-      labels:
-        app: agentgateway
-    spec:
-      securityContext:
-        # Ensure the SQLite volume stays writable regardless of the image uid.
-        fsGroup: 1000
-      containers:
-      - name: agentgateway
-        image: ${AGENTGATEWAY_IMAGE}
-        imagePullPolicy: IfNotPresent
-        args:
-        - "-f"
-        - "/etc/agentgateway/config.yaml"
-        envFrom:
-        # Runtime credentials (OIDC cookie/client secret, oMLX API key); the
-        # config file references them as \$VAR and agentgateway expands them.
-        - secretRef:
-            name: ${AGENTGATEWAY_SECRET}
-            optional: true
-        ports:
-        - containerPort: 4000
-          name: http
-        volumeMounts:
-        - name: config
-          mountPath: /etc/agentgateway/config.yaml
-          subPath: config.yaml
-        - name: data
-          mountPath: /data
-        # The admin port (15000) binds to the pod's loopback only, so probe
-        # the gateway port instead.
-        readinessProbe:
-          tcpSocket:
-            port: 4000
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        livenessProbe:
-          tcpSocket:
-            port: 4000
-          initialDelaySeconds: 15
-          periodSeconds: 10
-      volumes:
-      - name: config
-        configMap:
-          name: agentgateway-config
-      - name: data
-        persistentVolumeClaim:
-          claimName: agentgateway-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: agentgateway
-  namespace: ${namespace}
-spec:
-  type: ClusterIP
-  selector:
-    app: agentgateway
-  ports:
-  - port: 4000
-    targetPort: 4000
-    name: http
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: agentgateway
-  namespace: ${namespace}
-spec:
-  ingressClassName: traefik
-  rules:
-  - host: ${AGENTGATEWAY_HOST}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: agentgateway
-            port:
-              number: 4000
-EOF
+    # Apply the Vault Agent ConfigMap (auto-auth + templates).
+    apply_vault_agent_config
+
+    # Create the extra CAs ConfigMap (mkcert CA) so the gateway can verify
+    # local services (Authelia) while using system roots for public CAs.
+    create_extra_cas_configmap "$namespace"
+
+    log_info "Creating agentgateway Deployment, Service, and Ingress..."
+    local rendered
+    rendered=$(render_template "${CONFIG_DIR}/agentgateway.yaml.tpl" \
+        NAMESPACE="$namespace" \
+        SERVICE_ACCOUNT="$AGENTGATEWAY_SA" \
+        AGENTGATEWAY_IMAGE="$AGENTGATEWAY_IMAGE" \
+        AGENTGATEWAY_SECRET="$AGENTGATEWAY_SECRET" \
+        MCP_CREDENTIALS_DIR="$MCP_CREDENTIALS_DIR" \
+        VAULT_AGENT_IMAGE="$VAULT_AGENT_IMAGE" \
+        VAULT_AGENT_CONFIG_CM="$VAULT_AGENT_CONFIG_CM" \
+        AGENTGATEWAY_HOST="$AGENTGATEWAY_HOST")
+    inject_block "$rendered" "{{HOST_ALIASES}}" "" | kubectl apply -f -
 
     log_info "Waiting for agentgateway deployment to be ready..."
     kubectl wait --for=condition=available deployment/agentgateway -n "$namespace" --timeout=120s
@@ -344,6 +644,7 @@ EOF
     if [ -n "$(get_models_fragment)" ]; then
         log_info "Synced oMLX models are served on /v1 (re-run 'sync-omlx' to refresh)."
     fi
+    log_info "MCP credentials are managed via Vault (add tools with 'ldx agentgateway mcp add')."
 }
 
 uninstall_agentgateway() {
@@ -357,15 +658,128 @@ uninstall_agentgateway() {
     kubectl delete deployment agentgateway -n "$namespace" --ignore-not-found
     kubectl delete configmap agentgateway-config -n "$namespace" --ignore-not-found
     kubectl delete configmap "$AGENTGATEWAY_MODELS_CM" -n "$namespace" --ignore-not-found
+    kubectl delete configmap "$VAULT_AGENT_CONFIG_CM" -n "$namespace" --ignore-not-found
     kubectl delete secret "$AGENTGATEWAY_SECRET" -n "$namespace" --ignore-not-found
+    kubectl delete serviceaccount "$AGENTGATEWAY_SA" -n "$namespace" --ignore-not-found
 
     log_info "Removing agentgateway PVC to ensure clean re-install..."
     kubectl delete pvc agentgateway-data -n "$namespace" --ignore-not-found
+
+    # Delete MCP secrets from Vault.
+    local tools
+    tools=$(list_mcp_tools_in_vault)
+    if [ -n "$tools" ]; then
+        while IFS= read -r tool; do
+            [ -n "$tool" ] || continue
+            log_info "Deleting Vault secret for MCP tool '${tool}'..."
+            vault_delete_mcp_secret "$tool"
+        done <<< "$tools"
+    fi
 
     # The virtual client key died with the Secret; drop the stale local cache.
     rm -f "$AGENTGATEWAY_KEY_CACHE"
 
     log_info "agentgateway uninstall complete. The '${namespace}' namespace was not deleted."
+}
+
+# ---------------------------------------------------------------------------
+# upgrade
+# ---------------------------------------------------------------------------
+
+# Image the running deployment specifies (empty if not installed).
+agentgateway_running_image() {
+    kubectl get deployment agentgateway -n "$NAMESPACE" \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="agentgateway")].image}' 2>/dev/null || true
+}
+
+# Tag of the running image (e.g. 'v1.7.0'); empty when the deployment is absent.
+agentgateway_running_tag() {
+    local image
+    image=$(agentgateway_running_image)
+    [ -n "$image" ] || return 1
+    printf '%s' "$image" | sed -n 's/.*:\(.*\)$/\1/p'
+}
+
+upgrade_agentgateway() {
+    require_command "kubectl"
+
+    local namespace="$NAMESPACE"
+    local target="" dry_run=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                [ -z "$target" ] || { log_error "Unexpected argument: $1"; exit 1; }
+                target="$1"
+                shift
+                ;;
+        esac
+    done
+
+    local current_image current_tag
+    current_image=$(agentgateway_running_image)
+    if [ -z "$current_image" ]; then
+        fatal "agentgateway is not installed. Run 'install' first."
+    fi
+    current_tag=$(agentgateway_running_tag)
+
+    # Resolve the target image. A bare version gets a 'v' prefix; a fully
+    # qualified image reference is used as-is. Omitting the version upgrades
+    # to the pinned constant.
+    local target_image
+    if [ -z "$target" ]; then
+        target_image="$AGENTGATEWAY_IMAGE"
+        log_info "No version given; upgrading to pinned ${target_image}."
+    elif printf '%s' "$target" | grep -q ':'; then
+        target_image="$target"
+    else
+        case "$target" in
+            v*) target_image="${AGENTGATEWAY_IMAGE_BASE}:${target}" ;;
+            *)  target_image="${AGENTGATEWAY_IMAGE_BASE}:v${target}" ;;
+        esac
+    fi
+    local target_tag
+    target_tag=$(printf '%s' "$target_image" | sed -n 's/.*:\(.*\)$/\1/p')
+
+    # Already at the target: no-op.
+    if [ "$target_image" = "$current_image" ]; then
+        log_info "agentgateway already at ${current_tag}; nothing to do."
+        return 0
+    fi
+
+    log_info "Upgrade plan: ${current_tag} -> ${target_tag}"
+
+    if $dry_run; then
+        log_info "--dry-run: would set image to ${target_image} and roll the deployment; no changes applied."
+        return 0
+    fi
+
+    log_info "Updating agentgateway image to ${target_tag}..."
+    kubectl set image deployment/agentgateway agentgateway="${target_image}" -n "$namespace"
+
+    rollout_agentgateway
+
+    # Verify the rollout landed on the requested image.
+    local new_image
+    new_image=$(agentgateway_running_image)
+    log_info "Running image: $(agentgateway_running_tag) (expected ${target_tag})"
+    if [ "$new_image" != "$target_image" ]; then
+        fatal "Upgrade did not complete: expected ${target_tag}, got $(agentgateway_running_tag). Check 'kubectl get pods -n ${namespace}'."
+    fi
+
+    log_info "Upgrade complete: agentgateway ${target_tag}."
+    if get_oidc_state; then
+        log_info "Vault SSO is enabled; log in at https://${AGENTGATEWAY_HOST}/ui and confirm it still works."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -430,31 +844,50 @@ sync_omlx_models() {
     fi
     log_info "Found ${#omlx_models[@]} omlx models"
 
-    # --- Generate the llm.models fragment ---
+    # --- Generate the llm.providers and llm.models fragments ---
     # The gateway reaches omlx on the host via host.docker.internal (Rancher
-    # Desktop resolves it to the macOS host for pods).
+    # Desktop resolves it to the macOS host for pods). Model names carry the
+    # 'agw-' prefix so the harness (ldx-opencode sync) can reference them
+    # without collision with other providers.
+    #
+    # The provider (baseUrl, apiKey, formats) is defined once under
+    # llm.providers; each model references it by name via provider.reference.
+    # This keeps credentials in a single location instead of duplicating them
+    # per model.
     local omlx_upstream="http://host.docker.internal:${omlx_port}/v1"
+    local providers_fragment="  providers:"
+    providers_fragment+=$'\n'"  - name: omlx"
+    providers_fragment+=$'\n'"    provider:"
+    providers_fragment+=$'\n'"      custom:"
+    providers_fragment+=$'\n'"        formats:"
+    providers_fragment+=$'\n'"        - type: completions"
+    providers_fragment+=$'\n'"    params:"
+    providers_fragment+=$'\n'"      baseUrl: ${omlx_upstream}"
+    if [ "$omlx_skip_verify" != "true" ] && [ -n "$omlx_api_key" ]; then
+        providers_fragment+=$'\n'"      apiKey: \$OMLX_API_KEY"
+    fi
+
     local models_fragment="  models:"
     local model_id
     for model_id in "${omlx_models[@]}"; do
         # YAML-escape double quotes in model ids (rare but legal).
         local escaped_id="${model_id//\"/\\\"}"
-        models_fragment+=$'\n'"  - name: \"${escaped_id}\""
-        models_fragment+=$'\n'"    provider:"
-        models_fragment+=$'\n'"      custom:"
-        models_fragment+=$'\n'"        formats:"
-        models_fragment+=$'\n'"        - type: completions"
-        models_fragment+=$'\n'"    params:"
-        models_fragment+=$'\n'"      baseUrl: ${omlx_upstream}"
-        models_fragment+=$'\n'"      model: \"${escaped_id}\""
-        if [ "$omlx_skip_verify" != "true" ] && [ -n "$omlx_api_key" ]; then
-            models_fragment+=$'\n'"      apiKey: \$OMLX_API_KEY"
+        # Add 'agw-' prefix to the gateway-facing name; keep the raw id for the upstream model param.
+        local gw_name="${model_id}"
+        if [[ "$gw_name" != agw-* ]]; then
+            gw_name="agw-${gw_name}"
         fi
+        local escaped_gw_name="${gw_name//\"/\\\"}"
+        models_fragment+=$'\n'"  - name: \"${escaped_gw_name}\""
+        models_fragment+=$'\n'"    provider:"
+        models_fragment+=$'\n'"      reference: omlx"
+        models_fragment+=$'\n'"    params:"
+        models_fragment+=$'\n'"      model: \"${escaped_id}\""
     done
 
     if [ "$dry_run" = true ]; then
-        log_info "Dry run — generated config would be:"
-        printf 'llm:\n  gateways:\n  - default\n%s\n' "$models_fragment"
+        log_info "Dry run - generated config would be:"
+        printf 'llm:\n  gateways:\n  - default\n%s\n%s\n' "$providers_fragment" "$models_fragment"
         return 0
     fi
 
@@ -467,8 +900,9 @@ sync_omlx_models() {
     # the rendered config carries the apiKey policy.
     ensure_api_key
 
-    log_info "Writing ${#omlx_models[@]} model routes to ConfigMap ${AGENTGATEWAY_MODELS_CM}..."
+    log_info "Writing oMLX provider and ${#omlx_models[@]} model routes to ConfigMap ${AGENTGATEWAY_MODELS_CM}..."
     kubectl create configmap "$AGENTGATEWAY_MODELS_CM" -n "$namespace" \
+        --from-literal=providers.yaml="$providers_fragment" \
         --from-literal=models.yaml="$models_fragment" \
         --dry-run=client -o yaml | kubectl apply -f -
 
@@ -506,6 +940,39 @@ ensure_api_key() {
     AGENTGATEWAY_API_KEY="$key"
 }
 
+# Prints the virtual client API key to stdout.
+print_api_key() {
+    require_command "kubectl"
+
+    if ! get_api_key_state; then
+        fatal "No ${AGENTGATEWAY_API_KEY_NAME} in Secret '${AGENTGATEWAY_SECRET}'. Run 'ldx agentgateway api-key' first."
+    fi
+
+    printf '%s\n' "$AGENTGATEWAY_API_KEY"
+}
+
+# api-key (top-level dispatcher)
+api_key_command() {
+    local subcommand="${1:-}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$subcommand" in
+        print)
+            print_api_key "$@"
+            ;;
+        "")
+            enable_api_key "$@"
+            ;;
+        *)
+            log_error "Unknown api-key subcommand: $subcommand"
+            log_error "Usage: ldx agentgateway api-key [print]"
+            exit 1
+            ;;
+    esac
+}
+
 # Generates (or reuses) the virtual client API key, stores it in the runtime
 # Secret, caches it locally for harness configs, and applies the apiKey policy.
 enable_api_key() {
@@ -522,7 +989,7 @@ enable_api_key() {
     apply_config
     rollout_agentgateway
 
-    log_info "API-key enforcement enabled (llm.policies.apiKey.mode=strict)."
+    log_info "API key is enforced on LLM routes (llm.policies.apiKey.mode=strict)."
     log_info "Virtual key stored in Secret '${AGENTGATEWAY_SECRET}' (${AGENTGATEWAY_API_KEY_NAME})"
     log_info "and cached at ${AGENTGATEWAY_KEY_CACHE}; clients send it as"
     log_info "'Authorization: Bearer \$(cat ${AGENTGATEWAY_KEY_CACHE})'."
@@ -530,152 +997,42 @@ enable_api_key() {
 }
 
 # ---------------------------------------------------------------------------
-# sso (Vault OIDC)
+# sso (Authelia OIDC)
 # ---------------------------------------------------------------------------
 
 sso_agentgateway() {
     require_command "kubectl"
     require_command "jq"
+    require_command "curl"
 
-    local namespace="$VAULT_NAMESPACE"
-    local vault_username="${VAULT_SSO_USERNAME:-admin}"
-    local vault_password="${VAULT_SSO_PASSWORD:-changeit}"
-
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --vault-username)
-                vault_username="$2"
-                shift 2
-                ;;
-            --vault-password)
-                vault_password="$2"
-                shift 2
-                ;;
-            *)
-                log_error "Unknown option: $1"
-                show_help
-                exit 1
-                ;;
-        esac
-    done
-
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
-        fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'ldx vault setup' first."
+    # Read the agentgateway client secret from the Authelia cache (created by 'ldx authelia install')
+    if [ ! -f "$AUTHELIA_SECRETS_FILE" ]; then
+        fatal "Authelia client secrets not found at ${AUTHELIA_SECRETS_FILE}. Run 'ldx authelia install' first."
     fi
-    local root_token
-    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+    local agentgateway_client_secret
+    agentgateway_client_secret=$(grep "^AGENTGATEWAY_CLIENT_SECRET=" "$AUTHELIA_SECRETS_FILE" | cut -d= -f2-)
+    if [ -z "$agentgateway_client_secret" ]; then
+        fatal "AGENTGATEWAY_CLIENT_SECRET not found in ${AUTHELIA_SECRETS_FILE}."
+    fi
 
-    # Ensure the Vault pod is running and unsealed.
+    # Check that Authelia is running and its OIDC discovery endpoint responds
     local phase
-    phase=$(kubectl get pods vault-0 -n "$namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) || true
-    [ "$phase" = "Running" ] || fatal "Vault pod is not running. Run 'ldx vault setup' first."
-    local sealed
-    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
-    [ "$sealed" = "false" ] || fatal "Vault is sealed. Run 'ldx vault unseal' first."
-
-    # Vault must be published at https://vault.rd.localhost for the browser (Traefik on
-    # the forwarded host ports) and for gateway pods (Deployment hostAlias to the node
-    # IP, added by 'install'). The Vault chart's own ingress carries that host, so this
-    # only checks it is there, and clears the duplicate Ingress older rigs created.
-    # The nested range over .spec.rules[*] keeps one host per line: a plain wildcard
-    # flattens all rules of an Ingress onto a single line (kubectl joins the matches
-    # with a separator), which grep -qx could never match when the chart Ingress
-    # publishes several hosts (server.ingress.hosts[1...] and up).
-    log_info "Checking Vault is published at ${VAULT_OIDC_HOST}..."
-    kubectl delete ingress vault-rd -n "$namespace" --ignore-not-found
-    if ! kubectl get ingress -n "$namespace" -o jsonpath='{range .items[*]}{range .spec.rules[*]}{.host}{"\n"}{end}{end}' 2>/dev/null |
-        grep -qx "$VAULT_OIDC_HOST"; then
-        fatal "No Ingress publishes ${VAULT_OIDC_HOST}. Run 'ldx vault setup' first; it publishes Vault there."
+    phase=$(kubectl get pods -n "$AUTHELIA_NAMESPACE" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || phase="NotFound"
+    if [ "$phase" != "Running" ]; then
+        fatal "Authelia is not running (pod phase: ${phase}). Run 'ldx authelia install' first."
     fi
 
-    # Vault 2.x requires the provider issuer to be scheme+host only; the full
-    # issuer (with the provider path) is what ends up in the iss claim.
-    local issuer_host="https://${VAULT_OIDC_HOST}"
-    local issuer="${issuer_host}${VAULT_OIDC_PATH}"
-    local redirect_uri="https://${AGENTGATEWAY_HOST}/oauth/callback"
-
-    # Configure Vault as an OIDC provider for agentgateway. Runs inside the
-    # Vault pod (same pattern as ldx-vault's user configuration). Values are
-    # passed as positional args so the quoted heredoc below needs no escaping.
-    log_info "Configuring Vault OIDC provider, client and assignment..."
-    local out client_id client_secret entity_id
-    out=$(cat <<'REMOTE_EOF' | kubectl exec -i -n "$namespace" vault-0 -- sh -s "$root_token" "$redirect_uri" "$issuer_host" "$vault_username" "$vault_password"
-root_token="$1"
-redirect_uri="$2"
-issuer_host="$3"
-sso_user="$4"
-sso_pass="$5"
-
-# Discover the user's entity id (the login also materializes the entity).
-# VAULT_TOKEN must be unset so the login response carries the auth block, and
-# Vault 2.0.x has no jq in the image, so parse the JSON with sed.
-unset VAULT_TOKEN
-entity_id=$(vault login -format=json -method=userpass username="$sso_user" password="$sso_pass" 2>/dev/null \
-    | sed -n 's/.*"entity_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-export VAULT_TOKEN="$root_token"
-
-# Signing key for ID tokens (idempotent; default RS256, 24h rotation).
-vault write -f identity/oidc/key/agentgateway-ui >/dev/null
-
-# Group + assignment granting the login to the user's entity. The assignment
-# must exist before the client references it (validated on client write).
-if [ -n "$entity_id" ] && [ "$entity_id" != "null" ]; then
-    vault write identity/group/name/agentgateway-ui-users member_entity_ids="$entity_id" >/dev/null
-fi
-group_id=$(vault read -format=json -field=id identity/group/name/agentgateway-ui-users 2>/dev/null | tr -d '"') || true
-if [ -n "$group_id" ] && [ "$group_id" != "null" ]; then
-    vault write identity/oidc/assignment/agentgateway-ui-assignment group_ids="$group_id" >/dev/null
-fi
-
-# OIDC client with the gateway's callback URI registered. Vault generates and
-# stabilizes client_id/client_secret; re-writing the client keeps them.
-vault write identity/oidc/client/agentgateway-ui \
-    assignments="agentgateway-ui-assignment" \
-    redirect_uris="$redirect_uri" \
-    key="agentgateway-ui" >/dev/null
-
-client_id=$(vault read -format=json -field=client_id identity/oidc/client/agentgateway-ui | tr -d '"')
-client_secret=$(vault read -format=json -field=client_secret identity/oidc/client/agentgateway-ui | tr -d '"')
-
-# The key must explicitly allow this client (an empty list denies all).
-vault write identity/oidc/key/agentgateway-ui allowed_client_ids="$client_id" >/dev/null
-
-# Provider with an explicit host-only issuer so the iss claim is stable
-# regardless of Vault's api_addr. scopes_supported carries only custom
-# scopes (openid is implicit); the `profile` scope itself is owned by
-# ldx-vault (setup / create-user provision the entity metadata it reads).
-if ! vault read identity/oidc/scope/profile >/dev/null 2>&1; then
-    echo "ERROR: OIDC scope 'profile' is missing. Run 'ldx vault setup' (or 'ldx vault create-user') first." >&2
-    exit 1
-fi
-vault write identity/oidc/provider/agentgateway \
-    issuer="$issuer_host" \
-    scopes_supported="profile" \
-    allowed_client_ids="$client_id" >/dev/null
-
-echo "CLIENT_ID=${client_id}"
-echo "CLIENT_SECRET=${client_secret}"
-echo "ENTITY_ID=${entity_id}"
-REMOTE_EOF
-)
-
-    client_id=$(printf '%s\n' "$out" | sed -n 's/^CLIENT_ID=//p')
-    client_secret=$(printf '%s\n' "$out" | sed -n 's/^CLIENT_SECRET=//p')
-    entity_id=$(printf '%s\n' "$out" | sed -n 's/^ENTITY_ID=//p')
-
-    if [ -z "$client_id" ] || [ -z "$client_secret" ] || [ "$client_secret" = "null" ]; then
-        fatal "Failed to create/read the Vault OIDC client. Vault output:\n$out"
-    fi
-    if [ -z "$entity_id" ] || [ "$entity_id" = "null" ]; then
-        log_warn "Could not log in as '${vault_username}' to discover its entity id."
-        log_warn "Add it manually: vault write identity/group/name/agentgateway-ui-users member_entity_ids=<entity-id>"
-    else
-        log_info "Vault entity ${entity_id} added to the agentgateway-ui-users group."
+    local discovery_url="https://${AUTHELIA_HOST}/.well-known/openid-configuration"
+    if ! curl -sf "${discovery_url}" > /dev/null 2>&1; then
+        fatal "Cannot reach Authelia OIDC discovery at ${discovery_url}. Is Traefik configured with TLS?"
     fi
 
-    # Persist the OIDC client details (client_id is generated by Vault) plus a
-    # stable cookie-signing secret (agentgateway requires OIDC_COOKIE_SECRET
-    # whenever oidc is configured; keep it across re-runs so sessions survive).
+    local issuer="https://${AUTHELIA_HOST}"
+    local client_id="agentgateway"
+
+    # Persist the OIDC client details plus a stable cookie-signing secret
+    # (agentgateway requires OIDC_COOKIE_SECRET whenever oidc is configured;
+    # keep it across re-runs so sessions survive).
     local cookie_secret
     cookie_secret=$(kubectl get secret "$AGENTGATEWAY_SECRET" -n "$NAMESPACE" -o jsonpath='{.data.OIDC_COOKIE_SECRET}' 2>/dev/null | base64 -d 2>/dev/null) || true
     if [ -z "$cookie_secret" ]; then
@@ -683,18 +1040,553 @@ REMOTE_EOF
     fi
     put_secret \
         "OIDC_COOKIE_SECRET=${cookie_secret}" \
-        "UI_CLIENT_SECRET=${client_secret}" \
+        "UI_CLIENT_SECRET=${agentgateway_client_secret}" \
         "OIDC_ISSUER=${issuer}" \
         "OIDC_CLIENT_ID=${client_id}"
+
+    # Configure hostAliases so auth.rd.localhost resolves to Traefik's ClusterIP.
+    # This allows the gateway to reach Authelia through Traefik (so the Host
+    # header matches the OIDC issuer) without relying on external DNS.
+    local traefik_ip
+    traefik_ip=$(get_traefik_cluster_ip)
+    if [ -n "$traefik_ip" ]; then
+        log_info "Configuring gateway pod to resolve ${AUTHELIA_HOST} to Traefik (${traefik_ip})..."
+        local host_aliases="      hostAliases:"
+        host_aliases+=$'\n'"      - ip: ${traefik_ip}"
+        host_aliases+=$'\n'"        hostnames:"
+        host_aliases+=$'\n'"        - ${AUTHELIA_HOST}"
+        local rendered
+        rendered=$(render_template "${CONFIG_DIR}/agentgateway.yaml.tpl" \
+            NAMESPACE="$NAMESPACE" \
+            SERVICE_ACCOUNT="$AGENTGATEWAY_SA" \
+            AGENTGATEWAY_IMAGE="$AGENTGATEWAY_IMAGE" \
+            AGENTGATEWAY_SECRET="$AGENTGATEWAY_SECRET" \
+            MCP_CREDENTIALS_DIR="$MCP_CREDENTIALS_DIR" \
+            VAULT_AGENT_IMAGE="$VAULT_AGENT_IMAGE" \
+            VAULT_AGENT_CONFIG_CM="$VAULT_AGENT_CONFIG_CM" \
+            AGENTGATEWAY_HOST="$AGENTGATEWAY_HOST")
+        inject_block "$rendered" "{{HOST_ALIASES}}" "$host_aliases" | kubectl apply -f -
+    fi
 
     apply_config
 
     log_info "Restarting agentgateway to enable OIDC..."
     rollout_agentgateway
 
-    log_info "Vault SSO enabled."
-    log_info "UI login flow: https://${AGENTGATEWAY_HOST}/ui -> ${VAULT_OIDC_HOST} login"
-    log_info "Vault OIDC discovery: ${issuer}/.well-known/openid-configuration"
+    log_info "Authelia SSO enabled."
+    log_info "UI login flow: https://${AGENTGATEWAY_HOST}/ui -> ${AUTHELIA_HOST} login"
+    log_info "Authelia OIDC discovery: ${discovery_url}"
+    log_info "After the first login, you will be prompted by Touch ID."
+}
+
+# ---------------------------------------------------------------------------
+# mcp (MCP tool management with Vault-backed credentials)
+# ---------------------------------------------------------------------------
+
+# Helper: reach the gateway's admin API (no auth, bound to pod loopback)
+# via kubectl port-forward. Returns the local URL.
+gateway_admin_url() {
+    local namespace="$NAMESPACE"
+    local pod
+    pod=$(kubectl get pods -n "$namespace" -l app=agentgateway -o 'jsonpath={.items[0].metadata.name}' 2>/dev/null) || true
+    if [ -z "$pod" ]; then
+        fatal "No agentgateway pod found in namespace '${namespace}'. Is it installed?"
+    fi
+
+    # Find a free local port for the port-forward.
+    local port
+    port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
+
+    # Start port-forward in the background.
+    kubectl port-forward -n "$namespace" "pod/${pod}" "${port}:15000" >/dev/null 2>&1 &
+    local pf_pid=$!
+
+    # Wait for the port-forward to be ready (up to 10s).
+    local i=0
+    while [ $i -lt 20 ]; do
+        if curl -s "http://127.0.0.1:${port}/api/config/effective" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+        i=$((i + 1))
+    done
+
+    echo "http://127.0.0.1:${port}"
+    echo "$pf_pid"
+}
+
+# Cleanup function for the port-forward background process.
+cleanup_port_forward() {
+    if [ -n "${PORT_FORWARD_PID:-}" ]; then
+        kill "$PORT_FORWARD_PID" 2>/dev/null || true
+        wait "$PORT_FORWARD_PID" 2>/dev/null || true
+    fi
+}
+
+# Creates or updates an MCP secret in Vault.
+vault_write_mcp_secret() {
+    local tool="$1"
+    local token="$2"
+
+    require_vault_unsealed
+
+    local vault_namespace="$VAULT_NAMESPACE"
+    local root_token
+    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+
+    # Write the secret to Vault (KV v2).
+    kubectl exec -i -n "$vault_namespace" vault-0 -- sh -s "$root_token" "$tool" "$token" <<'REMOTE_EOF' >/dev/null
+root_token="$1"
+tool="$2"
+token="$3"
+export VAULT_TOKEN="$root_token"
+
+vault kv put "secret/mcp/${tool}" "token=${token}"
+REMOTE_EOF
+}
+
+# Deletes an MCP secret from Vault.
+vault_delete_mcp_secret() {
+    local tool="$1"
+
+    # Check if Vault is set up (root token exists). If not, there's nothing to delete.
+    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+        return 0
+    fi
+
+    # Check if Vault is running and unsealed. If not, warn but don't fail
+    # (the secret might not exist anyway, and we don't want to block uninstall).
+    local vault_namespace="$VAULT_NAMESPACE"
+    local phase
+    phase=$(kubectl get pods vault-0 -n "$vault_namespace" -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    if [ "$phase" != "Running" ]; then
+        log_warn "Vault pod is not running; skipping secret deletion for '${tool}'."
+        return 0
+    fi
+
+    local sealed
+    sealed=$(kubectl exec -n "$vault_namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    if [ "$sealed" != "false" ]; then
+        log_warn "Vault is sealed; skipping secret deletion for '${tool}'."
+        return 0
+    fi
+
+    local root_token
+    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+
+    # Delete the secret metadata (which deletes all versions).
+    kubectl exec -i -n "$vault_namespace" vault-0 -- sh -s "$root_token" "$tool" <<'REMOTE_EOF' >/dev/null
+root_token="$1"
+tool="$2"
+export VAULT_TOKEN="$root_token"
+
+vault kv metadata delete "secret/mcp/${tool}" 2>/dev/null || true
+REMOTE_EOF
+}
+
+# Creates or updates an MCP target resource via the config resources API.
+api_upsert_mcp_target() {
+    local admin_url="$1"
+    local tool="$2"
+    local url="$3"
+    local header_name="${4:-}"
+
+    local json
+    if [ -n "$header_name" ]; then
+        # Custom header: use location to specify the header name with no prefix.
+        # MCP targets use mcp.host (not http.url) and policies at the target level.
+        json=$(jq -n \
+            --arg id "$tool" \
+            --arg name "$tool" \
+            --arg url "$url" \
+            --arg file "${MCP_CREDENTIALS_DIR}/${tool}.token" \
+            --arg header "$header_name" \
+            '{
+              kind: "mcp.target",
+              id: $id,
+              value: {
+                name: $name,
+                mcp: { host: $url },
+                policies: {
+                  backendAuth: {
+                    key: {
+                      value: { file: $file },
+                      location: {
+                        header: {
+                          name: $header,
+                          prefix: ""
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }')
+    else
+        # Default: Authorization: Bearer <token> (location defaults to Authorization header)
+        json=$(jq -n \
+            --arg id "$tool" \
+            --arg name "$tool" \
+            --arg url "$url" \
+            --arg file "${MCP_CREDENTIALS_DIR}/${tool}.token" \
+            '{
+              kind: "mcp.target",
+              id: $id,
+              value: {
+                name: $name,
+                mcp: { host: $url },
+                policies: {
+                  backendAuth: {
+                    key: {
+                      value: { file: $file }
+                    }
+                  }
+                }
+              }
+            }')
+    fi
+
+    local http_code response_body
+    response_body=$(curl -s -w '\n%{http_code}' -X PUT "${admin_url}/api/config/resources/mcp.target" \
+        -H 'Content-Type: application/json' \
+        -d "{\"resources\":[${json}]}")
+    http_code=$(echo "$response_body" | tail -1)
+    response_body=$(echo "$response_body" | sed '$d')
+
+    if [ "$http_code" -ge 400 ] 2>/dev/null; then
+        echo "$response_body"
+        return 1
+    fi
+    echo "$response_body"
+}
+
+# Deletes an MCP target resource via the config resources API.
+api_delete_mcp_target() {
+    local admin_url="$1"
+    local tool="$2"
+
+    # First, get the resource ID for this tool.
+    local response id
+    response=$(curl -s "${admin_url}/api/config/resources/mcp.target")
+    id=$(echo "$response" | jq -r --arg name "$tool" '.resources[] | select(.value.name == $name) | .id')
+
+    if [ -z "$id" ] || [ "$id" = "null" ]; then
+        return 0  # Not found; nothing to delete.
+    fi
+
+    curl -s -X DELETE "${admin_url}/api/config/resources/mcp.target/${id}"
+}
+
+# Lists MCP targets via the config resources API.
+api_list_mcp_targets() {
+    local admin_url="$1"
+
+    curl -s "${admin_url}/api/config/resources/mcp.target"
+}
+
+# mcp add <name> --url <url> --token <token> [--header <header-name>]
+mcp_add() {
+    require_command "curl"
+    require_command "jq"
+
+    local tool="" url="" token="" header_name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --url)
+                url="$2"
+                shift 2
+                ;;
+            --token)
+                if [ "$2" = "-" ]; then
+                    # Read token from stdin (avoids shell history).
+                    token=$(cat)
+                    shift 2
+                else
+                    token="$2"
+                    shift 2
+                fi
+                ;;
+            --header)
+                header_name="$2"
+                shift 2
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                if [ -z "$tool" ]; then
+                    tool="$1"
+                    shift
+                else
+                    log_error "Unexpected argument: $1"
+                    show_help
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    if [ -z "$tool" ]; then
+        fatal "Usage: ldx agentgateway mcp add <name> --url <url> [--token <token|->] [--header <name>]"
+    fi
+    if [ -z "$url" ]; then
+        fatal "--url is required (the MCP server endpoint)."
+    fi
+    if [ -z "$token" ]; then
+        read -rsp "Token for '${tool}' (credential value): " token || true
+        echo ""
+        [ -n "$token" ] || fatal "A token is required."
+    fi
+
+    # Validate the tool name (use as a path component and filename).
+    if ! [[ "$tool" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        fatal "Tool name must contain only alphanumeric characters, hyphens, and underscores."
+    fi
+
+    # Validate the header name if provided.
+    if [ -n "$header_name" ] && ! [[ "$header_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        fatal "Header name must contain only alphanumeric characters, hyphens, and underscores."
+    fi
+
+    log_info "Adding MCP tool '${tool}' (url: ${url})..."
+    if [ -n "$header_name" ]; then
+        log_info "  Using custom header: ${header_name}"
+    else
+        log_info "  Using default Authorization: Bearer header"
+    fi
+
+    # 1. Store the credential in Vault.
+    log_info "Storing credential in Vault (secret/mcp/${tool})..."
+    vault_write_mcp_secret "$tool" "$token"
+
+    # 2. Regenerate the Vault Agent config (adds the template for this tool).
+    #    This must happen before the restart so the Vault Agent sidecar creates
+    #    the credential file when it starts.
+    log_info "Updating Vault Agent configuration..."
+    apply_vault_agent_config
+
+    # 3. Restart the gateway so the Vault Agent sidecar creates the credential
+    #    file. The gateway validates target policies on API writes, so the file
+    #    must exist before we register the target.
+    log_info "Restarting agentgateway (to create credential file)..."
+    rollout_agentgateway
+
+    # 4. Wait for the Vault Agent to create the credential file. The gateway
+    #    container is distroless (no shell), so we can't check the file directly.
+    #    The Vault Agent creates it on startup; give it a few seconds.
+    log_info "Waiting for credential file to be created..."
+    sleep 5
+
+    # 5. Create the MCP target resource via the API (file now exists).
+    log_info "Registering MCP target with the gateway..."
+    local admin_url pf_pid
+    read -r admin_url pf_pid < <(gateway_admin_url)
+    PORT_FORWARD_PID="$pf_pid"
+    trap cleanup_port_forward EXIT
+
+    local response
+    if ! response=$(api_upsert_mcp_target "$admin_url" "$tool" "$url" "$header_name"); then
+        fatal "Failed to register MCP target (HTTP error): ${response}"
+    fi
+    if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+        fatal "Failed to register MCP target: $(echo "$response" | jq -r '.error')"
+    fi
+
+    cleanup_port_forward
+    trap - EXIT
+
+    # 6. Re-apply the main config to update the route's targets list.
+    #    In hybrid mode, file-owned routes and database-owned targets are not
+    #    automatically merged, so the route must explicitly list its targets.
+    log_info "Updating gateway route configuration..."
+    apply_config
+
+    # 7. Restart the gateway to pick up the new route config.
+    log_info "Restarting agentgateway (to apply route config)..."
+    rollout_agentgateway
+
+    log_info "MCP tool '${tool}' added successfully."
+    log_info "  - Credential stored in Vault (secret/mcp/${tool})"
+    log_info "  - Target registered with the gateway (file: ${MCP_CREDENTIALS_DIR}/${tool}.token)"
+    if [ -n "$header_name" ]; then
+        log_info "  - Sent in header: ${header_name}"
+    else
+        log_info "  - Sent in Authorization: Bearer header"
+    fi
+    log_info "  - Harnesses can now use it via the gateway; they never see the credential."
+}
+
+# mcp list
+mcp_list() {
+    require_command "curl"
+    require_command "jq"
+
+    log_info "Listing MCP tools..."
+
+    local admin_url pf_pid
+    read -r admin_url pf_pid < <(gateway_admin_url)
+    PORT_FORWARD_PID="$pf_pid"
+    trap cleanup_port_forward EXIT
+
+    local response
+    response=$(api_list_mcp_targets "$admin_url")
+
+    local count
+    count=$(echo "$response" | jq '.resources | length')
+
+    if [ "$count" = "0" ]; then
+        echo "  (no MCP tools configured)"
+    else
+        printf "  %-30s %-50s %-10s\n" "NAME" "URL" "ID"
+        printf "  %-30s %-50s %-10s\n" "----" "---" "--"
+        echo "$response" | jq -r '.resources[] | "\(.value.name)\t\(.value.mcp.host // "\(.value.stdio.cmd // "stdio")")\t\(.id)"' |
+            while IFS=$'\t' read -r name url id; do
+                printf "  %-30s %-50s %-10s\n" "$name" "$url" "$id"
+            done
+    fi
+
+    cleanup_port_forward
+    trap - EXIT
+
+    log_info "${count} MCP tool(s) configured."
+}
+
+# mcp remove <name>
+mcp_remove() {
+    require_command "curl"
+    require_command "jq"
+
+    local tool="$1"
+    if [ -z "$tool" ]; then
+        fatal "Usage: ldx agentgateway mcp remove <name>"
+    fi
+
+    log_info "Removing MCP tool '${tool}'..."
+
+    # 1. Delete the credential from Vault.
+    log_info "Deleting credential from Vault (secret/mcp/${tool})..."
+    vault_delete_mcp_secret "$tool"
+
+    # 2. Delete the MCP target resource via the API.
+    log_info "Removing MCP target from the gateway..."
+    local admin_url pf_pid
+    read -r admin_url pf_pid < <(gateway_admin_url)
+    PORT_FORWARD_PID="$pf_pid"
+    trap cleanup_port_forward EXIT
+
+    local response
+    response=$(api_delete_mcp_target "$admin_url" "$tool")
+    if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+        log_warn "API error (target may not exist): $(echo "$response" | jq -r '.error')"
+    fi
+
+    # 3. Regenerate the Vault Agent config (removes the template for this tool).
+    log_info "Updating Vault Agent configuration..."
+    apply_vault_agent_config
+
+    # 4. Re-apply the main config to update the route's targets list.
+    log_info "Updating gateway route configuration..."
+    apply_config
+
+    # 5. Restart the gateway to pick up the new config.
+    log_info "Restarting agentgateway..."
+    rollout_agentgateway
+
+    cleanup_port_forward
+    trap - EXIT
+
+    log_info "MCP tool '${tool}' removed."
+}
+
+# mcp rotate <name> --token <new-token>
+mcp_rotate() {
+    require_command "jq"
+
+    local tool="" token=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --token)
+                if [ "$2" = "-" ]; then
+                    # Read token from stdin (avoids shell history).
+                    token=$(cat)
+                    shift 2
+                else
+                    token="$2"
+                    shift 2
+                fi
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                show_help
+                exit 1
+                ;;
+            *)
+                if [ -z "$tool" ]; then
+                    tool="$1"
+                    shift
+                else
+                    log_error "Unexpected argument: $1"
+                    show_help
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    if [ -z "$tool" ]; then
+        fatal "Usage: ldx agentgateway mcp rotate <name> --token <new-token>"
+    fi
+    if [ -z "$token" ]; then
+        read -rsp "New token for '${tool}': " token || true
+        echo ""
+        [ -n "$token" ] || fatal "A new token is required."
+    fi
+
+    log_info "Rotating credential for MCP tool '${tool}'..."
+
+    # Update the secret in Vault. The Vault Agent detects the change and
+    # refreshes the file automatically (no gateway restart needed).
+    log_info "Updating credential in Vault (secret/mcp/${tool})..."
+    vault_write_mcp_secret "$tool" "$token"
+
+    log_info "Credential rotated. The Vault Agent will refresh the file automatically."
+    log_info "(The gateway reads the file on each request, so the new credential takes effect immediately.)"
+}
+
+# mcp (top-level dispatcher)
+mcp_command() {
+    local subcommand="${1:-}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$subcommand" in
+        add)
+            mcp_add "$@"
+            ;;
+        list)
+            mcp_list "$@"
+            ;;
+        remove)
+            mcp_remove "$@"
+            ;;
+        rotate)
+            mcp_rotate "$@"
+            ;;
+        "")
+            log_error "Usage: ldx agentgateway mcp <add|list|remove|rotate>"
+            exit 1
+            ;;
+        *)
+            log_error "Unknown mcp subcommand: $subcommand"
+            log_error "Usage: ldx agentgateway mcp <add|list|remove|rotate>"
+            exit 1
+            ;;
+    esac
 }
 
 main() {
@@ -713,6 +1605,9 @@ main() {
         uninstall)
             uninstall_agentgateway
             ;;
+        upgrade)
+            upgrade_agentgateway "$@"
+            ;;
         sso)
             sso_agentgateway "$@"
             ;;
@@ -720,7 +1615,10 @@ main() {
             sync_omlx_models "$@"
             ;;
         api-key)
-            enable_api_key "$@"
+            api_key_command "$@"
+            ;;
+        mcp)
+            mcp_command "$@"
             ;;
         *)
             log_error "Unknown subcommand: $subcommand"

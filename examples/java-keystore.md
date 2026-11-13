@@ -1,6 +1,8 @@
 # Using the Custom Java Keystore
 
-The `ldx tls keystore` command creates a custom Java keystore at `~/.cache/local-dev/certs/cacerts`. This keystore is a copy of your system's default `cacerts` file, with the addition of the `mkcert` root CA. This allows Java applications to trust the locally generated TLS certificates.
+The `ldx tls keystore` command creates a custom Java keystore at `~/.cache/local-dev/certs/cacerts`. This keystore is a
+copy of your system's default `cacerts` file, with the addition of the `mkcert` root CA. This allows Java applications
+to trust the locally generated TLS certificates.
 
 ## For Quarkus Applications
 
@@ -35,7 +37,6 @@ configure the client truststore. Add the following entries to your
 ```properties
 # Configure client truststore for local development
 quarkus.tls.trust-store.pem.certs=${HOME}/.cache/local-dev/certs/localhost.pem
-
 # Create an additional "named" truststore for use with Quarkiverse extensions, e.g., Langchain4j
 quarkus.tls.local-dev.trust-store.pem.certs=${HOME}/.cache/local-dev/certs/localhost.pem
 quarkus.langchain4j.openai.tls-configuration-name=local-dev

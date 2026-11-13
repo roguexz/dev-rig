@@ -43,37 +43,8 @@ install_redis() {
         --set auth.enabled=false \
         --wait
 
-    log_info "Exposing Redis via NodePort (Host Port 6379)..."
-    cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis-host-access
-  namespace: ${namespace}
-spec:
-  type: NodePort
-  selector:
-    app.kubernetes.io/name: redis
-  ports:
-    - port: 6379
-      targetPort: 6379
-      nodePort: 30379
-EOF
-
-    cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis-lb
-  namespace: ${namespace}
-spec:
-  type: LoadBalancer
-  selector:
-    app.kubernetes.io/name: redis
-  ports:
-    - port: 6379
-      targetPort: 6379
-EOF
+    log_info "Exposing Redis via NodePort and LoadBalancer..."
+    render_template "${CONFIG_DIR}/redis.yaml.tpl" NAMESPACE="$namespace" | kubectl apply -f -
 
     log_info "Redis installation complete."
     log_info "Redis should now be accessible at localhost:6379 from your host machine."

@@ -179,7 +179,7 @@ playwright-cli video-stop
 playwright-cli video-show-actions --duration=600 --position=top-right
 playwright-cli video-hide-actions
 
-# launch the dashboard for UI review / design feedback — user annotates the page, you receive the annotated screenshot, snapshot, and notes
+# launch the dashboard for UI review / design feedback - user annotates the page, you receive the annotated screenshot, snapshot, and notes
 playwright-cli show --annotate
 
 # generate a Playwright locator for an element from its ref or selector
@@ -301,7 +301,7 @@ playwright-cli snapshot e34
 # include each element's bounding box as [box=x,y,width,height]
 playwright-cli snapshot --boxes
 
-# search a large snapshot instead of capturing it all — returns matching nodes
+# search a large snapshot instead of capturing it all - returns matching nodes
 # with 3 lines of context around each match (like grep -C)
 playwright-cli find "Add to cart"
 playwright-cli find --regex "\\$[0-9]+\\.[0-9]{2}"

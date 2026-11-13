@@ -8,7 +8,7 @@ and exposes it so that it is accessible directly from your host machine.
 ### `ldx postgres install`
 
 This command installs a standalone PostgreSQL instance into the configured namespace (default `commons`, see
-[Configuration](./ldx.md#configuration)), sets the default password to
+[Configuration](../../ldx.md#configuration)), sets the default password to
 `changeit`, and runs initialization SQL scripts to enable the `vector` extension.
 
 ### `ldx postgres uninstall`

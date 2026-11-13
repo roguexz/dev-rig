@@ -5,7 +5,7 @@
 before anything leaves the machine.
 
 The helper is **biometrics-only by design**: no password fallback is offered (`localizedFallbackTitle` is emptied), and
-any failure — no biometrics enrolled, timeout, or cancellation — blocks the push.
+any failure - no biometrics enrolled, timeout, or cancellation - blocks the push.
 
 ---
 
@@ -61,7 +61,7 @@ What it does, step by step:
 
 ## Usage
 
-Nothing changes in your day-to-day workflow — just push as usual:
+Nothing changes in your day-to-day workflow - just push as usual:
 
 ```bash
 git push
@@ -80,7 +80,7 @@ touchid_auth "deploy to production"
 
 - **Hard block**: failed, cancelled, or unavailable biometrics block the push (exit code `1`). There is intentionally
   no password fallback.
-- **Escape hatch**: `git push --no-verify` skips all hooks — use deliberately.
+- **Escape hatch**: `git push --no-verify` skips all hooks - use deliberately.
 - The hook requires `git-push` to sit next to it; if it goes missing, pushes are blocked with a hint to rerun
   `ldx touchid install`.
 - Requires a Mac with Touch ID (or another supported biometric) enrolled in System Settings.

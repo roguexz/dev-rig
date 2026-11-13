@@ -8,7 +8,9 @@ unseal process.
 
 ### `ldx vault setup`
 
-This command installs Vault, creates a default admin user, and exposes the UI via a Traefik Ingress.
+This command installs Vault, creates a default admin user, enables the KV v2 secrets engine and Kubernetes auth method,
+and exposes the UI via a Traefik Ingress. The secrets engine and auth method are also enabled by `enable-secrets`,
+which can be run separately on existing installs.
 
 ### `ldx vault status`
 
@@ -35,9 +37,9 @@ ldx vault create-user alice --full-name "Alice Example" --email alice@example.co
 ldx vault create-user alice --email alice-new@example.com   # update email only
 ```
 
-- `--password <pass>` — password (prompted when omitted; an empty response keeps the existing password)
-- `--full-name <name>` / `--email <email>` — stored as entity metadata; omitted values keep their previous value
-- `--policies <list>` — Vault policies for the user (default: `default`)
+- `--password <pass>` - password (prompted when omitted; an empty response keeps the existing password)
+- `--full-name <name>` / `--email <email>` - stored as entity metadata; omitted values keep their previous value
+- `--policies <list>` - Vault policies for the user (default: `default`)
 
 The command materializes the user's Vault identity entity and writes the metadata onto it. The shared OIDC
 `profile` scope (see below) renders these values into `name`/`email` claims for any client that requests it.
@@ -49,6 +51,45 @@ installs into the system trust store, so the CLI verifies it without `-k`. If th
 logged in), the command creates one and binds its `userpass` alias, so the first login maps onto that entity. Existing
 metadata keys and the entity name Vault assigned are preserved.
 
+### `ldx vault sso`
+
+Configures Vault's OIDC auth method to use Authelia (deployed by `ldx authelia install`) as its identity provider.
+After this, Vault logins redirect to Authelia, which presents Touch ID (WebAuthn) after the initial
+password+enrollment setup.
+
+Requires:
+- Authelia deployed (`ldx authelia install`)
+- Vault running and unsealed (`ldx vault setup`, `ldx vault unseal`)
+
+Userpass (`admin/changeit`) remains available as a fallback.
+
+### `ldx vault enable-secrets`
+
+Enables the secrets engine and auth method components needed for the agentgateway's Vault-backed MCP credentials:
+
+1. **KV v2 secrets engine** at path `secret` - the standard path for application secrets. MCP credentials are stored
+   under `secret/mcp/<name>` (data at `secret/data/mcp/<name>`, metadata at `secret/metadata/mcp/<name>`).
+2. **Kubernetes auth method** - configured with `kubernetes_host=https://kubernetes.default.svc:443` (the in-cluster
+   API server URL) and `skip_tls_verify=true` (Rancher Desktop's self-signed cert is not in Vault's trust store). This
+   allows pods to authenticate to Vault using their service account tokens, getting short-lived Vault tokens.
+3. **Policy `mcp-secrets-read`** - a minimal policy that grants `read` and `list` on `secret/data/mcp/*` and
+   `secret/metadata/mcp/*`. This is the only access the Vault Agent sidecar needs to read MCP credentials.
+
+This command is idempotent: it is safe to re-run, and it skips steps that are already in place. It requires Vault to
+be running and unsealed (`ldx vault unseal` first if sealed).
+
+For new installs, `setup` runs this automatically. For existing installs (created before this command existed), run it
+once before using `ldx agentgateway mcp`.
+
+#### What the agentgateway needs from Vault
+
+The agentgateway's Vault Agent sidecar (added by `ldx agentgateway install`) needs three things from Vault:
+
+- **A role** (`agentgateway-mcp`) that binds the gateway's service account to the `mcp-secrets-read` policy. This
+  is created by `ldx agentgateway install`, not by this command.
+- **Kubernetes auth method** configured so the role can be used by pods. This command enables and configures it.
+- **KV v2 secrets engine** at `secret` so MCP credentials can be stored. This command enables it.
+
 ### OIDC profile scope
 
 `setup` and `create-user` ensure a shared OIDC scope exists at `identity/oidc/scope/profile`:
@@ -57,7 +98,7 @@ metadata keys and the entity name Vault assigned are preserved.
 {"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}
 ```
 
-OIDC providers list it via `scopes_supported=profile` (Vault adds `openid` implicitly — passing it explicitly is an
+OIDC providers list it via `scopes_supported=profile` (Vault adds `openid` implicitly - passing it explicitly is an
 error), and clients request it at authorize time. Users without metadata simply get empty `name`/`email` claims;
 token issuance never fails. Services such as `ldx agentgateway sso` reference this scope rather than creating it.
 
@@ -81,8 +122,8 @@ What it does:
 3. Runs `helm upgrade` with the rig's own `--set` values (not `--reuse-values`,
    which breaks across chart majors that add new value sections) and
    `--force-conflicts` (the injector controller owns the webhook `caBundle`).
-4. Recreates `vault-0` to load the new image — this chart uses an `OnDelete`
-   rollout — then unseals it and waits for readiness.
+4. Recreates `vault-0` to load the new image - this chart uses an `OnDelete`
+   rollout - then unseals it and waits for readiness.
 5. Smoke-tests the OIDC issuer discovery endpoint (no token needed) to confirm
    identity data survived, and records the new version in the cache.
 

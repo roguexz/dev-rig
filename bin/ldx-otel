@@ -25,97 +25,77 @@ show_help() {
 
 install_otel() {
     require_command "kubectl"
+    require_command "openssl"
 
     local namespace
     namespace="$(ldx_namespace otel)"
     ldx_save_namespace otel "$namespace"
     kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
 
+    # Check if Authelia is deployed (for OIDC SSO)
+    local authelia_namespace
+    authelia_namespace="$(ldx_namespace authelia)"
+    local authelia_phase="NotFound"
+    authelia_phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    local authelia_secrets_file="${CACHE_DIR}/authelia/client_secrets"
+    local grafana_client_secret=""
+    local oidc_enabled=false
+
+    if [ "$authelia_phase" = "Running" ] && [ -f "$authelia_secrets_file" ]; then
+        grafana_client_secret=$(grep "^GRAFANA_CLIENT_SECRET=" "$authelia_secrets_file" | cut -d= -f2-)
+        if [ -n "$grafana_client_secret" ]; then
+            oidc_enabled=true
+        fi
+    fi
+
+    # Create Grafana OIDC secret if Authelia is available
+    if [ "$oidc_enabled" = true ]; then
+        log_info "Creating Grafana OIDC secret (Authelia detected)..."
+        kubectl create secret generic grafana-secrets \
+            --namespace "$namespace" \
+            --from-literal=OAUTH_CLIENT_SECRET="${grafana_client_secret}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+    fi
+
     log_info "Deploying Grafana OTel LGTM all-in-one image..."
 
-    cat <<EOF | kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: lgtm
-  namespace: ${namespace}
-  labels:
-    app: lgtm
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: lgtm
-  template:
-    metadata:
-      labels:
-        app: lgtm
-    spec:
-      containers:
-      - name: lgtm
-        image: grafana/otel-lgtm:latest
-        env:
-        # Override the default Grafana admin password
-        - name: GF_SECURITY_ADMIN_PASSWORD
-          value: "changeit"
-        ports:
-        - containerPort: 3000
-          name: grafana
-        - containerPort: 4317
-          name: otlp-grpc
-        - containerPort: 4318
-          name: otlp-http
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: grafana
-  namespace: ${namespace}
-spec:
-  type: ClusterIP
-  selector:
-    app: lgtm
-  ports:
-  - port: 80
-    targetPort: 3000
-    name: http
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: otel-collector
-  namespace: ${namespace}
-spec:
-  type: LoadBalancer
-  selector:
-    app: lgtm
-  ports:
-  - port: 4317
-    targetPort: 4317
-    name: grpc
-  - port: 4318
-    targetPort: 4318
-    name: http
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: grafana
-  namespace: ${namespace}
-spec:
-  ingressClassName: traefik
-  rules:
-  - host: otel.rd.localhost
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: grafana
-            port:
-              number: 80
+    # OIDC environment variables for Grafana (conditional on Authelia)
+    local oidc_env=""
+    if [ "$oidc_enabled" = true ]; then
+        oidc_env=$(cat <<EOF
+        # Authelia OIDC SSO
+        - name: GF_AUTH_GENERIC_OAUTH_ENABLED
+          value: "true"
+        - name: GF_AUTH_GENERIC_OAUTH_NAME
+          value: "Authelia"
+        - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
+          value: "true"
+        - name: GF_AUTH_GENERIC_OAUTH_CLIENT_ID
+          value: "grafana"
+        - name: GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: grafana-secrets
+              key: OAUTH_CLIENT_SECRET
+        - name: GF_AUTH_GENERIC_OAUTH_SCOPES
+          value: "openid profile email groups"
+        - name: GF_AUTH_GENERIC_OAUTH_AUTH_URL
+          value: "https://auth.rd.localhost/api/oidc/authorization"
+        - name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL
+          value: "https://authelia.${authelia_namespace}.svc.cluster.local:9091/api/oidc/token"
+        - name: GF_AUTH_GENERIC_OAUTH_API_URL
+          value: "https://authelia.${authelia_namespace}.svc.cluster.local:9091/api/oidc/userinfo"
 EOF
+)
+    fi
+
+    # Create the extra CAs ConfigMap (mkcert CA) so the LGTM pod can verify
+    # local services while using system roots for public CAs.
+    create_extra_cas_configmap "$namespace"
+
+    local rendered
+    rendered=$(render_template "${CONFIG_DIR}/otel.yaml.tpl" NAMESPACE="$namespace")
+    inject_block "$rendered" "{{OIDC_ENV}}" "$oidc_env" | kubectl apply -f -
 
     log_info "Waiting for LGTM pod to be ready..."
     kubectl wait --for=condition=available deployment/lgtm -n "$namespace" --timeout=120s
@@ -123,7 +103,14 @@ EOF
     log_info "OTel stack installation complete."
     log_info "Grafana UI is accessible at: https://otel.rd.localhost"
     log_info "OTLP endpoint for your applications: localhost:4317 (gRPC) or localhost:4318 (HTTP)"
-    log_info "Default Grafana credentials: admin / changeit"
+
+    if [ "$oidc_enabled" = true ]; then
+        log_info "Grafana OIDC SSO is enabled (Authelia). Login redirects to Touch ID."
+        log_info "Admin password (admin/changeit) remains available as a fallback."
+    else
+        log_info "Default Grafana credentials: admin / changeit"
+        log_info "To enable Authelia SSO, run 'ldx authelia install' first, then re-run this command."
+    fi
 }
 
 uninstall_otel() {
@@ -136,6 +123,7 @@ uninstall_otel() {
     kubectl delete deployment lgtm -n "$namespace" --ignore-not-found
     kubectl delete service grafana otel-collector -n "$namespace" --ignore-not-found
     kubectl delete ingress grafana -n "$namespace" --ignore-not-found
+    kubectl delete secret grafana-secrets -n "$namespace" --ignore-not-found
 
     log_info "OTel stack uninstall complete. The '${namespace}' namespace was not deleted."
 }
