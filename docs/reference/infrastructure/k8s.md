@@ -41,10 +41,15 @@ recorded names (one per line, for scripting). `diff` previews the next `up` (nee
 
 ## Services
 
-| Name       | Chart subchart     | Host access        |
-|------------|--------------------|--------------------|
-| `redis`    | Bitnami Redis      | `localhost:6379`, NodePort 30379 |
-| `postgres` | Bitnami PostgreSQL + pgvector | `localhost:5432`, NodePort 30432 |
+| Name          | Chart subchart                  | Host access        |
+|---------------|---------------------------------|--------------------|
+| `redis`       | Bitnami Redis                   | `localhost:6379`, NodePort 30379 |
+| `postgres`    | Bitnami PostgreSQL + pgvector   | `localhost:5432`, NodePort 30432 |
+| `otel`        | Grafana OTel LGTM (all-in-one)  | `https://otel.rd.localhost` (Grafana), OTLP `localhost:4317/4318` |
+| `certmanager` | cert-manager + mkcert CA (own release) | ClusterIssuer `mkcert-issuer` |
+
+`certmanager` runs as its own release (`ldx-cert-manager`, namespace `cert-manager`, chart
+`charts/ldx-cert-manager`) because it spans namespaces and owns cluster-scoped resources.
 
 ## Configuration
 
@@ -56,12 +61,17 @@ recorded names (one per line, for scripting). `diff` previews the next `up` (nee
 ## Chart layout
 
 ```
-charts/ldx-local-platform/
+charts/ldx-local-platform/          # main release: 'ldx'
 ├── Chart.yaml              # umbrella; one opt-in dependency per service
 ├── values.yaml             # .enabled switches (CLI-owned) + tunable defaults
 └── charts/
     ├── redis/              # vendored Bitnami Redis + host-access services
-    └── postgresql/         # vendored Bitnami PostgreSQL + host-access services
+    ├── postgresql/         # vendored Bitnami PostgreSQL + host-access services
+    └── otel/               # Grafana OTel LGTM + Grafana ingress/secret
+
+charts/ldx-cert-manager/            # separate release: 'ldx-cert-manager'
+└── vendored jetstack cert-manager + mkcert ClusterIssuer, trust bundles,
+    and the Traefik ServersTransport (spans cert-manager + kube-system)
 ```
 
 Each subchart vendors its upstream Bitnami chart, pinned to a specific chart version, and pins the resource names via
@@ -86,5 +96,5 @@ Anything the chart cannot express:
   reference them, the CLI supplies them.
 - **Dynamic state** - oMLX model sync, Vault unseal, MCP tool registration, port-forward helpers.
 
-The remaining services (otel, certmanager, vault, authelia, agentgateway) are still driven imperatively and will move
-onto the chart service by service; `ldx <service> install` keeps working in the meantime.
+The remaining services (vault, authelia, agentgateway, tls) are still driven imperatively and will move onto the chart
+service by service; `ldx <service> install` keeps working in the meantime.

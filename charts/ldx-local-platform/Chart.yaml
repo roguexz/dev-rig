@@ -21,3 +21,8 @@ dependencies:
     version: 0.1.0
     repository: "file://charts/postgresql"
     condition: postgresqlStack.enabled
+  - name: otel
+    alias: otelStack
+    version: 0.1.0
+    repository: "file://charts/otel"
+    condition: otelStack.enabled

@@ -50,3 +50,8 @@ postgresqlStack:
             CREATE EXTENSION IF NOT EXISTS vector;
   hostAccess:
     nodePort: 30432
+
+otelStack:
+  enabled: false
+  # .oidc and image settings are supplied by 'ldx k8s up' (Authelia probe,
+  # host secret store); override any of them with -f.

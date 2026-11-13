@@ -1,0 +1,14 @@
+certmanager:
+  crds:
+    enabled: true
+
+# mkcert root CA material. 'ldx k8s up' supplies these with --set-file from
+# 'mkcert -CAROOT' (rootCA.pem / rootCA-key.pem); they are never stored in
+# the chart or committed to the repository.
+ca:
+  cert: ""
+  key: ""
+
+# Traefik integration (ServersTransport for TLS re-encryption to pods).
+traefik:
+  namespace: kube-system

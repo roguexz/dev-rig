@@ -50,7 +50,26 @@ show_help() {
 }
 
 services_supported() {
-    echo "redis, postgres"
+    echo "redis, postgres, otel, certmanager"
+}
+
+# Services owned by the main 'ldx' umbrella release (certmanager is a
+# separate release: it spans namespaces and cluster-scoped resources).
+main_services_supported() {
+    echo "redis, postgres, otel"
+}
+
+# Release-scoped service: the cert-manager chart lives in its own release
+# and namespace, driven by the same recorded service set.
+CM_RELEASE="ldx-cert-manager"
+CM_NAMESPACE="cert-manager"
+CM_TRAEFIK_NS="kube-system"
+
+service_scope() {
+    case "$1" in
+        certmanager) echo "certmanager" ;;
+        *)           echo "main" ;;
+    esac
 }
 
 # Maps a user-facing service name to its umbrella values key.
@@ -58,6 +77,7 @@ service_key() {
     case "$1" in
         redis)    echo "redisStack" ;;
         postgres) echo "postgresqlStack" ;;
+        otel)     echo "otelStack" ;;
         *)        return 1 ;;
     esac
 }
@@ -71,6 +91,33 @@ legacy_release() {
         postgres) echo "postgresql" ;;
         *)        return 1 ;;
     esac
+}
+
+# Claims Helm ownership of existing resources (kubectl-applied, from the
+# pre-chart installers) so 'helm upgrade --install' adopts them into the
+# release instead of failing the ownership check. Args: <release> <ns>
+# <kind/name>...; a ref may carry '@other-ns' for resources living outside
+# the release namespace. Missing resources are skipped silently.
+adopt_resources() {
+    local rel="$1" relns="$2"; shift 2
+    local ref kind name ns
+    for ref in "$@"; do
+        ns="$relns"
+        [[ "$ref" == *"@"* ]] && { ns="${ref##*@}"; ref="${ref%@*}"; }
+        kind="${ref%%/*}"; name="${ref#*/}"
+        if kubectl get "$kind" "$name" -n "$ns" &>/dev/null 2>&1 \
+           || kubectl get "$kind" "$name" &>/dev/null 2>&1; then
+            kubectl annotate "$ref" -n "$ns" \
+                meta.helm.sh/release-name="$rel" \
+                meta.helm.sh/release-namespace="$relns" --overwrite >/dev/null 2>&1 \
+                || kubectl annotate "$ref" \
+                    meta.helm.sh/release-name="$rel" \
+                    meta.helm.sh/release-namespace="$relns" --overwrite >/dev/null
+            kubectl label "$ref" -n "$ns" app.kubernetes.io/managed-by=Helm --overwrite >/dev/null 2>&1 \
+                || kubectl label "$ref" app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
+            log_info "Adopted ${ref} (ns ${ns}) into release '${rel}'."
+        fi
+    done
 }
 
 resolve_namespace() {
@@ -142,6 +189,111 @@ ensure_postgres_image() {
     log_info "Local pgvector image built successfully."
 }
 
+# --- Per-service pre-apply hooks ----------------------------------------------
+# Hooks prepare the values a chart needs but cannot compute itself (cluster
+# probes, mkcert CA, host secret store). They append a generated values file
+# to APPLY_VALUES, applied on this run only (not recorded).
+
+APPLY_VALUES=()
+
+prehook_otel() {
+    # Extra CAs ConfigMap (mkcert CA) for the LGTM pod, shared mechanism with
+    # the other services (created by the CLI, mounted by the chart).
+    create_extra_cas_configmap "$NAMESPACE"
+
+    # Authelia OIDC: enable Grafana SSO when Authelia runs and its Grafana
+    # client secret exists in the host secret store.
+    local authelia_namespace grafana_secret="" values_file
+    authelia_namespace="$(ldx_namespace authelia)"
+    local phase
+    phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    if [ "$phase" = "Running" ]; then
+        grafana_secret=$(ldx_secret_get_kv authelia/client_secrets "${CACHE_DIR}/authelia/client_secrets" GRAFANA_CLIENT_SECRET 2>/dev/null) || true
+    fi
+
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-otel.XXXXXX.yaml")"
+    TMP_FILES+=("$values_file")
+    {
+        echo "otelStack:"
+        echo "  oidc:"
+        if [ -n "$grafana_secret" ]; then
+            echo "    enabled: true"
+            printf '    clientSecret: "%s"\n' "$grafana_secret"
+            printf '    autheliaNamespace: "%s"\n' "$authelia_namespace"
+        else
+            echo "    enabled: false"
+        fi
+    } > "$values_file"
+    APPLY_VALUES+=(--values "$values_file")
+
+    # Adopt resources the pre-chart installer created via kubectl apply.
+    adopt_resources "$RELEASE" "$NAMESPACE" \
+        deployment/lgtm service/grafana service/otel-collector ingress/grafana secret/grafana-secrets
+}
+
+prehook_certmanager() {
+    require_command "mkcert"
+
+    local ca_root root_cert root_key
+    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
+    root_cert="${ca_root}/rootCA.pem"
+    root_key="${ca_root}/rootCA-key.pem"
+    [ -f "$root_cert" ] && [ -f "$root_key" ] \
+        || fatal "mkcert root CA not found at ${ca_root}. Run 'mkcert -install' (or 'ldx tls install') first."
+
+    # The pre-chart installer ran cert-manager as release 'cert-manager'.
+    # Uninstalling it removes its resources (helm-owned); CRDs are preserved
+    # by Helm and reused by the new release. The kubectl-created mkcert
+    # resources are adopted by annotation.
+    local old
+    old=$(helm list -n "$CM_NAMESPACE" -f '^cert-manager$' -o json 2>/dev/null \
+        | jq -r '.[0].name // empty') || true
+    if [ -n "$old" ]; then
+        log_info "Adopting legacy '${old}' release into '${CM_RELEASE}'..."
+        helm uninstall "$old" -n "$CM_NAMESPACE" >/dev/null
+    fi
+    # crds.enabled=true made the pre-chart installer's release own the CRDs;
+    # uninstalling a release keeps them (helm never deletes CRDs) with the
+    # old release's ownership annotations. Re-tag any cert-manager-group CRD
+    # whose ownership points elsewhere.
+    local crd cur rel_adopted=0
+    for crd in $(kubectl get crd -o name 2>/dev/null \
+        | grep -E '\.(cert-manager|acme\.cert-manager)\.io$'); do
+        cur=$(kubectl get "$crd" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null) || cur=""
+        [ "$cur" = "$CM_RELEASE" ] && continue
+        kubectl annotate "$crd" \
+            meta.helm.sh/release-name="$CM_RELEASE" \
+            meta.helm.sh/release-namespace="$CM_NAMESPACE" --overwrite >/dev/null
+        kubectl label "$crd" app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
+        rel_adopted=$((rel_adopted + 1))
+    done
+    [ "$rel_adopted" -gt 0 ] && log_info "Adopted ${rel_adopted} cert-manager CRDs into release '${CM_RELEASE}'."
+    # The ClusterIssuer is applied as a post-install hook (after the webhook
+    # is Ready), so it is not adopted here - annotating it now would be
+    # validated by the very webhook that is not ready mid-migration.
+    adopt_resources "$CM_RELEASE" "$CM_NAMESPACE" \
+        secret/mkcert-root-ca \
+        "secret/mkcert-ca-bundle@${CM_TRAEFIK_NS}" \
+        "serverstransport/mkcert-ca@${CM_TRAEFIK_NS}" \
+        clustertrustbundle/mkcert-ca \
+        trustbundle/mkcert-ca
+}
+
+apply_certmanager() {
+    local ca_root
+    ca_root=$(mkcert -CAROOT)
+    log_info "Applying ${CM_RELEASE} (cert-manager + mkcert CA) ..."
+    helm upgrade --install "$CM_RELEASE" "${LDX_HOME}/charts/ldx-cert-manager" \
+        --namespace "$CM_NAMESPACE" \
+        --create-namespace \
+        --set-file ca.cert="${ca_root}/rootCA.pem" \
+        --set-file ca.key="${ca_root}/rootCA-key.pem" \
+        ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
+        --wait
+    kubectl rollout status deployment -n "$CM_NAMESPACE" \
+        -l app.kubernetes.io/instance="$CM_RELEASE" --timeout=120s || true
+}
+
 # Uninstalls a legacy release that the chart is about to take over. PVCs are
 # left in place (helm uninstall does not delete them) and rebound by name.
 adopt_legacy() {
@@ -211,12 +363,15 @@ parse_common_options() {
                 ;;
             *)
                 # Bare words are service names: 'up redis postgres'.
-                if service_key "$1" >/dev/null; then
-                    SERVICES_CSV="${SERVICES_CSV:+${SERVICES_CSV},}$1"
-                    shift
-                else
-                    fatal "Unknown option: $1"
-                fi
+                case "$1" in
+                    redis|postgres|otel|certmanager)
+                        SERVICES_CSV="${SERVICES_CSV:+${SERVICES_CSV},}$1"
+                        shift
+                        ;;
+                    *)
+                        fatal "Unknown option: $1"
+                        ;;
+                esac
                 ;;
         esac
     done
@@ -232,7 +387,10 @@ parse_services() {
     for service in $SERVICES_CSV; do
         service="${service//[[:space:]]/}"
         [ -n "$service" ] || continue
-        service_key "$service" >/dev/null || fatal "Unknown service: ${service} (supported: $(services_supported))"
+        case "$service" in
+            redis|postgres|otel|certmanager) ;;
+            *) fatal "Unknown service: ${service} (supported: $(services_supported))" ;;
+        esac
         local seen
         for seen in "${out[@]+"${out[@]}"}"; do
             [ "$seen" = "$service" ] && service="" && break
@@ -270,17 +428,21 @@ recorded_values_args() {
 # --- Commands -----------------------------------------------------------------
 
 NAMESPACE=""
+TMP_FILES=()
+trap '[ "${#TMP_FILES[@]}" -gt 0 ] && rm -f "${TMP_FILES[@]}" || true' EXIT
 
-# Builds the helm --set flags for a service list (stdout, one arg per line).
+# Builds the helm --set flags for the main release, given a main-scope
+# service list (stdout, one arg per line).
 set_flags_for() {
     local service
     for service in "$@"; do
+        [ "$(service_scope "$service")" = "main" ] || continue
         printf -- '--set\n%s.enabled=true\n' "$(service_key "$service")"
     done
-    # Everything the chart supports, disabled by default, so 'up' fully
+    # Everything the main chart supports, disabled by default, so 'up' fully
     # specifies the set instead of inheriting chart defaults for the rest.
     local all svc
-    for all in $(services_supported | tr ',' ' '); do
+    for all in $(main_services_supported | tr ',' ' '); do
         svc="${all//[[:space:]]/}"
         local in_set=false s
         for s in "$@"; do
@@ -302,10 +464,17 @@ apply_release() {
         recorded+=("$line")
     done < <(recorded_values_args)
 
+    local -a main_only=()
+    local s
+    for s in "${services[@]}"; do
+        [ "$(service_scope "$s")" = "main" ] && main_only+=("$s")
+    done
+
     helm upgrade --install "$RELEASE" "$CHART_DIR" \
         --namespace "$NAMESPACE" \
         ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
         ${recorded[@]+"${recorded[@]}"} \
+        ${APPLY_VALUES[@]+"${APPLY_VALUES[@]}"} \
         "${set_args[@]}" \
         --wait
 }
@@ -343,28 +512,50 @@ k8s_up() {
 
     [ "${#desired[@]}" -gt 0 ] || fatal "No services recorded. Run 'ldx k8s up --services <name, name>' (supported: $(services_supported))."
 
-    log_info "Namespace: ${NAMESPACE}"
-    kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
-
+    # Split the set by release scope: the main umbrella vs. cert-manager.
+    local -a main_desired=()
+    local want_cm=false
     local service
     for service in "${desired[@]}"; do
-        if [ "$service" = "postgres" ]; then
-            ensure_postgres_image
+        if [ "$(service_scope "$service")" = "main" ]; then
+            main_desired+=("$service")
+        else
+            want_cm=true
         fi
-        adopt_legacy "$service" "$NAMESPACE"
     done
 
     record_values_files "$NAMESPACE"
 
-    log_info "Applying ${RELEASE} (${desired[*]}) ..."
-    apply_release "${desired[@]}"
+    if [ "${#main_desired[@]}" -gt 0 ]; then
+        log_info "Namespace: ${NAMESPACE}"
+        kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+        for service in "${main_desired[@]}"; do
+            [ "$service" = "postgres" ] && ensure_postgres_image
+            adopt_legacy "$service" "$NAMESPACE"
+            case "$service" in
+                otel) prehook_otel ;;
+            esac
+        done
+
+        log_info "Applying ${RELEASE} (${main_desired[*]}) ..."
+        apply_release "${main_desired[@]}"
+    fi
+
+    if [ "$want_cm" = true ]; then
+        prehook_certmanager
+        apply_certmanager
+    fi
+
     state_set "$NAMESPACE" "${desired[@]}"
 
     log_info "Platform is up."
     for service in "${desired[@]}"; do
         case "$service" in
-            redis)    log_info "Redis      -> localhost:6379" ;;
-            postgres) log_info "PostgreSQL -> localhost:5432 (postgres/changeit)" ;;
+            redis)       log_info "Redis         -> localhost:6379" ;;
+            postgres)    log_info "PostgreSQL    -> localhost:5432 (postgres/changeit)" ;;
+            otel)        log_info "Grafana/LGTM  -> https://otel.rd.localhost (OTLP: localhost:4317/4318)" ;;
+            certmanager) log_info "cert-manager  -> release '${CM_RELEASE}' in namespace '${CM_NAMESPACE}', ClusterIssuer 'mkcert-issuer'" ;;
         esac
     done
 }
@@ -401,17 +592,30 @@ k8s_down() {
         [ "$keep" = true ] && remaining+=("$svc")
     done
 
+    # cert-manager teardown (its own release + namespace).
+    teardown_certmanager() {
+        if helm status "$CM_RELEASE" -n "$CM_NAMESPACE" &>/dev/null; then
+            log_info "Removing the '${CM_RELEASE}' release and the '${CM_NAMESPACE}' namespace..."
+            helm uninstall "$CM_RELEASE" -n "$CM_NAMESPACE"
+            # Hook-managed resources are not part of the release: remove
+            # them explicitly (mirrors the pre-chart uninstaller).
+            kubectl delete clusterissuer mkcert-issuer --ignore-not-found
+            kubectl delete clustertrustbundle mkcert-ca --ignore-not-found 2>/dev/null || true
+            kubectl delete trustbundle mkcert-ca -n "$CM_NAMESPACE" --ignore-not-found 2>/dev/null || true
+            kubectl delete namespace "$CM_NAMESPACE" --ignore-not-found
+        fi
+    }
+
     if [ "${#requested[@]}" -eq 0 ] || [ "${#remaining[@]}" -eq 0 ]; then
-        if [ "$release_exists" = false ]; then
-            log_warn "No '${RELEASE}' release in namespace '${NAMESPACE}'. Nothing to do."
-            return 0
+        if [ "$release_exists" = true ]; then
+            log_info "Removing the '${RELEASE}' release from '${NAMESPACE}'..."
+            helm uninstall "$RELEASE" -n "$NAMESPACE"
+            if [ "$PURGE_DATA" = true ]; then
+                log_info "Removing persistent volumes..."
+                kubectl delete pvc -n "$NAMESPACE" --all --ignore-not-found
+            fi
         fi
-        log_info "Removing the '${RELEASE}' release from '${NAMESPACE}'..."
-        helm uninstall "$RELEASE" -n "$NAMESPACE"
-        if [ "$PURGE_DATA" = true ]; then
-            log_info "Removing persistent volumes..."
-            kubectl delete pvc -n "$NAMESPACE" --all --ignore-not-found
-        fi
+        teardown_certmanager
         state_set "$NAMESPACE"
         rm -f "${VALUES_DIR}/${NAMESPACE}-"*.values
         log_info "Platform removed. The '${NAMESPACE}' namespace was not deleted."
@@ -424,7 +628,21 @@ k8s_down() {
     }
 
     log_info "Disabling: ${requested[*]} (keeping: ${remaining[*]})"
-    apply_release "${remaining[@]}"
+
+    local -a remaining_main=()
+    local rsvc
+    for rsvc in "${remaining[@]}"; do
+        [ "$(service_scope "$rsvc")" = "main" ] && remaining_main+=("$rsvc")
+    done
+    for rsvc in "${requested[@]}"; do
+        [ "$rsvc" = "certmanager" ] && teardown_certmanager
+    done
+
+    if [ "${#remaining_main[@]}" -gt 0 ]; then
+        apply_release "${remaining_main[@]}"
+    elif [ "$release_exists" = true ]; then
+        helm uninstall "$RELEASE" -n "$NAMESPACE"
+    fi
     state_set "$NAMESPACE" "${remaining[@]}"
 
     if [ "$PURGE_DATA" = true ]; then
@@ -477,6 +695,14 @@ k8s_status() {
     echo ""
     echo "=== Pods in ${NAMESPACE} ==="
     kubectl get pods -n "$NAMESPACE" -o wide 2>/dev/null || true
+
+    if helm status "$CM_RELEASE" -n "$CM_NAMESPACE" &>/dev/null; then
+        echo ""
+        echo "=== cert-manager release (${CM_NAMESPACE}) ==="
+        helm status "$CM_RELEASE" -n "$CM_NAMESPACE" | sed -n '1,6p'
+        kubectl get clusterissuer mkcert-issuer \
+            -o 'jsonpath=ClusterIssuer mkcert-issuer: {.status.conditions[0].type}={.status.conditions[0].status}{nl}' 2>/dev/null || true
+    fi
 }
 
 k8s_diff() {

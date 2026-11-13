@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# ldx-help: infra Install cert-manager, ClusterIssuer, and ClusterTrustBundle (CA distribution)
-
+# ldx-help: infra Install cert-manager, ClusterIssuer, and ClusterTrustBundle (CA distribution) (alias for 'ldx k8s --services certmanager')
+#
+# ldx-certmanager - Thin alias for the declarative cert-manager chart
+# (charts/ldx-cert-manager, release 'ldx-cert-manager'). See 'ldx k8s'.
+#
 set -euo pipefail
 
 # Locate the dev-rig checkout (LDX_HOME) from this command's real path.
@@ -17,212 +20,34 @@ show_help() {
     echo "  uninstall     Remove cert-manager and its configurations."
     echo "  ca-bundle <ns> Create/update the 'extra-cas' ConfigMap in namespace <ns>"
     echo "                 with hash-named local CA files (mkcert) for SSL_CERT_DIR."
+    echo ""
+    echo "install/uninstall are aliases for 'ldx k8s up/down --services certmanager'."
+    echo "ca-bundle is a standalone utility used by other ldx commands."
 }
 
-install_certmanager() {
-    require_command "helm"
-    require_command "kubectl"
-    require_command "mkcert"
-
-    log_info "Adding Jetstack Helm repository..."
-    helm repo add jetstack https://charts.jetstack.io --force-update
-    helm repo update jetstack
-
-    log_info "Installing cert-manager..."
-    helm upgrade --install cert-manager jetstack/cert-manager \
-        --namespace cert-manager \
-        --create-namespace \
-        --set crds.enabled=true \
-        --wait
-
-    log_info "Waiting for cert-manager deployments to be ready..."
-    kubectl rollout status deployment/cert-manager -n cert-manager --timeout=90s
-    kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout=90s
-    kubectl rollout status deployment/cert-manager-cainjector -n cert-manager --timeout=90s
-
-    log_info "Configuring Local ClusterIssuer with mkcert CA..."
-
-    local ca_root
-    ca_root=$(mkcert -CAROOT)
-    local root_cert="${ca_root}/rootCA.pem"
-    local root_key="${ca_root}/rootCA-key.pem"
-
-    if [ ! -f "$root_cert" ] || [ ! -f "$root_key" ]; then
-        fatal "mkcert root CA not found at $ca_root. Run 'mkcert -install' first."
-    fi
-
-    # Create secret with the root CA
-    kubectl create secret tls mkcert-root-ca \
-        --namespace cert-manager \
-        --cert="$root_cert" \
-        --key="$root_key" \
-        --dry-run=client -o yaml | kubectl apply -f -
-
-    # Create ClusterIssuer
-    log_info "Creating mkcert ClusterIssuer..."
-    kubectl apply -f "${CONFIG_DIR}/certmanager-issuer.yaml"
-
-    # Create a Secret in kube-system with the mkcert CA. Traefik's
-    # ServersTransport references secrets in its own namespace (kube-system),
-    # and expects the CA under the 'ca.crt' key.
-    log_info "Creating mkcert CA Secret in kube-system..."
-    kubectl create secret generic mkcert-ca-bundle \
-        --namespace=kube-system \
-        --from-file="ca.crt=${root_cert}" \
-        --dry-run=client -o yaml | kubectl apply -f -
-
-    # Wait for the Secret to be fully propagated to Traefik's informer cache
-    # before creating the ServersTransport. Otherwise Traefik may fail to load
-    # the Secret (transient "not found") and not retry until the
-    # ServersTransport itself changes.
-    kubectl wait --for=jsonpath='{.metadata.name}' secret/mkcert-ca-bundle -n kube-system --timeout=15s \
-        || log_warn "Secret not ready yet; ServersTransport may fail to load initially"
-
-    # Create Traefik ServersTransport so Traefik can verify backend pod
-    # certificates against the mkcert CA (for TLS re-encryption).
-    # This CRD is not available in all Traefik installations. Check first.
-    if kubectl get crd serverstransports.traefik.io &>/dev/null; then
-        log_info "Creating Traefik ServersTransport..."
-        kubectl apply -f "${CONFIG_DIR}/certmanager-servers-transport.yaml"
-    else
-        log_warn "Traefik ServersTransport CRD is not available."
-        log_warn "TLS re-encryption will skip backend certificate verification."
-        log_warn "To enable verification, install Traefik with CRDs (e.g. via Helm)."
-    fi
-
-    # Distribute the mkcert CA to all pods using K8s trust bundles.
-    # Two APIs exist depending on K8s version:
-    #   - ClusterTrustBundle (certificates.k8s.io, K8s 1.32+): cluster-scoped
-    #   - TrustBundle (trustbundles.k8s.io, K8s 1.28–1.31): namespaced
-    # Both project the CA to: /var/run/secrets/kubernetes.io/trust-bundles/<name>/ca-bundle.pem
-    local ca_root
-    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
-    local root_cert="${ca_root}/rootCA.pem"
-
-    # Check for ClusterTrustBundle first (newer, cluster-scoped).
-    local ctb_available=""
-    ctb_available=$(kubectl api-resources --api-group=certificates.k8s.io --namespaced=false --no-headers 2>/dev/null | awk '{print $1}' | grep -i '^clustertrustbundles$' | head -1 || true)
-    if [ -n "$ctb_available" ]; then
-        # Pick the newest available API version (v1 > v1beta1 > v1alpha1).
-        # Parse the table output: find the column containing '/' (the API version),
-        # since column positions shift when SHORTNAMES is empty.
-        local ctb_api_versions
-        ctb_api_versions=$(kubectl api-resources --api-group=certificates.k8s.io --namespaced=false --no-headers 2>/dev/null | awk '$1 ~ /^clustertrustbundles$/ {for(i=2; i<=NF; i++) if($i ~ /\//) {print $i; break}}' | sort -u || true)
-        log_info "Available ClusterTrustBundle versions: ${ctb_api_versions:-none}"
-        local ctb_api_version=""
-        ctb_api_version=$(echo "$ctb_api_versions" | sort -V | tail -1 || true)
-        if [ -z "$ctb_api_version" ]; then
-            ctb_api_version="certificates.k8s.io/v1alpha1"
-        fi
-
-        # The trustBundle field expects raw PEM content (not base64-encoded).
-        if [ ! -f "$root_cert" ]; then
-            fatal "mkcert root CA not found at ${root_cert}. Run 'mkcert -install' first."
-        fi
-
-        # Indent the PEM content for the YAML block scalar.
-        local ca_pem_indented
-        ca_pem_indented=$(cat "$root_cert" | sed 's/^/    /')
-
-        log_info "Creating mkcert ClusterTrustBundle (${ctb_api_version}) for cluster-wide CA distribution..."
-        local ctb_rendered
-        ctb_rendered=$(render_template "${CONFIG_DIR}/certmanager-ctb.yaml.tpl" API_VERSION="$ctb_api_version")
-        inject_block "$ctb_rendered" "{{CA_PEM}}" "$ca_pem_indented" | kubectl apply -f -
-    else
-        # Fall back to namespaced TrustBundle (older K8s).
-        local tb_available=""
-        tb_available=$(kubectl api-resources --api-group=trustbundles.k8s.io --namespaced=true --no-headers 2>/dev/null | awk '{print $1}' | grep -i '^trustbundles$' | head -1 || true)
-        if [ -n "$tb_available" ]; then
-            # Pick the newest available API version.
-            local tb_api_versions
-            tb_api_versions=$(kubectl api-resources --api-group=trustbundles.k8s.io --namespaced=true --no-headers 2>/dev/null | awk '$1 ~ /^trustbundles$/ {for(i=2; i<=NF; i++) if($i ~ /\//) {print $i; break}}' | sort -u || true)
-            log_info "Available TrustBundle versions: ${tb_api_versions:-none}"
-            local tb_api_version=""
-            tb_api_version=$(echo "$tb_api_versions" | sort -V | tail -1 || true)
-            if [ -z "$tb_api_version" ]; then
-                tb_api_version="trustbundles.k8s.io/v1"
-            fi
-            log_info "Creating mkcert TrustBundle (${tb_api_version}) for cluster-wide CA distribution..."
-            render_template "${CONFIG_DIR}/certmanager-tb.yaml.tpl" API_VERSION="$tb_api_version" | kubectl apply -f -
-        else
-            log_warn "ClusterTrustBundle and TrustBundle APIs are not available."
-            log_warn "This requires K8s 1.32+ with the ClusterTrustBundle feature gates enabled."
-            log_warn "Pods will not be able to verify TLS certificates signed by the mkcert CA."
-            log_warn "See docs/cert-manager.md for Rancher Desktop / K3s configuration instructions."
-        fi
-    fi
-
-    log_info "cert-manager installation and configuration complete."
-}
-
-uninstall_certmanager() {
-    require_command "helm"
-    require_command "kubectl"
-
-    # Remove the mkcert CA Secret from kube-system.
-    kubectl delete secret mkcert-ca-bundle -n kube-system --ignore-not-found
-
-    # Only remove Traefik transport resources if the CRD is available.
-    if kubectl get crd serverstransports.traefik.io &>/dev/null; then
-        log_info "Removing Traefik ServersTransport..."
-        kubectl delete serverstransport mkcert-ca -n kube-system --ignore-not-found
-    fi
-
-    log_info "Removing ClusterIssuer..."
-    kubectl delete clusterissuer mkcert-issuer --ignore-not-found
-
-    log_info "Removing trust bundles..."
-    # Only delete each type if the API is available on this cluster.
-    local ctb_available=""
-    ctb_available=$(kubectl api-resources --api-group=certificates.k8s.io --namespaced=false --no-headers 2>/dev/null | awk '$1 ~ /^clustertrustbundles$/ {print $1}' | head -1 || true)
-    if [ -n "$ctb_available" ]; then
-        kubectl delete clustertrustbundle mkcert-ca --ignore-not-found
-    fi
-    local tb_available=""
-    tb_available=$(kubectl api-resources --api-group=trustbundles.k8s.io --namespaced=true --no-headers 2>/dev/null | awk '$1 ~ /^trustbundles$/ {print $1}' | head -1 || true)
-    if [ -n "$tb_available" ]; then
-        kubectl delete trustbundle mkcert-ca -n cert-manager --ignore-not-found
-    fi
-
-    log_info "Removing cert-manager Helm release..."
-    helm uninstall cert-manager -n cert-manager || true
-
-    log_info "Removing namespace (may take a moment)..."
-    kubectl delete namespace cert-manager --ignore-not-found
-
-    log_info "cert-manager uninstall complete."
-}
-
-main() {
-    if [ $# -eq 0 ]; then
+case "${1:-}" in
+    install)
+        exec "${LDX_HOME}/bin/ldx" k8s up --services certmanager "${@:2}"
+        ;;
+    uninstall)
+        exec "${LDX_HOME}/bin/ldx" k8s down --services certmanager "${@:2}"
+        ;;
+    ca-bundle)
+        require_command "kubectl"
+        shift
+        [ $# -ge 1 ] || { log_error "ca-bundle requires a namespace argument"; show_help; exit 1; }
+        create_extra_cas_configmap "$1"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    "")
         show_help
         exit 1
-    fi
-
-    local subcommand="$1"
-    shift
-
-    case "$subcommand" in
-        install)
-            install_certmanager
-            ;;
-        uninstall)
-            uninstall_certmanager
-            ;;
-        ca-bundle)
-            if [ $# -eq 0 ]; then
-                log_error "ca-bundle requires a namespace argument"
-                show_help
-                exit 1
-            fi
-            create_extra_cas_configmap "$1"
-            ;;
-        *)
-            log_error "Unknown subcommand: $subcommand"
-            show_help
-            exit 1
-            ;;
-    esac
-}
-
-main "$@"
+        ;;
+    *)
+        log_error "Unknown subcommand: $1"
+        show_help
+        exit 1
+        ;;
+esac

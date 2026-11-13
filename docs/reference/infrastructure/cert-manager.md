@@ -1,5 +1,12 @@
 # Cert-Manager (`ldx certmanager`)
 
+`ldx certmanager install/uninstall` are thin aliases for `ldx k8s up/down --services certmanager`. cert-manager is
+managed by the dedicated `charts/ldx-cert-manager` chart (release `ldx-cert-manager`, namespace `cert-manager`) - it
+has its own release because it spans the `cert-manager` and `kube-system` namespaces plus cluster-scoped resources.
+The mkcert root CA is read from `mkcert -CAROOT` at apply time and passed to Helm via `--set-file`; it is never
+committed. `ldx certmanager ca-bundle <ns>` stays a standalone utility. See
+[the platform stack reference](./k8s.md).
+
 This command automates the installation and configuration of `cert-manager`, a powerful tool for managing TLS
 certificates within Kubernetes.
 
