@@ -1,8 +1,12 @@
 # Default values for ldx-local-platform.
 #
-# Enable services with 'ldx k8s up --services <name, name>' (helm --set of the
-# .enabled flags below); helm persists them across upgrades, so re-running
-# without --services keeps the current set.
+# The .enabled flags are deployment switches, not user settings: 'ldx k8s'
+# passes one --set per service in its recorded set (see the state file under
+# $LDX_CONFIG_DIR) on every apply, so the enabled set survives upgrades
+# without relying on Helm value reuse.
+#
+# Everything below an enabled flag is tunable user config: pass a file with
+# 'ldx k8s up -f my-values.yaml'.
 #
 # hostAccess exposes each service on the host through Rancher Desktop:
 # a NodePort (nodePort) and a LoadBalancer (localhost).

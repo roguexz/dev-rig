@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# ldx-help: infra Deploy PostgreSQL with pgvector extension
-
+# ldx-help: infra Deploy PostgreSQL with pgvector (alias for 'ldx k8s --services postgres')
+#
+# ldx-postgres - Thin alias for the declarative platform stack.
+# PostgreSQL is managed by the ldx-local-platform Helm chart; the local
+# pgvector image is built by 'ldx k8s up' when missing. See 'ldx k8s'.
+#
 set -euo pipefail
 
 # Locate the dev-rig checkout (LDX_HOME) from this command's real path.
@@ -13,106 +17,31 @@ show_help() {
     echo "Usage: $(basename "$0") <install|uninstall>"
     echo ""
     echo "Commands:"
-    echo "  install    Install PostgreSQL using Helm and expose port 5432 to the host."
-    echo "  uninstall  Remove the PostgreSQL deployment and stored data."
+    echo "  install    Install PostgreSQL with pgvector and expose port 5432 to the host."
+    echo "  uninstall  Remove the PostgreSQL deployment and its data (PVC)."
+    echo ""
+    echo "Alias for 'ldx k8s up/down --services postgres' (uninstall adds"
+    echo "--purge-data, matching the historical behavior). For flags, status"
+    echo "and diffs use 'ldx k8s' directly."
 }
 
-install_postgres() {
-    require_command "helm"
-    require_command "kubectl"
-
-    # Check if we have docker CLI available to build the local image
-    if ! command -v docker &> /dev/null; then
-        fatal "Required command 'docker' is not installed or not in PATH. Docker is needed to build the local pgvector image."
-    fi
-
-    # Check if the local pgvector image exists in the Rancher Desktop Docker daemon
-    local local_image="local/bitnami-postgresql-pgvector:18"
-    if ! DOCKER_HOST="" docker --context rancher-desktop image inspect "$local_image" &>/dev/null; then
-        log_info "Local pgvector image '$local_image' not found. Building it now..."
-        
-        local tmp_dir
-        tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ldx-pgvector-build.XXXXXX")"
-        
-        cat <<'EOF' > "${tmp_dir}/Dockerfile"
-FROM pgvector/pgvector:pg18 AS builder
-FROM registry-1.docker.io/bitnami/postgresql:latest
-USER root
-COPY --from=builder /usr/lib/postgresql/18/lib/vector.so /opt/bitnami/postgresql/lib/
-COPY --from=builder /usr/share/postgresql/18/extension/vector* /opt/bitnami/postgresql/share/extension/
-USER 1001
-EOF
-
-        log_info "Building image in Rancher Desktop Docker context..."
-        DOCKER_HOST="" docker --context rancher-desktop build -t "$local_image" "${tmp_dir}"
-        
-        rm -rf "$tmp_dir"
-        log_info "Local pgvector image built successfully."
-    else
-        log_info "Found existing local pgvector image '$local_image'."
-    fi
-
-    log_info "Adding Bitnami Helm repository..."
-    helm repo add bitnami https://charts.bitnami.com/bitnami --force-update
-    helm repo update bitnami
-
-    local namespace
-    namespace="$(ldx_namespace postgres)"
-    ldx_save_namespace postgres "$namespace"
-    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
-
-    log_info "Installing PostgreSQL with pgvector..."
-    helm upgrade --install postgresql bitnami/postgresql \
-        --namespace "$namespace" \
-        --values "${CONFIG_DIR}/postgres-values.yaml" --wait
-
-    log_info "Exposing PostgreSQL via NodePort and LoadBalancer..."
-    render_template "${CONFIG_DIR}/postgres.yaml.tpl" NAMESPACE="$namespace" | kubectl apply -f -
-
-    log_info "PostgreSQL installation complete."
-    log_info "PostgreSQL should now be accessible at localhost:5432 from your host machine."
-}
-
-uninstall_postgres() {
-    require_command "helm"
-    require_command "kubectl"
-
-    local namespace
-    namespace="$(ldx_namespace postgres)"
-
-    log_info "Uninstalling PostgreSQL..."
-    kubectl delete service postgres-host-access -n "$namespace" --ignore-not-found
-    kubectl delete service postgres-lb -n "$namespace" --ignore-not-found
-    helm uninstall postgresql -n "$namespace" || true
-
-    log_info "Removing PostgreSQL PVC to ensure clean re-install..."
-    kubectl delete pvc data-postgresql-0 -n "$namespace" --ignore-not-found
-
-    log_info "PostgreSQL uninstall complete. The '${namespace}' namespace was not deleted."
-}
-
-main() {
-    if [ $# -eq 0 ]; then
+case "${1:-}" in
+    install)
+        exec "${LDX_HOME}/bin/ldx" k8s up --services postgres "${@:2}"
+        ;;
+    uninstall)
+        exec "${LDX_HOME}/bin/ldx" k8s down --services postgres --purge-data "${@:2}"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    "")
         show_help
         exit 1
-    fi
-
-    local subcommand="$1"
-    shift
-
-    case "$subcommand" in
-        install)
-            install_postgres
-            ;;
-        uninstall)
-            uninstall_postgres
-            ;;
-        *)
-            log_error "Unknown subcommand: $subcommand"
-            show_help
-            exit 1
-            ;;
-    esac
-}
-
-main "$@"
+        ;;
+    *)
+        log_error "Unknown subcommand: $1"
+        show_help
+        exit 1
+        ;;
+esac

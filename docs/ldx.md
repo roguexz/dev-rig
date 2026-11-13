@@ -69,6 +69,7 @@ alphanumeric, at most 63 characters).
 | `ldx tls`          | Dev Infrastructure      | Local TLS certificates & Traefik configuration                        | [tls.md](./reference/infrastructure/tls.md)                   |
 | `ldx certmanager`  | Kubernetes Dev          | In-cluster `cert-manager` setup                                       | [cert-manager.md](./reference/infrastructure/cert-manager.md) |
 | `ldx otel`         | Observability           | Grafana LGTM stack (Loki, Grafana, Tempo, Mimir)                      | [otel.md](./reference/observability/otel.md)                 |
+| `ldx k8s`          | Dev Infrastructure      | Declarative platform stack (Helm umbrella chart)                      | [k8s.md](./reference/infrastructure/k8s.md)                |
 | `ldx redis`        | Dev Infrastructure      | Redis stack deployment                                                | [redis.md](./reference/infrastructure/redis.md)                 |
 | `ldx postgres`     | Dev Infrastructure      | PostgreSQL with `pgvector` extension                                  | [postgres.md](./reference/infrastructure/postgres.md)         |
 | `ldx vault`        | Security / Secrets      | Local HashiCorp Vault deployment                                      | [vault.md](./reference/security/vault.md)               |

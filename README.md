@@ -128,7 +128,8 @@ The scripts can also be run directly from the repository (`bin/commands/ldx-vaul
 | `ldx tls <subcommand>`          | Manages local TLS certificates and Java keystores.                                          | `bin/commands/ldx-tls` |
 | `ldx certmanager <subcommand>`  | Installs and configures `cert-manager` for in-cluster certificates.                         | `bin/commands/ldx-certmanager` |
 | `ldx otel <subcommand>`         | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).                               | `bin/commands/ldx-otel` |
-| `ldx redis <subcommand>`        | Deploys a Redis instance accessible from the host.                                          | `bin/commands/ldx-redis` |
+| `ldx k8s <subcommand>`          | Declarative lifecycle for the platform stack (Helm umbrella chart).                   | `bin/commands/ldx-k8s` |
+| `ldx redis <subcommand>`        | Deploys a Redis instance accessible from the host.                                    | `bin/commands/ldx-redis` |
 | `ldx postgres <subcommand>`     | Deploys a PostgreSQL instance with pgvector extension.                                      | `bin/commands/ldx-postgres` |
 | `ldx vault <subcommand>`        | Manages a local HashiCorp Vault deployment for secrets management.                          | `bin/commands/ldx-vault` |
 | `ldx authelia <subcommand>`     | Deploys Authelia (OIDC provider with WebAuthn/Touch ID support) for SSO.                    | `bin/commands/ldx-authelia` |

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# ldx-help: infra Deploy Redis stack
-
+# ldx-help: infra Deploy Redis stack (alias for 'ldx k8s --services redis')
+#
+# ldx-redis - Thin alias for the declarative platform stack.
+# Redis is managed by the ldx-local-platform Helm chart; see 'ldx k8s'.
+#
 set -euo pipefail
 
 # Locate the dev-rig checkout (LDX_HOME) from this command's real path.
@@ -13,74 +16,30 @@ show_help() {
     echo "Usage: $(basename "$0") <install|uninstall>"
     echo ""
     echo "Commands:"
-    echo "  install    Install Redis using Helm and expose port 6379 to the host."
+    echo "  install    Install Redis and expose port 6379 to the host."
     echo "  uninstall  Remove the Redis deployment."
+    echo ""
+    echo "Alias for 'ldx k8s up/down --services redis'. For flags, status and"
+    echo "diffs use 'ldx k8s' directly."
 }
 
-install_redis() {
-    require_command "helm"
-    require_command "kubectl"
-
-    log_info "Adding Bitnami Helm repository..."
-    helm repo add bitnami https://charts.bitnami.com/bitnami --force-update
-    helm repo update bitnami
-
-    local namespace
-    namespace="$(ldx_namespace redis)"
-    ldx_save_namespace redis "$namespace"
-    kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f -
-
-    log_info "Installing Redis..."
-    helm upgrade --install redis bitnami/redis \
-        --namespace "$namespace" \
-        --set architecture=standalone \
-        --set auth.enabled=false \
-        --wait
-
-    log_info "Exposing Redis via NodePort and LoadBalancer..."
-    render_template "${CONFIG_DIR}/redis.yaml.tpl" NAMESPACE="$namespace" | kubectl apply -f -
-
-    log_info "Redis installation complete."
-    log_info "Redis should now be accessible at localhost:6379 from your host machine."
-}
-
-uninstall_redis() {
-    require_command "helm"
-    require_command "kubectl"
-
-    local namespace
-    namespace="$(ldx_namespace redis)"
-
-    log_info "Uninstalling Redis..."
-    kubectl delete service redis-host-access -n "$namespace" --ignore-not-found
-    kubectl delete service redis-lb -n "$namespace" --ignore-not-found
-    helm uninstall redis -n "$namespace" || true
-
-    log_info "Redis uninstall complete. The '${namespace}' namespace was not deleted."
-}
-
-main() {
-    if [ $# -eq 0 ]; then
+case "${1:-}" in
+    install)
+        exec "${LDX_HOME}/bin/ldx" k8s up --services redis "${@:2}"
+        ;;
+    uninstall)
+        exec "${LDX_HOME}/bin/ldx" k8s down --services redis "${@:2}"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    "")
         show_help
         exit 1
-    fi
-
-    local subcommand="$1"
-    shift
-
-    case "$subcommand" in
-        install)
-            install_redis
-            ;;
-        uninstall)
-            uninstall_redis
-            ;;
-        *)
-            log_error "Unknown subcommand: $subcommand"
-            show_help
-            exit 1
-            ;;
-    esac
-}
-
-main "$@"
+        ;;
+    *)
+        log_error "Unknown subcommand: $1"
+        show_help
+        exit 1
+        ;;
+esac

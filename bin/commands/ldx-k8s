@@ -1,0 +1,545 @@
+#!/usr/bin/env bash
+# ldx-help: infra Declare the local platform stack (Helm umbrella chart)
+#
+# ldx-k8s - Declarative lifecycle for the local platform stack.
+#
+# One Helm release ('ldx') of the ldx-local-platform umbrella chart owns
+# every service it enables. The service set is recorded per namespace (see
+# STATE_FILE) so 'up' is idempotent: re-running it reconciles the release to
+# the recorded set instead of re-specifying it.
+#
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+CHART_DIR="${LDX_HOME}/charts/ldx-local-platform"
+RELEASE="ldx"
+
+# Records the enabled service set, per namespace: 'ldx k8s up' adds to it and
+# 'ldx k8s down' removes from it, so 'up' needs no re-specification.
+STATE_FILE="${LDX_CONFIG_DIR}/k8s-services"
+
+show_help() {
+    echo "Usage: $(basename "$0") <up|down|status|diff|services> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  up        Reconcile the release toward the recorded service set."
+    echo "  down      Disable services, or remove the whole release."
+    echo "  status    Show the release, its services, and pod health."
+    echo "  diff      Preview the changes 'up' would apply (helm diff)."
+    echo "  services  List the recorded service set for a namespace."
+    echo ""
+    echo "Options (up/down/status/diff/services):"
+    echo "  --services <a,b>    Comma-separated services (default: all the chart supports)."
+    echo "  --namespace <ns>    Namespace of the release (default: see below)."
+    echo "  --purge-data        With 'down': also delete the services' PVCs."
+    echo "  -f, --values <file> Extra Helm values file, kept as the release's"
+    echo "                      user config and reused on every 'up' (repeatable)."
+    echo ""
+    echo "Services: $(services_supported)"
+    echo ""
+    echo "'up --services postgres' adds postgres to the set; 'down --services redis'"
+    echo "removes redis. 'up' with no --services reconciles what is already recorded."
+    echo ""
+    echo "Namespace resolution: --namespace, LDX_K8S_NAMESPACE, LDX_NAMESPACE,"
+    echo "then the recorded value from a previous run (default: ${LDX_DEFAULT_NAMESPACE})."
+}
+
+services_supported() {
+    echo "redis, postgres"
+}
+
+# Maps a user-facing service name to its umbrella values key.
+service_key() {
+    case "$1" in
+        redis)    echo "redisStack" ;;
+        postgres) echo "postgresqlStack" ;;
+        *)        return 1 ;;
+    esac
+}
+
+# Legacy per-tool Helm releases that predate the umbrella chart. Adoption
+# uninstalls the old release in-place; the chart uses identical resource
+# names (fullnameOverride), so StatefulSets rebind to the existing PVCs.
+legacy_release() {
+    case "$1" in
+        redis)    echo "redis" ;;
+        postgres) echo "postgresql" ;;
+        *)        return 1 ;;
+    esac
+}
+
+resolve_namespace() {
+    local override="$1"
+    if [ -n "$override" ]; then
+        ldx_validate_namespace "$override"
+        echo "$override"
+    else
+        ldx_namespace k8s
+    fi
+}
+
+# --- Recorded service set -----------------------------------------------------
+# Format: one '<namespace>=<svc> <svc>' line per namespace.
+
+state_get() {
+    local ns="$1"
+    [ -f "$STATE_FILE" ] || return 0
+    grep "^[[:space:]]*${ns}=" "$STATE_FILE" 2>/dev/null \
+        | tail -n1 | cut -d= -f2- | tr ' ' '\n' | grep -v '^$' || true
+}
+
+state_set() {
+    local ns="$1"; shift
+    mkdir -p "$LDX_CONFIG_DIR"
+    local tmp="${STATE_FILE}.tmp.$$"
+    if [ -f "$STATE_FILE" ]; then
+        grep -v "^[[:space:]]*${ns}=" "$STATE_FILE" > "$tmp" || true
+    else
+        : > "$tmp"
+    fi
+    if [ "$#" -gt 0 ]; then
+        printf '%s=%s\n' "$ns" "$*" >> "$tmp"
+    fi
+    mv "$tmp" "$STATE_FILE"
+}
+
+# --- Builds -------------------------------------------------------------------
+
+# Builds the local pgvector image the postgresql subchart expects. The chart
+# pins its image by design, so the build stays in the CLI.
+ensure_postgres_image() {
+    local local_image="local/bitnami-postgresql-pgvector:18"
+
+    if ! command -v docker &>/dev/null; then
+        fatal "Required command 'docker' is not installed or not in PATH. Docker is needed to build the local pgvector image."
+    fi
+
+    if DOCKER_HOST="" docker --context rancher-desktop image inspect "$local_image" &>/dev/null; then
+        log_info "Found local pgvector image '$local_image'."
+        return
+    fi
+
+    log_info "Local pgvector image '$local_image' not found. Building it now..."
+    local tmp_dir
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ldx-pgvector-build.XXXXXX")"
+
+    {
+        echo "FROM pgvector/pgvector:pg18 AS builder"
+        echo "FROM registry-1.docker.io/bitnami/postgresql:latest"
+        echo "USER root"
+        echo "COPY --from=builder /usr/lib/postgresql/18/lib/vector.so /opt/bitnami/postgresql/lib/"
+        echo "COPY --from=builder /usr/share/postgresql/18/extension/vector* /opt/bitnami/postgresql/share/extension/"
+        echo "USER 1001"
+    } > "${tmp_dir}/Dockerfile"
+
+    DOCKER_HOST="" docker --context rancher-desktop build -t "$local_image" "${tmp_dir}"
+    rm -rf "$tmp_dir"
+    log_info "Local pgvector image built successfully."
+}
+
+# Uninstalls a legacy release that the chart is about to take over. PVCs are
+# left in place (helm uninstall does not delete them) and rebound by name.
+adopt_legacy() {
+    local service="$1" namespace="$2" old chart other
+    old="$(legacy_release "$service")" || return 0
+
+    chart=$(helm list -n "$namespace" -f "^${old}$" -o json 2>/dev/null \
+        | jq -r '.[0].chart // empty') || true
+
+    if [ -z "$chart" ]; then
+        # Not in the target namespace: warn if it exists elsewhere.
+        other=$(helm list -A -f "^${old}$" -o json 2>/dev/null \
+            | jq -r '.[0].namespace // empty') || true
+        if [ -n "$other" ] && [ "$other" != "$namespace" ]; then
+            log_warn "Legacy '${old}' release found in namespace '${other}', not '${namespace}'."
+            log_warn "It was left untouched. Migrate it with: helm uninstall ${old} -n ${other}"
+        fi
+        return 0
+    fi
+
+    log_info "Adopting legacy '${old}' release (chart ${chart}) into '${RELEASE}'..."
+    helm uninstall "$old" -n "$namespace" >/dev/null
+    log_info "Legacy release removed; the chart recreates the same resource names and rebinds the existing PVCs."
+}
+
+# --- Options ------------------------------------------------------------------
+
+SERVICES_CSV=""
+NAMESPACE_OVERRIDE=""
+PURGE_DATA=false
+declare -a VALUES_ARGS=()
+
+parse_common_options() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --services)
+                SERVICES_CSV="${2:?--services requires a value}"
+                shift 2
+                ;;
+            --services=*)
+                SERVICES_CSV="${1#*=}"
+                shift
+                ;;
+            --namespace)
+                NAMESPACE_OVERRIDE="${2:?--namespace requires a value}"
+                shift 2
+                ;;
+            --namespace=*)
+                NAMESPACE_OVERRIDE="${1#*=}"
+                shift
+                ;;
+            --purge-data)
+                PURGE_DATA=true
+                shift
+                ;;
+            -f|--values)
+                VALUES_ARGS+=(--values "${2:?$1 requires a value}")
+                shift 2
+                ;;
+            --values=*)
+                VALUES_ARGS+=(--values "${1#*=}")
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                # Bare words are service names: 'up redis postgres'.
+                if service_key "$1" >/dev/null; then
+                    SERVICES_CSV="${SERVICES_CSV:+${SERVICES_CSV},}$1"
+                    shift
+                else
+                    fatal "Unknown option: $1"
+                fi
+                ;;
+        esac
+    done
+}
+
+# Echoes validated, de-duplicated service names (one per line) from
+# SERVICES_CSV. With no --services, echoes nothing.
+parse_services() {
+    [ -n "${SERVICES_CSV:-}" ] || return 0
+
+    local out=() service
+    local IFS=','
+    for service in $SERVICES_CSV; do
+        service="${service//[[:space:]]/}"
+        [ -n "$service" ] || continue
+        service_key "$service" >/dev/null || fatal "Unknown service: ${service} (supported: $(services_supported))"
+        local seen
+        for seen in "${out[@]+"${out[@]}"}"; do
+            [ "$seen" = "$service" ] && service="" && break
+        done
+        [ -n "$service" ] && out+=("$service")
+    done
+    unset IFS
+    printf '%s\n' "${out[@]}"
+}
+
+# Records the release's user values files so a plain 'ldx k8s up' keeps
+# applying them (helm takes values from the command line, not from state).
+VALUES_DIR="${LDX_CONFIG_DIR}/k8s-values"
+
+record_values_files() {
+    [ "${#VALUES_ARGS[@]}" -gt 0 ] || return 0
+    mkdir -p "$VALUES_DIR"
+    local i arg
+    for (( i=0; i<${#VALUES_ARGS[@]}; i++ )); do
+        arg="${VALUES_ARGS[$i]}"
+        [ "$arg" = "--values" ] || continue
+        cp "${VALUES_ARGS[$((i+1))]}" "${VALUES_DIR}/${NAMESPACE}-${VALUES_ARGS[$((i+1))]:?}.values"
+    done
+}
+
+# Echoes --values args for the namespace's recorded files.
+recorded_values_args() {
+    local f
+    for f in "${VALUES_DIR}/${NAMESPACE}-"*.values; do
+        [ -f "$f" ] || continue
+        printf -- '--values\n%s\n' "$f"
+    done
+}
+
+# --- Commands -----------------------------------------------------------------
+
+NAMESPACE=""
+
+# Builds the helm --set flags for a service list (stdout, one arg per line).
+set_flags_for() {
+    local service
+    for service in "$@"; do
+        printf -- '--set\n%s.enabled=true\n' "$(service_key "$service")"
+    done
+    # Everything the chart supports, disabled by default, so 'up' fully
+    # specifies the set instead of inheriting chart defaults for the rest.
+    local all svc
+    for all in $(services_supported | tr ',' ' '); do
+        svc="${all//[[:space:]]/}"
+        local in_set=false s
+        for s in "$@"; do
+            [ "$s" = "$svc" ] && in_set=true && break
+        done
+        [ "$in_set" = true ] || printf -- '--set\n%s.enabled=false\n' "$(service_key "$svc")"
+    done
+}
+
+apply_release() {
+    local -a services=("$@")
+    local -a set_args=() recorded=()
+
+    while IFS= read -r line; do
+        set_args+=("$line")
+    done < <(set_flags_for "${services[@]}")
+
+    while IFS= read -r line; do
+        recorded+=("$line")
+    done < <(recorded_values_args)
+
+    helm upgrade --install "$RELEASE" "$CHART_DIR" \
+        --namespace "$NAMESPACE" \
+        ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
+        ${recorded[@]+"${recorded[@]}"} \
+        "${set_args[@]}" \
+        --wait
+}
+
+k8s_up() {
+    require_command "helm"
+    require_command "kubectl"
+    require_command "jq"
+
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+    ldx_save_namespace k8s "$NAMESPACE"
+    [ -d "$CHART_DIR" ] || fatal "Chart directory not found: ${CHART_DIR}"
+
+    local -a requested=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && requested+=("$line")
+    done < <(parse_services)
+
+    local -a current=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && current+=("$line")
+    done < <(state_get "$NAMESPACE")
+
+    # Union of the recorded set and the requested services.
+    local -a desired=("${current[@]+"${current[@]}"}")
+    local want seen
+    for want in "${requested[@]+"${requested[@]}"}"; do
+        seen=false
+        for seen in "${desired[@]+"${desired[@]}"}"; do
+            [ "$seen" = "$want" ] && want="" && break
+        done
+        [ -n "$want" ] && desired+=("$want")
+    done
+
+    [ "${#desired[@]}" -gt 0 ] || fatal "No services recorded. Run 'ldx k8s up --services <name, name>' (supported: $(services_supported))."
+
+    log_info "Namespace: ${NAMESPACE}"
+    kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+    local service
+    for service in "${desired[@]}"; do
+        if [ "$service" = "postgres" ]; then
+            ensure_postgres_image
+        fi
+        adopt_legacy "$service" "$NAMESPACE"
+    done
+
+    record_values_files "$NAMESPACE"
+
+    log_info "Applying ${RELEASE} (${desired[*]}) ..."
+    apply_release "${desired[@]}"
+    state_set "$NAMESPACE" "${desired[@]}"
+
+    log_info "Platform is up."
+    for service in "${desired[@]}"; do
+        case "$service" in
+            redis)    log_info "Redis      -> localhost:6379" ;;
+            postgres) log_info "PostgreSQL -> localhost:5432 (postgres/changeit)" ;;
+        esac
+    done
+}
+
+k8s_down() {
+    require_command "helm"
+    require_command "kubectl"
+
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+
+    local -a current=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && current+=("$line")
+    done < <(state_get "$NAMESPACE")
+
+    local release_exists=true
+    helm status "$RELEASE" -n "$NAMESPACE" &>/dev/null || release_exists=false
+
+    # Whole-platform teardown: no --services, or the set empty afterwards.
+    local -a requested=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && requested+=("$line")
+    done < <(parse_services)
+
+    # Drop every requested service from the recorded set.
+    local -a remaining=()
+    local want svc keep
+    for svc in "${current[@]+"${current[@]}"}"; do
+        keep=true
+        for want in "${requested[@]+"${requested[@]}"}"; do
+            [ "$svc" = "$want" ] && keep=false && break
+        done
+        [ "$keep" = true ] && remaining+=("$svc")
+    done
+
+    if [ "${#requested[@]}" -eq 0 ] || [ "${#remaining[@]}" -eq 0 ]; then
+        if [ "$release_exists" = false ]; then
+            log_warn "No '${RELEASE}' release in namespace '${NAMESPACE}'. Nothing to do."
+            return 0
+        fi
+        log_info "Removing the '${RELEASE}' release from '${NAMESPACE}'..."
+        helm uninstall "$RELEASE" -n "$NAMESPACE"
+        if [ "$PURGE_DATA" = true ]; then
+            log_info "Removing persistent volumes..."
+            kubectl delete pvc -n "$NAMESPACE" --all --ignore-not-found
+        fi
+        state_set "$NAMESPACE"
+        rm -f "${VALUES_DIR}/${NAMESPACE}-"*.values
+        log_info "Platform removed. The '${NAMESPACE}' namespace was not deleted."
+        return 0
+    fi
+
+    [ "$release_exists" = true ] || {
+        log_warn "No '${RELEASE}' release in namespace '${NAMESPACE}'. Nothing to do."
+        return 0
+    }
+
+    log_info "Disabling: ${requested[*]} (keeping: ${remaining[*]})"
+    apply_release "${remaining[@]}"
+    state_set "$NAMESPACE" "${remaining[@]}"
+
+    if [ "$PURGE_DATA" = true ]; then
+        log_info "Removing persistent volumes for the disabled services..."
+        for svc in "${requested[@]}"; do
+            case "$svc" in
+                redis)
+                    kubectl delete pvc -n "$NAMESPACE" -l app.kubernetes.io/name=redis --ignore-not-found
+                    ;;
+                postgres)
+                    kubectl delete pvc -n "$NAMESPACE" -l app.kubernetes.io/name=postgresql --ignore-not-found
+                    ;;
+            esac
+        done
+    fi
+
+    log_info "Done. The '${NAMESPACE}' namespace was not deleted."
+}
+
+k8s_status() {
+    require_command "helm"
+    require_command "kubectl"
+    require_command "jq"
+
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+
+    if ! helm status "$RELEASE" -n "$NAMESPACE" &>/dev/null; then
+        log_warn "No '${RELEASE}' release in namespace '${NAMESPACE}'. Run 'ldx k8s up'."
+        exit 1
+    fi
+
+    echo "=== Helm release ==="
+    helm status "$RELEASE" -n "$NAMESPACE" | sed -n '1,12p'
+
+    echo ""
+    echo "=== Recorded services (${NAMESPACE}) ==="
+    local svc
+    for svc in $(state_get "$NAMESPACE"); do
+        echo "  ${svc}"
+    done
+
+    echo ""
+    echo "=== Enabled in the release ==="
+    helm get values "$RELEASE" -n "$NAMESPACE" -a -o json 2>/dev/null \
+        | jq -r 'to_entries[]
+                 | select((.value | type) == "object" and (.value.enabled? == true))
+                 | "  " + (.key | sub("Stack$"; ""))'
+
+    echo ""
+    echo "=== Pods in ${NAMESPACE} ==="
+    kubectl get pods -n "$NAMESPACE" -o wide 2>/dev/null || true
+}
+
+k8s_diff() {
+    require_command "helm"
+
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+
+    if ! helm plugin list 2>/dev/null | grep -q '^diff'; then
+        fatal "The 'helm-diff' plugin is required: helm plugin install https://github.com/databus23/helm-diff"
+    fi
+
+    local -a current=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && current+=("$line")
+    done < <(state_get "$NAMESPACE")
+    [ "${#current[@]}" -gt 0 ] || fatal "No services recorded for '${NAMESPACE}'. Run 'ldx k8s up --services <name, name>' first."
+
+    local -a set_args=()
+    while IFS= read -r line; do
+        set_args+=("$line")
+    done < <(set_flags_for "${current[@]}")
+
+    helm diff upgrade "$RELEASE" "$CHART_DIR" \
+        --namespace "$NAMESPACE" \
+        ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
+        "${set_args[@]}"
+}
+
+k8s_services() {
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+
+    local svc found=false
+    for svc in $(state_get "$NAMESPACE"); do
+        echo "$svc"
+        found=true
+    done
+    [ "$found" = true ] || log_info "No services recorded for namespace '${NAMESPACE}'."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        up)       k8s_up "$@" ;;
+        down)     k8s_down "$@" ;;
+        status)   k8s_status "$@" ;;
+        diff)     k8s_diff "$@" ;;
+        services) k8s_services "$@" ;;
+        help|-h|--help) show_help ;;
+        *)
+            log_error "Unknown subcommand: ${subcommand}"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
