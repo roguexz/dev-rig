@@ -60,6 +60,7 @@ show_help() {
   echo ""
   echo "CLI Management:"
   echo "  install       Symlink ldx into a local bin directory (use --link for the legacy flag; it is the default)"
+  echo "  completions   Regenerate the zsh completion (_ldx) into the shell function path"
   for entry in "${GROUP_TITLES[@]}"; do
     group="${entry%%:*}"
     title="${entry#*:}"
@@ -164,6 +165,11 @@ install_binaries() {
       echo -e "\n  export PATH=\"${target_dir}:\$PATH\"\n"
       ;;
   esac
+
+  # zsh completion: regenerate _ldx (scans bin/commands/ help metadata).
+  # Non-fatal: a broken completion must not fail the install.
+  "${LDX_HOME}/bin/gen-completions.sh" --install \
+    || log_warn "zsh completion generation failed; run 'ldx completions' manually."
 }
 
 if [ $# -lt 1 ]; then
@@ -178,6 +184,9 @@ case "$COMMAND" in
   install)
     install_binaries "$@"
     exit 0
+    ;;
+  completions)
+    exec "${LDX_HOME}/bin/gen-completions.sh" --install
     ;;
   --version|-v|version)
     ldx_version
