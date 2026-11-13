@@ -8,7 +8,10 @@ a pod in the Kubernetes cluster and exposes it via Traefik Ingress and an intern
 ### `ldx agentgateway install`
 
 This command installs agentgateway into the configured namespace (default `commons`, see
-[Configuration](../../docs/ldx.md#configuration)):
+[Configuration](../../docs/ldx.md#configuration)). The static deployment (ServiceAccount, PVC, Deployment, Service,
+Ingress) ships as the `agentgateway` subchart of `ldx-local-platform` (`ldx k8s up --services agentgateway`); the
+dynamic pieces stay CLI-owned — the gateway config ConfigMap (oMLX models + SSO policy merged in), the Vault Agent
+ConfigMap (one template per registered MCP tool), the runtime Secret, and the Vault role binding:
 
 1. **Service account**: Creates a dedicated `agentgateway` ServiceAccount (replacing the `default` SA), which is bound
    to a Vault role that grants the Vault Agent sidecar permission to read MCP credentials.

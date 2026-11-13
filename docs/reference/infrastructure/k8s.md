@@ -47,6 +47,7 @@ recorded names (one per line, for scripting). `diff` previews the next `up` (nee
 | `postgres`    | Bitnami PostgreSQL + pgvector   | `localhost:5432`, NodePort 30432 |
 | `otel`        | Grafana OTel LGTM (all-in-one)  | `https://otel.rd.localhost` (Grafana), OTLP `localhost:4317/4318` |
 | `vault` | hashicorp vault 0.34.1 (Vault 2.0.4): single-node + agent injector, auto-unseal post-apply | `https://vault.rd.localhost` |
+| `agentgateway` | agentgateway + Vault Agent sidecar (own subchart; config/models/secret stay CLI-owned) | `https://agentgateway.rd.localhost` (UI `/ui`, LLM `/v1`, MCP `/mcp`) |
 | `authelia` | Authelia OIDC provider (own subchart, keeps its namespace) | `https://auth.rd.localhost` (OIDC, WebAuthn) |
 | `certmanager` | cert-manager + mkcert CA (own release) | ClusterIssuer `mkcert-issuer` |
 
@@ -98,5 +99,4 @@ Anything the chart cannot express:
   reference them, the CLI supplies them.
 - **Dynamic state** - oMLX model sync, Vault unseal, MCP tool registration, port-forward helpers.
 
-The remaining services (agentgateway) are still driven imperatively, and `tls` is a host-side tool; `ldx <service> install` keeps
-working for them in the meantime.
+The remaining service (`tls`) is a host-side tool by design (mkcert, keychain, Traefik TLS store); `ldx tls` stays a plain CLI.
