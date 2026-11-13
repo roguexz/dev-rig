@@ -56,6 +56,13 @@ otelStack:
   # .oidc and image settings are supplied by 'ldx k8s up' (Authelia probe,
   # host secret store); override any of them with -f.
 
+autheliaStack:
+  enabled: false
+  # Core secrets, hashed OIDC client secrets, JWKS key and Traefik
+  # annotations are supplied by 'ldx k8s' (prehook runs 'ldx authelia
+  # prepare'); the subchart defaults keep its resources in namespace
+  # 'authelia' (namespaceOverride).
+
 vaultStack:
   enabled: false
   # Matches the pre-chart 'ldx vault setup' resource names (vault, vault-0,

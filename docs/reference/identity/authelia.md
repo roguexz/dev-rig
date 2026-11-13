@@ -25,21 +25,25 @@ after the initial password+enrollment setup.
 
 ### `ldx authelia install`
 
-Deploys Authelia into the `authelia` namespace:
+Deploys Authelia via the `ldx-local-platform` chart (`ldx k8s up --services authelia`; resources named
+`authelia*` in the configured namespace):
 
 1. **Secrets**: Generates JWT, storage, session, and OIDC HMAC secrets. Generates an RSA 2048-bit key for OIDC token
    signing. Generates OIDC client secrets for Vault, agentgateway, and Grafana. Host-side secrets are stored in the
    macOS Keychain as `ldx/authelia/*` entries (file fallback under `~/.cache/local-dev/secrets/` elsewhere; legacy
    cache files in `~/.cache/local-dev/authelia/` are imported on first read).
-2. **Bootstrap user**: Prompts for a bootstrap password (generated in non-interactive mode) and hashes it with
-   Argon2id. Creates a `users_database.yml` ConfigMap with the `admin` user.
-3. **Configuration**: Creates the main `configuration.yaml` ConfigMap with WebAuthn settings (`rp_id: rd.localhost`),
-   session cookies for `rd.localhost`, access control rules for all three apps, and three OIDC clients (vault,
-   agentgateway, grafana).
+2. **Bootstrap user**: Prompts for a bootstrap password (generated in non-interactive mode) and stores only its
+   Argon2id hash (`ldx/authelia/core_secrets/BOOTSTRAP_PASSWORD_HASH`), so re-applying the chart never resets the
+   credential. When migrating an imperative install, the hash is adopted from the running `authelia-users`
+   ConfigMap first.
+3. **Configuration**: The chart renders `configuration.yml` (WebAuthn, session cookies for `rd.localhost`, access
+   control rules, three OIDC clients with PBKDF2-hashed secrets, JWKS key) from values; the CLI supplies the dynamic
+   parts at apply time via `ldx authelia prepare` (an internal pre-apply hook).
 4. **Storage**: Creates a PersistentVolumeClaim (`authelia-data`, 1Gi) for the SQLite database.
 5. **Deployment**: Single replica with `Recreate` strategy (SQLite lock safety), `enableServiceLinks: false`,
    readiness/liveness probes on `/api/health`.
-6. **Ingress**: Traefik Ingress for `auth.rd.localhost` with TLS (uses the mkcert wildcard cert from `ldx tls`).
+6. **TLS & Ingress**: A cert-manager `Certificate` (`authelia-cert`, ClusterIssuer `mkcert-issuer`) feeds the pod's
+   TLS material; a Traefik Ingress serves `auth.rd.localhost`.
 
 After installation, run `ldx authelia enroll` for the one-time Touch ID enrollment.
 

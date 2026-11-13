@@ -50,13 +50,13 @@ show_help() {
 }
 
 services_supported() {
-    echo "redis, postgres, otel, vault, certmanager"
+    echo "redis, postgres, otel, vault, authelia, certmanager"
 }
 
 # Services owned by the main 'ldx' umbrella release (certmanager is a
 # separate release: it spans namespaces and cluster-scoped resources).
 main_services_supported() {
-    echo "redis, postgres, otel, vault"
+    echo "redis, postgres, otel, vault, authelia"
 }
 
 # Release-scoped service: the cert-manager chart lives in its own release
@@ -79,6 +79,7 @@ service_key() {
         postgres) echo "postgresqlStack" ;;
         otel)     echo "otelStack" ;;
         vault)    echo "vaultStack" ;;
+        authelia) echo "autheliaStack" ;;
         *)        return 1 ;;
     esac
 }
@@ -329,6 +330,56 @@ prehook_vault() {
     APPLY_VALUES+=(--values "$values_file")
 }
 
+# Pre-apply: Authelia keeps its own namespace; the CLI supplies the dynamic
+# values (core secrets, hashed OIDC client secrets, JWKS key, Traefik
+# annotations) from the host secret store via 'ldx authelia prepare'.
+# Legacy installs were kubectl-applied, so adopt their resources first.
+prehook_authelia() {
+    local ans
+    ans="$(ldx_namespace authelia)"
+    kubectl create namespace "$ans" --dry-run=client -o yaml | kubectl apply -f -
+
+    adopt_resources "$RELEASE" "$NAMESPACE" \
+        "deployment/authelia@${ans}" "service/authelia@${ans}" "ingress/authelia@${ans}" \
+        "configmap/authelia-config@${ans}" "configmap/authelia-users@${ans}" \
+        "secret/authelia-secrets@${ans}" "pvc/authelia-data@${ans}" \
+        "certificate/authelia-cert@${ans}"
+
+    local values_file
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-authelia.XXXXXX.yaml")"
+    TMP_FILES+=("$values_file")
+    if ! "${LDX_HOME}/bin/ldx" authelia prepare > "$values_file"; then
+        fatal "Failed to render Authelia values ('ldx authelia prepare')."
+    fi
+    chmod 600 "$values_file"
+    # ('ldx authelia prepare' emits namespaceOverride inside its single
+    # autheliaStack block; appending a second block here would override it.)
+    APPLY_VALUES+=(--values "$values_file")
+
+    # Pre-apply the rendered subchart. Authelia mounts its ConfigMap/Secret as
+    # files at pod creation; pods scheduled during the helm apply must mount
+    # the NEW config, which they only do once it exists on the API server.
+    # Server-side apply with --force-conflicts takes the fields back from any
+    # previous (even rolled-back) state; the helm apply that follows is then a
+    # no-op for these resources.
+    helm template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+        --values "$CHART_DIR/values.yaml" --values "$values_file" \
+        --set autheliaStack.enabled=true 2>/dev/null \
+        | kubectl apply --server-side --force-conflicts -f - >/dev/null \
+        || log_warn "Authelia pre-apply failed; the helm apply will retry."
+}
+
+# Post-apply: the cert-manager Certificate must be Ready (the pod mounts its
+# TLS secret) and the deployment must roll out.
+posthook_authelia() {
+    local ans
+    ans="$(ldx_namespace authelia)"
+    kubectl wait --for=condition=Ready "certificate/authelia-cert" -n "$ans" --timeout=60s &>/dev/null \
+        || log_warn "TLS certificate not ready yet (cert-manager may be catching up)."
+    kubectl rollout status deployment/authelia -n "$ans" --timeout=120s \
+        || log_warn "Authelia rollout did not finish in time; check 'ldx authelia status'."
+}
+
 # Post-apply: vault must become Available before unsealing; a fresh (never
 # initialized) vault is left for 'ldx vault setup', an initialized-but-sealed
 # vault is unsealed from the host secret store.
@@ -425,7 +476,7 @@ parse_common_options() {
             *)
                 # Bare words are service names: 'up redis postgres'.
                 case "$1" in
-                    redis|postgres|otel|vault|certmanager)
+                    redis|postgres|otel|vault|authelia|certmanager)
                         SERVICES_CSV="${SERVICES_CSV:+${SERVICES_CSV},}$1"
                         shift
                         ;;
@@ -449,7 +500,7 @@ parse_services() {
         service="${service//[[:space:]]/}"
         [ -n "$service" ] || continue
         case "$service" in
-            redis|postgres|otel|vault|certmanager) ;;
+            redis|postgres|otel|vault|authelia|certmanager) ;;
             *) fatal "Unknown service: ${service} (supported: $(services_supported))" ;;
         esac
         local seen
@@ -596,8 +647,9 @@ k8s_up() {
             [ "$service" = "postgres" ] && ensure_postgres_image
             adopt_legacy "$service" "$NAMESPACE"
             case "$service" in
-                otel)  prehook_otel ;;
-                vault) prehook_vault ;;
+                otel)     prehook_otel ;;
+                vault)    prehook_vault ;;
+                authelia) prehook_authelia ;;
             esac
         done
 
@@ -612,7 +664,8 @@ k8s_up() {
 
     for service in "${main_desired[@]}"; do
         case "$service" in
-            vault) posthook_vault ;;
+            vault)    posthook_vault ;;
+            authelia) posthook_authelia ;;
         esac
     done
 
@@ -625,6 +678,7 @@ k8s_up() {
             postgres)    log_info "PostgreSQL    -> localhost:5432 (postgres/changeit)" ;;
             otel)        log_info "Grafana/LGTM  -> https://otel.rd.localhost (OTLP: localhost:4317/4318)" ;;
             vault)       log_info "Vault         -> https://vault.rd.localhost (UI + API)" ;;
+            authelia)    log_info "Authelia      -> https://auth.rd.localhost (OIDC + WebAuthn)" ;;
             certmanager) log_info "cert-manager  -> release '${CM_RELEASE}' in namespace '${CM_NAMESPACE}', ClusterIssuer 'mkcert-issuer'" ;;
         esac
     done
@@ -727,6 +781,9 @@ k8s_down() {
                     ;;
                 vault)
                     kubectl delete pvc -n "$NAMESPACE" data-vault-0 --ignore-not-found
+                    ;;
+                authelia)
+                    kubectl delete pvc -n "$(ldx_namespace authelia)" authelia-data --ignore-not-found
                     ;;
             esac
         done

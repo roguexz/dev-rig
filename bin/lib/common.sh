@@ -240,8 +240,16 @@ ldx_secret_put() {
     local ns="$1" key="$2" value="$3"
     case "$(ldx_secret_backend)" in
         keychain)
+            # The security CLI mangles values with newlines or a leading dash
+            # (PEM blocks: "-----BEGIN ..."), so such values are stored with a
+            # transparent "b64:" envelope; ldx_secret_get decodes it. Plain
+            # values stay byte-identical for compatibility.
+            local stored="$value"
+            case "$value" in
+                *$'\n'*|-$*) stored="b64:$(printf '%s' "$value" | base64 | tr -d '\n')" ;;
+            esac
             security add-generic-password -a "$USER" -s "$(ldx_secret_service "$ns" "$key")" \
-                -l "ldx secret ${ns}/${key}" -w "$value" -U >/dev/null
+                -l "ldx secret ${ns}/${key}" -w "$stored" -U >/dev/null
             ;;
         file)
             mkdir -p "${CACHE_DIR}/secrets/${ns}"
@@ -256,7 +264,12 @@ ldx_secret_get() {
     local ns="$1" key="$2"
     case "$(ldx_secret_backend)" in
         keychain)
-            security find-generic-password -s "$(ldx_secret_service "$ns" "$key")" -w 2>/dev/null
+            local v
+            v=$(security find-generic-password -s "$(ldx_secret_service "$ns" "$key")" -w 2>/dev/null) || return 1
+            case "$v" in
+                b64:*) printf '%s\n' "${v#b64:}" | base64 -d ;;
+                *)     printf '%s\n' "$v" ;;
+            esac
             ;;
         file)
             [ -f "${CACHE_DIR}/secrets/${ns}/${key}" ] || return 1

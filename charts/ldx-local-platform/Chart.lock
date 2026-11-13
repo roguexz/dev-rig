@@ -11,5 +11,8 @@ dependencies:
 - name: vault
   repository: https://helm.releases.hashicorp.com
   version: 0.34.1
-digest: sha256:da2fe5da32af9241fde9de88db5f962a2b9974291b73679bc3c2ff4e04cd95b6
-generated: "2026-11-12T22:32:39.374533-08:00"
+- name: authelia
+  repository: file://charts/authelia
+  version: 0.1.0
+digest: sha256:19d1cd48361f504e822141ca022458dc449133f26dd50241c7f43110a8bd6021
+generated: "2026-11-12T23:07:20.935803-08:00"

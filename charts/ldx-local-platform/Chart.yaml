@@ -31,3 +31,8 @@ dependencies:
     version: "0.34.1"
     repository: "https://helm.releases.hashicorp.com"
     condition: vaultStack.enabled
+  - name: authelia
+    alias: autheliaStack
+    version: 0.1.0
+    repository: "file://charts/authelia"
+    condition: autheliaStack.enabled
