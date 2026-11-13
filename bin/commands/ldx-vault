@@ -15,6 +15,13 @@ VAULT_CHART_VERSION="0.34.1"
 
 source "${LDX_HOME}/bin/lib/common.sh"
 
+# Vault operator init JSON (unseal keys + root token) lives in the host
+# secret store as ldx/vault/init_json. Legacy installs kept it in
+# ${VAULT_DIR}/keys.json; it is imported on first read and the file removed.
+vault_keys_json() {
+    ldx_secret_get_kv vault "${VAULT_DIR}/keys.json" init_json
+}
+
 # Helm values file that defines this rig's Vault deployment. Shared by setup
 # and upgrade so an upgrade never relies on --reuse-values: chart 0.34.x added
 # new value sections (server.httproute) whose templates blow up when the old
@@ -203,13 +210,15 @@ setup_vault() {
     sleep 5
 
     log_info "Initializing Vault..."
-    if [ -f "${VAULT_DIR}/keys.json" ]; then
-        log_warn "Vault keys already exist at ${VAULT_DIR}/keys.json. Skipping initialization."
-        log_info "If you need to re-initialize, please remove the file and run setup again."
+    if ldx_secret_has vault init_json || [ -f "${VAULT_DIR}/keys.json" ]; then
+        log_warn "Vault keys already exist (ldx/vault/init_json). Skipping initialization."
+        log_info "If you need to re-initialize, delete the stored secret first (backend: $(ldx_secret_backend))."
     else
         init_dirs
-        kubectl exec -n "$namespace" vault-0 -- vault operator init -format=json > "${VAULT_DIR}/keys.json"
-        log_info "Vault initialized. Unseal keys and root token saved to ${VAULT_DIR}/keys.json"
+        local init_json
+        init_json=$(kubectl exec -n "$namespace" vault-0 -- vault operator init -format=json)
+        ldx_secret_put vault init_json "$init_json"
+        log_info "Vault initialized. Unseal keys and root token stored in $(ldx_secret_backend) storage (ldx/vault/init_json)"
     fi
 
     unseal_vault
@@ -234,9 +243,9 @@ unseal_vault() {
     local namespace
     namespace="$(ldx_namespace vault)"
 
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
-        fatal "Vault keys not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
-    fi
+    local keys_json
+    keys_json=$(vault_keys_json 2>/dev/null) \
+        || fatal "Vault keys not found (ldx/vault/init_json). Run 'setup' first."
 
     local sealed
     sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
@@ -247,7 +256,7 @@ unseal_vault() {
 
     log_info "Unsealing Vault..."
 
-    jq -r .unseal_keys_b64[] "${VAULT_DIR}/keys.json" | while read -r key; do
+    jq -r .unseal_keys_b64[] <<<"$keys_json" | while read -r key; do
         kubectl exec -n "$namespace" vault-0 -- vault operator unseal "$key"
     done
 
@@ -262,13 +271,12 @@ configure_default_user() {
     namespace="$(ldx_namespace vault)"
     log_info "Configuring admin user and authentication methods..."
 
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
+    local keys_json root_token
+    keys_json=$(vault_keys_json 2>/dev/null) || {
         log_warn "Root token not found. Skipping user configuration."
         return
-    fi
-
-    local root_token
-    root_token=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+    }
+    root_token=$(jq -r .root_token <<<"$keys_json")
 
     # We use a temporary shell script executed inside the pod to keep things clean
     cat <<EOF | kubectl exec -i -n "$namespace" vault-0 -- sh
@@ -374,10 +382,10 @@ vault_cli() {
 # Retries for up to 60 seconds to handle the case where Traefik isn't ready yet
 # (e.g., during 'setup' when the ingress is still being configured).
 require_unsealed_vault() {
-    if [ ! -f "${VAULT_DIR}/keys.json" ]; then
-        fatal "Vault root token not found at ${VAULT_DIR}/keys.json. Run 'setup' first."
-    fi
-    VAULT_ROOT_TOKEN=$(jq -r .root_token "${VAULT_DIR}/keys.json")
+    local keys_json
+    keys_json=$(vault_keys_json 2>/dev/null) \
+        || fatal "Vault root token not found (ldx/vault/init_json). Run 'setup' first."
+    VAULT_ROOT_TOKEN=$(jq -r .root_token <<<"$keys_json")
 
     local sealed="" attempts=0
     while [ $attempts -lt 12 ]; do
@@ -983,6 +991,7 @@ uninstall_vault() {
 
     log_info "Removing local Vault keys..."
     rm -rf "${VAULT_DIR}"
+    ldx_secret_delete vault init_json
 
     log_info "Vault uninstall complete. The '${namespace}' namespace was not deleted."
 }

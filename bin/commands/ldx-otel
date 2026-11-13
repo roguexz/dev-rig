@@ -35,8 +35,8 @@ install_otel() {
     local grafana_client_secret=""
     local oidc_enabled=false
 
-    if [ "$authelia_phase" = "Running" ] && [ -f "$authelia_secrets_file" ]; then
-        grafana_client_secret=$(grep "^GRAFANA_CLIENT_SECRET=" "$authelia_secrets_file" | cut -d= -f2-)
+    if [ "$authelia_phase" = "Running" ]; then
+        grafana_client_secret=$(ldx_secret_get_kv authelia/client_secrets "$authelia_secrets_file" GRAFANA_CLIENT_SECRET 2>/dev/null) || true
         if [ -n "$grafana_client_secret" ]; then
             oidc_enabled=true
         fi

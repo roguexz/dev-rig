@@ -31,7 +31,7 @@ This command installs agentgateway into the configured namespace (default `commo
 7. **Deployment**: Deploys the pinned agentgateway image (`cr.agentgateway.dev/agentgateway:v1.7.0`) with the config
    mounted read-only at `/etc/agentgateway/config.yaml`.
 8. **Client API key**: Ensures the gateway's virtual client API key exists (generated once as `agw-<48 hex>`, cached
-   at `~/.cache/local-dev/agentgateway/api_key` with mode `0600`, stored in the Secret under `AGENTGATEWAY_API_KEY`)
+   in the host secret store as `ldx/agentgateway/api_key`, stored in the Secret under `AGENTGATEWAY_API_KEY`)
    and wires the `llm.policies.apiKey` policy into the config so every LLM request must present it - see
    [`api-key`](#ldx-agentgateway-api-key).
 9. **Service & Ingress Exposure**: Exposes the gateway via Traefik Ingress (`https://agentgateway.rd.localhost`) and
@@ -73,11 +73,11 @@ Manages the gateway's virtual client API key - the credential clients must prese
   the `/mcp` route (`routes[].policies.apiKey`) by `install` and `sync-omlx`. Requests to `/v1/...` or `/mcp` without a
   valid key get `401`. The UI and its OIDC flow are not affected.
 - **Generation**: On first use, a key `agw-<48 hex>` is generated, written to
-  `~/.cache/local-dev/agentgateway/api_key` (mode `0600`), and stored in the `agentgateway-secrets` Secret under
+  the host secret store as `ldx/agentgateway/api_key`, and stored in the `agentgateway-secrets` Secret under
   `AGENTGATEWAY_API_KEY`. The config references it as `$AGENTGATEWAY_API_KEY` (expanded by agentgateway at load time),
   so the Secret is the canonical copy.
 - **Reuse and rotation**: Re-running the command is idempotent (reuses the cached key, repairs the Secret/config if
-  they drifted). Delete the cache file first to generate a fresh key. `--dry-run` prints without applying.
+  they drifted). Delete the `ldx/agentgateway/api_key` secret first to generate a fresh key. `--dry-run` prints without applying.
 
 Clients such as `ldx opencode sync` pick the key up from the cache file or the Secret automatically, and configure it
 for both the LLM provider and the MCP endpoint.
@@ -87,7 +87,7 @@ for both the LLM provider and the MCP endpoint.
 Enables Authelia (deployed by `ldx authelia install`) as the OIDC identity provider for the agentgateway UI:
 
 1. Checks that Authelia is running and its OIDC discovery endpoint responds.
-2. Reads the agentgateway client secret from the Authelia cache (`~/.cache/local-dev/authelia/client_secrets`).
+2. Reads the agentgateway client secret from the Authelia secret store (`ldx/authelia/client_secrets/*`).
 3. Stores the client secret and OIDC configuration in the `agentgateway-secrets` Secret.
 4. Updates the gateway's `ui.policies.oidc` block to point at Authelia's endpoints.
 5. Restarts the gateway.

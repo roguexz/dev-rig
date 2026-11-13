@@ -430,11 +430,10 @@ sync_opencode() {
     fi
 
     local client_key=""
-    if [ -f "$AGENTGATEWAY_KEY_CACHE" ]; then
-        client_key=$(head -n1 "$AGENTGATEWAY_KEY_CACHE" | tr -d '[:space:]')
-    else
-        fatal "No cached gateway API key at ${AGENTGATEWAY_KEY_CACHE}. The gateway enforces API keys; run 'ldx agentgateway api-key' (or 'ldx agentgateway sync-omlx') first."
-    fi
+    client_key=$(
+        ldx_secret_get_kv agentgateway "$AGENTGATEWAY_KEY_CACHE" api_key 2>/dev/null
+    ) || true
+    [ -n "$client_key" ] || fatal "No cached gateway API key (ldx/agentgateway/api_key). The gateway enforces API keys; run 'ldx agentgateway api-key' (or 'ldx agentgateway sync-omlx') first."
 
     local result pruned had_comments model_ref
     result=$(merge_config "$manifest" "$default_id" "$keep_stale" "$client_key") || fatal "Failed to merge opencode config."

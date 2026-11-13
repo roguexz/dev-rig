@@ -213,6 +213,96 @@ init_dirs() {
     mkdir -p "${VAULT_DIR}"
 }
 
+# --- Host secret storage ------------------------------------------------------
+# Small host-side secrets (OIDC client secrets, API keys, Vault unseal keys)
+# are stored in the macOS Keychain as generic passwords named
+# "ldx/<namespace>/<key>" (account: $USER). On non-macOS hosts, or with
+# LDX_SECRETS_BACKEND=file, they fall back to files under
+# ${CACHE_DIR}/secrets/<namespace>/<key> (mode 0600).
+#
+# ldx_secret_get_kv migrates legacy KEY=VALUE cache files: on the first read
+# of a key, every line of the file is imported into the backend and the file
+# is removed.
+ldx_secret_backend() {
+    if [ "${LDX_SECRETS_BACKEND:-}" = "file" ]; then
+        echo "file"
+    elif [ "$(uname -s)" = "Darwin" ] && command -v security &>/dev/null; then
+        echo "keychain"
+    else
+        echo "file"
+    fi
+}
+
+ldx_secret_service() { printf 'ldx/%s/%s' "$1" "$2"; }
+
+# Usage: ldx_secret_put <namespace> <key> <value>
+ldx_secret_put() {
+    local ns="$1" key="$2" value="$3"
+    case "$(ldx_secret_backend)" in
+        keychain)
+            security add-generic-password -a "$USER" -s "$(ldx_secret_service "$ns" "$key")" \
+                -l "ldx secret ${ns}/${key}" -w "$value" -U >/dev/null
+            ;;
+        file)
+            mkdir -p "${CACHE_DIR}/secrets/${ns}"
+            printf '%s' "$value" > "${CACHE_DIR}/secrets/${ns}/${key}"
+            chmod 600 "${CACHE_DIR}/secrets/${ns}/${key}"
+            ;;
+    esac
+}
+
+# Usage: ldx_secret_get <namespace> <key>   (echoes value; rc 1 if absent)
+ldx_secret_get() {
+    local ns="$1" key="$2"
+    case "$(ldx_secret_backend)" in
+        keychain)
+            security find-generic-password -s "$(ldx_secret_service "$ns" "$key")" -w 2>/dev/null
+            ;;
+        file)
+            [ -f "${CACHE_DIR}/secrets/${ns}/${key}" ] || return 1
+            cat "${CACHE_DIR}/secrets/${ns}/${key}"
+            ;;
+    esac
+}
+
+# Usage: ldx_secret_has <namespace> <key>
+ldx_secret_has() {
+    local ns="$1" key="$2"
+    ldx_secret_get "$ns" "$key" >/dev/null 2>&1
+}
+
+# Usage: ldx_secret_delete <namespace> <key>   (ignores absence)
+ldx_secret_delete() {
+    local ns="$1" key="$2"
+    case "$(ldx_secret_backend)" in
+        keychain)
+            security delete-generic-password -s "$(ldx_secret_service "$ns" "$key")" >/dev/null 2>&1 || true
+            ;;
+        file)
+            rm -f "${CACHE_DIR}/secrets/${ns}/${key}"
+            ;;
+    esac
+}
+
+# Usage: ldx_secret_get_kv <namespace> <legacy_file> <key>
+# Reads <key> from the backend. If the backend has no entry yet and
+# <legacy_file> (KEY=VALUE lines, the pre-Keychain cache format) exists,
+# imports every line first and removes the file.
+ldx_secret_get_kv() {
+    local ns="$1" legacy_file="$2" key="$3"
+    if ! ldx_secret_has "$ns" "$key" && [ -f "$legacy_file" ]; then
+        local line
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -n "$line" ] || continue
+            [ "${line#*=}" != "$line" ] || continue
+            ldx_secret_put "$ns" "${line%%=*}" "${line#*=}"
+        done < "$legacy_file"
+        rm -f "$legacy_file"
+        log_info "Migrated ${legacy_file} into $(ldx_secret_backend) storage (ldx/${ns}/*)." >&2
+    fi
+    ldx_secret_get "$ns" "$key"
+}
+
 # --- Wrapper Functions ---
 # By defining these as functions, they will intercept calls to 'kubectl' and 'helm'
 # within the scripts that source this file, automatically applying the context.

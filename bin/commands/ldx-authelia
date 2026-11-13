@@ -19,12 +19,15 @@ AUTHELIA_PORT=9091
 # Cache directory for Authelia state
 AUTHELIA_DIR="${CACHE_DIR}/authelia"
 
-# OIDC client secrets are stored here (mode 0600) so the sso commands can read them
+# OIDC client secrets are kept in the host secret store (see ldx_secret_put;
+# pre-Keychain installs cached them in this file, imported on first read)
 AUTHELIA_SECRETS_FILE="${AUTHELIA_DIR}/client_secrets"
+AUTHELIA_SECRETS_NS="authelia/client_secrets"
 
-# Core secrets are stored here (mode 0600) and reused across runs so the
+# Core secrets are kept in the host secret store and reused across runs so the
 # database encryption key stays stable (changing it invalidates the existing DB).
 AUTHELIA_CORE_SECRETS_FILE="${AUTHELIA_DIR}/core_secrets"
+AUTHELIA_CORE_SECRETS_NS="authelia/core_secrets"
 
 # --- Commands ------------------------------------------------------------------
 
@@ -81,8 +84,13 @@ generate_jwks_key() {
 ensure_client_secrets() {
     mkdir -p "$AUTHELIA_DIR"
 
+    if ldx_secret_has "$AUTHELIA_SECRETS_NS" VAULT_CLIENT_SECRET; then
+        log_info "Reusing existing OIDC client secrets (ldx/${AUTHELIA_SECRETS_NS}/*)"
+        return
+    fi
     if [ -f "$AUTHELIA_SECRETS_FILE" ]; then
-        log_info "Reusing existing client secrets from ${AUTHELIA_SECRETS_FILE}"
+        ldx_secret_get_kv "$AUTHELIA_SECRETS_NS" "$AUTHELIA_SECRETS_FILE" VAULT_CLIENT_SECRET >/dev/null
+        log_info "Reusing existing OIDC client secrets (migrated from ${AUTHELIA_SECRETS_FILE})"
         return
     fi
 
@@ -91,30 +99,30 @@ ensure_client_secrets() {
     local agentgateway_secret=$(generate_secret 32)
     local grafana_secret=$(generate_secret 32)
 
-    cat > "$AUTHELIA_SECRETS_FILE" <<EOF
-VAULT_CLIENT_SECRET=${vault_secret}
-AGENTGATEWAY_CLIENT_SECRET=${agentgateway_secret}
-GRAFANA_CLIENT_SECRET=${grafana_secret}
-EOF
-    chmod 600 "$AUTHELIA_SECRETS_FILE"
-    log_info "Client secrets written to ${AUTHELIA_SECRETS_FILE} (mode 0600)"
+    ldx_secret_put "$AUTHELIA_SECRETS_NS" VAULT_CLIENT_SECRET "$vault_secret"
+    ldx_secret_put "$AUTHELIA_SECRETS_NS" AGENTGATEWAY_CLIENT_SECRET "$agentgateway_secret"
+    ldx_secret_put "$AUTHELIA_SECRETS_NS" GRAFANA_CLIENT_SECRET "$grafana_secret"
+    log_info "OIDC client secrets stored in $(ldx_secret_backend) storage (ldx/${AUTHELIA_SECRETS_NS}/*)"
 }
 
-# Read a client secret from the cache
+# Read a client secret from the secret store
 get_client_secret() {
     local name="$1"
-    if [ ! -f "$AUTHELIA_SECRETS_FILE" ]; then
-        ensure_client_secrets
-    fi
-    grep "^${name}=" "$AUTHELIA_SECRETS_FILE" | cut -d= -f2-
+    ldx_secret_has "$AUTHELIA_SECRETS_NS" "$name" || ensure_client_secrets
+    ldx_secret_get_kv "$AUTHELIA_SECRETS_NS" "$AUTHELIA_SECRETS_FILE" "$name"
 }
 
 # Ensure core secrets exist (generated once, cached so the DB key stays stable)
 ensure_core_secrets() {
     mkdir -p "$AUTHELIA_DIR"
 
+    if ldx_secret_has "$AUTHELIA_CORE_SECRETS_NS" JWT_SECRET; then
+        log_info "Reusing existing Authelia core secrets (ldx/${AUTHELIA_CORE_SECRETS_NS}/*)"
+        return
+    fi
     if [ -f "$AUTHELIA_CORE_SECRETS_FILE" ]; then
-        log_info "Reusing existing core secrets from ${AUTHELIA_CORE_SECRETS_FILE}"
+        ldx_secret_get_kv "$AUTHELIA_CORE_SECRETS_NS" "$AUTHELIA_CORE_SECRETS_FILE" JWT_SECRET >/dev/null
+        log_info "Reusing existing Authelia core secrets (migrated from ${AUTHELIA_CORE_SECRETS_FILE})"
         return
     fi
 
@@ -124,23 +132,18 @@ ensure_core_secrets() {
     local session_secret=$(generate_secret 32)
     local oidc_hmac_secret=$(generate_secret 32)
 
-    cat > "$AUTHELIA_CORE_SECRETS_FILE" <<EOF
-JWT_SECRET=${jwt_secret}
-STORAGE_KEY=${storage_key}
-SESSION_SECRET=${session_secret}
-OIDC_HMAC_SECRET=${oidc_hmac_secret}
-EOF
-    chmod 600 "$AUTHELIA_CORE_SECRETS_FILE"
-    log_info "Core secrets written to ${AUTHELIA_CORE_SECRETS_FILE} (mode 0600)"
+    ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" JWT_SECRET "$jwt_secret"
+    ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" STORAGE_KEY "$storage_key"
+    ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" SESSION_SECRET "$session_secret"
+    ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" OIDC_HMAC_SECRET "$oidc_hmac_secret"
+    log_info "Authelia core secrets stored in $(ldx_secret_backend) storage (ldx/${AUTHELIA_CORE_SECRETS_NS}/*)"
 }
 
-# Read a core secret from the cache
+# Read a core secret from the secret store
 get_core_secret() {
     local name="$1"
-    if [ ! -f "$AUTHELIA_CORE_SECRETS_FILE" ]; then
-        ensure_core_secrets
-    fi
-    grep "^${name}=" "$AUTHELIA_CORE_SECRETS_FILE" | cut -d= -f2-
+    ldx_secret_has "$AUTHELIA_CORE_SECRETS_NS" "$name" || ensure_core_secrets
+    ldx_secret_get_kv "$AUTHELIA_CORE_SECRETS_NS" "$AUTHELIA_CORE_SECRETS_FILE" "$name"
 }
 
 
@@ -314,11 +317,25 @@ uninstall_authelia() {
     kubectl delete namespace "$AUTHELIA_NAMESPACE" --ignore-not-found
 
     # Clean up local secrets (optional - ask the user)
-    if [ -d "$AUTHELIA_DIR" ] && [ -t 0 ]; then
-        read -rp "Remove local cached secrets and keys from ${AUTHELIA_DIR}? (y/N) " confirm
+    local has_local_secrets=false
+    if [ -d "$AUTHELIA_DIR" ]; then has_local_secrets=true; fi
+    if ldx_secret_has "$AUTHELIA_SECRETS_NS" VAULT_CLIENT_SECRET \
+       || ldx_secret_has "$AUTHELIA_CORE_SECRETS_NS" JWT_SECRET; then
+        has_local_secrets=true
+    fi
+
+    if [ "$has_local_secrets" = true ] && [ -t 0 ]; then
+        read -rp "Remove local cached secrets and keys (cache dir and $(ldx_secret_backend) entries)? (y/N) " confirm
         if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
             rm -rf "$AUTHELIA_DIR"
-            log_info "Removed local cache directory ${AUTHELIA_DIR}"
+            local key
+            for key in VAULT_CLIENT_SECRET AGENTGATEWAY_CLIENT_SECRET GRAFANA_CLIENT_SECRET; do
+                ldx_secret_delete "$AUTHELIA_SECRETS_NS" "$key"
+            done
+            for key in JWT_SECRET STORAGE_KEY SESSION_SECRET OIDC_HMAC_SECRET; do
+                ldx_secret_delete "$AUTHELIA_CORE_SECRETS_NS" "$key"
+            done
+            log_info "Removed local cache directory ${AUTHELIA_DIR} and ldx/${AUTHELIA_SECRETS_NS}, ldx/${AUTHELIA_CORE_SECRETS_NS} entries"
         fi
     fi
 

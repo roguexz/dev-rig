@@ -28,8 +28,9 @@ after the initial password+enrollment setup.
 Deploys Authelia into the `authelia` namespace:
 
 1. **Secrets**: Generates JWT, storage, session, and OIDC HMAC secrets. Generates an RSA 2048-bit key for OIDC token
-   signing. Generates and caches OIDC client secrets for Vault, agentgateway, and Grafana (mode `0600`, stored at
-   `~/.cache/local-dev/authelia/client_secrets`).
+   signing. Generates OIDC client secrets for Vault, agentgateway, and Grafana. Host-side secrets are stored in the
+   macOS Keychain as `ldx/authelia/*` entries (file fallback under `~/.cache/local-dev/secrets/` elsewhere; legacy
+   cache files in `~/.cache/local-dev/authelia/` are imported on first read).
 2. **Bootstrap user**: Prompts for a bootstrap password (generated in non-interactive mode) and hashes it with
    Argon2id. Creates a `users_database.yml` ConfigMap with the `admin` user.
 3. **Configuration**: Creates the main `configuration.yaml` ConfigMap with WebAuthn settings (`rp_id: rd.localhost`),

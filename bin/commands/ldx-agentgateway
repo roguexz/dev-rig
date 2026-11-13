@@ -670,7 +670,8 @@ uninstall_agentgateway() {
         done <<< "$tools"
     fi
 
-    # The virtual client key died with the Secret; drop the stale local cache.
+    # The virtual client key died with the Secret; drop the local cache entry.
+    ldx_secret_delete agentgateway api_key
     rm -f "$AGENTGATEWAY_KEY_CACHE"
 
     log_info "agentgateway uninstall complete. The '${namespace}' namespace was not deleted."
@@ -925,11 +926,10 @@ ensure_api_key() {
         log_info "Generated a new virtual API key (stored in Secret '${AGENTGATEWAY_SECRET}')."
     fi
 
-    # Cache for local harnesses (opencode). Restrict perms: it's a bearer token.
-    mkdir -p "$(dirname "$AGENTGATEWAY_KEY_CACHE")"
-    umask 077
-    printf '%s\n' "$key" > "$AGENTGATEWAY_KEY_CACHE"
-    chmod 600 "$AGENTGATEWAY_KEY_CACHE"
+    # Cache for local harnesses (opencode) in the host secret store. The
+    # legacy cache file is removed on migration; it's a bearer token.
+    ldx_secret_put agentgateway api_key "$key"
+    rm -f "$AGENTGATEWAY_KEY_CACHE"
 
     AGENTGATEWAY_API_KEY="$key"
 }
@@ -978,15 +978,15 @@ enable_api_key() {
     if [ "$existed" = true ]; then
         log_info "Reusing existing virtual API key."
     fi
-    log_info "Cached key at ${AGENTGATEWAY_KEY_CACHE} (mode 600)."
+    log_info "Cached key in $(ldx_secret_backend) storage as ldx/agentgateway/api_key."
 
     apply_config
     rollout_agentgateway
 
     log_info "API key is enforced on LLM routes (llm.policies.apiKey.mode=strict)."
     log_info "Virtual key stored in Secret '${AGENTGATEWAY_SECRET}' (${AGENTGATEWAY_API_KEY_NAME})"
-    log_info "and cached at ${AGENTGATEWAY_KEY_CACHE}; clients send it as"
-    log_info "'Authorization: Bearer \$(cat ${AGENTGATEWAY_KEY_CACHE})'."
+    log_info "and cached as ldx/agentgateway/api_key; clients send it as"
+    log_info "'Authorization: Bearer \$(ldx agentgateway api-key print)'."
     log_info "Sync it into opencode with: ldx opencode sync"
 }
 
@@ -999,14 +999,15 @@ sso_agentgateway() {
     require_command "jq"
     require_command "curl"
 
-    # Read the agentgateway client secret from the Authelia cache (created by 'ldx authelia install')
-    if [ ! -f "$AUTHELIA_SECRETS_FILE" ]; then
-        fatal "Authelia client secrets not found at ${AUTHELIA_SECRETS_FILE}. Run 'ldx authelia install' first."
-    fi
+    # Read the agentgateway client secret from the Authelia secret store
+    # (populated by 'ldx authelia install'; migrates the legacy cache file).
     local agentgateway_client_secret
-    agentgateway_client_secret=$(grep "^AGENTGATEWAY_CLIENT_SECRET=" "$AUTHELIA_SECRETS_FILE" | cut -d= -f2-)
+    agentgateway_client_secret=$(
+        ldx_secret_get_kv authelia/client_secrets "$AUTHELIA_SECRETS_FILE" \
+            AGENTGATEWAY_CLIENT_SECRET 2>/dev/null
+    ) || true
     if [ -z "$agentgateway_client_secret" ]; then
-        fatal "AGENTGATEWAY_CLIENT_SECRET not found in ${AUTHELIA_SECRETS_FILE}."
+        fatal "AGENTGATEWAY_CLIENT_SECRET not found. Run 'ldx authelia install' first."
     fi
 
     # Check that Authelia is running and its OIDC discovery endpoint responds

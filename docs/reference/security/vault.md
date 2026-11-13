@@ -46,7 +46,8 @@ The command materializes the user's Vault identity entity and writes the metadat
 `setup` does the same for the built-in `admin` user (`Administrator` / `admin@rd.localhost`).
 
 It drives Vault with the `vault` CLI over the ingress (`https://vault.rd.localhost`), authenticating with the root token
-cached in `~/.cache/local-dev/vault/keys.json`; that host is on the mkcert wildcard `ldx tls` issues (`*.rd.localhost`) and
+stored in the host secret store as `ldx/vault/init_json` (macOS Keychain; legacy
+`~/.cache/local-dev/vault/keys.json` is imported on first read); that host is on the mkcert wildcard `ldx tls` issues (`*.rd.localhost`) and
 installs into the system trust store, so the CLI verifies it without `-k`. If the user has no identity entity yet (they never
 logged in), the command creates one and binds its `userpass` alias, so the first login maps onto that entity. Existing
 metadata keys and the entity name Vault assigned are preserved.
