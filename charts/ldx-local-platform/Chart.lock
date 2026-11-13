@@ -1,21 +1,21 @@
 dependencies:
 - name: redis
-  repository: file://charts/redis
+  repository: file://../redis
   version: 0.1.0
 - name: postgresql
-  repository: file://charts/postgresql
+  repository: file://../postgresql
   version: 0.1.0
 - name: otel
-  repository: file://charts/otel
+  repository: file://../otel
   version: 0.1.0
 - name: vault
   repository: https://helm.releases.hashicorp.com
   version: 0.34.1
 - name: authelia
-  repository: file://charts/authelia
+  repository: file://../authelia
   version: 0.1.0
 - name: agentgateway
-  repository: file://charts/agentgateway
+  repository: file://../agentgateway
   version: 0.1.0
-digest: sha256:ca97ff205ca98505213ff3ef8f9d423d32eaafa74f11b38d1b15a2531bd6df57
-generated: "2026-11-13T09:39:33.070925-08:00"
+digest: sha256:9283e5aa3820b5cd022d46716e4476dc31a1068481b72118d53269737e320890
+generated: "2026-11-13T15:06:45.949792-08:00"

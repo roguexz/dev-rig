@@ -15,12 +15,13 @@ source "${LDX_HOME}/bin/commands/agentgateway/common.sh"
 AGW_MODULE_DIR="${LDX_HOME}/bin/commands/agentgateway"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|upgrade|sso|sync-omlx|api-key|mcp>"
+    echo "Usage: $(basename "$0") <install|uninstall|upgrade|status|sso|sync-omlx|api-key|mcp>"
     echo ""
     echo "Commands:"
     echo "  install     Deploy agentgateway (LLM/MCP/A2A gateway) into the cluster."
     echo "  uninstall   Remove agentgateway deployment, services, ingress, config and data."
     echo "  upgrade     Upgrade agentgateway to a version (default: pinned) with a rollout."
+    echo "  status      Show deployment state: SSO, API key, synced models, MCP tools."
     echo "  sso         Enable Authelia OIDC login for the agentgateway UI (Touch ID)."
     echo "  sync-omlx   Sync local oMLX models into the gateway's LLM routes."
     echo "  api-key     Manage the virtual client key. Enforcement is always on."
@@ -74,6 +75,10 @@ main() {
                 uninstall)        uninstall_agentgateway ;;
                 upgrade)          upgrade_agentgateway "$@" ;;
             esac
+            ;;
+        status)
+            source "${AGW_MODULE_DIR}/status.sh"
+            status_agentgateway
             ;;
         sso)
             source "${AGW_MODULE_DIR}/sso.sh"

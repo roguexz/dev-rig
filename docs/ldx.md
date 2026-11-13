@@ -63,7 +63,6 @@ alphanumeric, at most 63 characters).
 | Command            | Category                | Description                                                           | Documentation                        |
 |:-------------------|:------------------------|:----------------------------------------------------------------------|:-------------------------------------|
 | `ldx install`      | Management              | Symlink `ldx` into local bin (`--dir` to choose target)              | [README.md](../README.md)            |
-| `ldx completions`  | Management              | Regenerate the zsh completion (`_ldx`) from command help metadata     | [Shell Completion](#shell-completion) |
 | `ldx skill`        | Agent Skills            | Manage agent skills (install, uninstall, list, info)                  | [skill.md](./reference/ai/skill.md)               |
 | `ldx cvescan`      | Host Security           | System-wide automated Grype vulnerability scanner daemon              | [cvescan.md](./reference/security/cvescan.md)           |
 | `ldx touchid`      | Host Security           | Touch ID (biometric) authentication for `git push` via pre-push hook  | [touchid.md](./reference/security/touchid.md)           |
@@ -97,20 +96,4 @@ Ensure `$HOME/.local/bin` (or your installation target) is in your shell's confi
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Shell Completion
 
-`ldx install` (and `brew install`/`brew upgrade`, via the formula's post-install step) generates a zsh completion
-function (`_ldx`) by scanning each command's help metadata — top-level commands from the `# ldx-help:` tags in
-`bin/commands/`, subcommands from each command's `Commands:` help block. It is written to Homebrew's zsh
-`site-functions` directory when present (already on the fpath), otherwise to `~/.zfunc` (add
-`fpath=(~/.zfunc $fpath)` to `~/.zshrc`). Regenerate after adding a command with:
-
-```bash
-ldx completions
-```
-
-The completion requires the zsh completion system to be initialized in `~/.zshrc`:
-
-```bash
-autoload -Uz compinit && compinit
-```

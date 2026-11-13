@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+spec:
+  type: ClusterIP
+  selector:
+    app: lgtm
+  ports:
+  - port: 80
+    targetPort: 3000
+    name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+spec:
+  type: LoadBalancer
+  selector:
+    app: lgtm
+  ports:
+  - port: 4317
+    targetPort: 4317
+    name: grpc
+  - port: 4318
+    targetPort: 4318
+    name: http

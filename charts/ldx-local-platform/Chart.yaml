@@ -10,21 +10,25 @@ keywords:
 
 # Services deployed into one namespace as a single release. Each subchart is
 # opt-in (see values.yaml); 'ldx k8s up --services <a,b>' enables the set.
+# The file:// deps are this repo's own charts (../<name>); vault comes from
+# the remote hashicorp repo. Nothing under charts/ is committed: 'ldx k8s up'
+# runs 'helm dependency build' (which populates charts/ from Chart.lock)
+# whenever dependencies are missing.
 dependencies:
   - name: redis
     alias: redisStack
     version: 0.1.0
-    repository: "file://charts/redis"
+    repository: "file://../redis"
     condition: redisStack.enabled
   - name: postgresql
     alias: postgresqlStack
     version: 0.1.0
-    repository: "file://charts/postgresql"
+    repository: "file://../postgresql"
     condition: postgresqlStack.enabled
   - name: otel
     alias: otelStack
     version: 0.1.0
-    repository: "file://charts/otel"
+    repository: "file://../otel"
     condition: otelStack.enabled
   - name: vault
     alias: vaultStack
@@ -34,10 +38,10 @@ dependencies:
   - name: authelia
     alias: autheliaStack
     version: 0.1.0
-    repository: "file://charts/authelia"
+    repository: "file://../authelia"
     condition: autheliaStack.enabled
   - name: agentgateway
     alias: agentgatewayStack
     version: 0.1.0
-    repository: "file://charts/agentgateway"
+    repository: "file://../agentgateway"
     condition: agentgatewayStack.enabled

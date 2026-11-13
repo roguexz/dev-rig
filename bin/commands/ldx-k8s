@@ -17,6 +17,26 @@ export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
 CHART_DIR="${LDX_HOME}/charts/ldx-local-platform"
+
+# Chart dependencies are NOT committed (charts/*/charts/ is gitignored): the
+# first-party subcharts are packaged from this repo's own charts/ source and
+# third-party charts (vault, cert-manager) are fetched from their upstream
+# Helm repositories, pinned by the committed Chart.lock. 'helm dependency
+# build' resolves exactly that lock; it runs automatically whenever anything
+# consumes a chart (fresh checkout, cleaned artifacts).
+ensure_chart_deps() {
+    local chart_dir="$1"
+    helm repo add hashicorp https://helm.releases.hashicorp.com >/dev/null 2>&1 || true
+    helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
+    if helm dependency list "$chart_dir" 2>/dev/null | awk 'NR>1 && $NF != "" && $NF != "ok" { found = 1 } END { exit !found }'; then
+        log_info "Building chart dependencies for $(basename "$chart_dir") (helm dependency build)..."
+        if ! helm dependency build "$chart_dir" >/dev/null; then
+            log_warn "dependency build failed (lock out of date?); falling back to helm dependency update..."
+            helm dependency update "$chart_dir" >/dev/null \
+                || fatal "Failed to resolve Helm chart dependencies for ${chart_dir}. Check network access to the chart repositories."
+        fi
+    fi
+}
 RELEASE="ldx"
 
 # Records the enabled service set, per namespace: 'ldx k8s up' adds to it and
@@ -287,6 +307,7 @@ apply_certmanager() {
     local ca_root
     ca_root=$(mkcert -CAROOT)
     log_info "Applying ${CM_RELEASE} (cert-manager + mkcert CA) ..."
+    ensure_chart_deps "${LDX_HOME}/charts/ldx-cert-manager"
     helm upgrade --install "$CM_RELEASE" "${LDX_HOME}/charts/ldx-cert-manager" \
         --namespace "$CM_NAMESPACE" \
         --create-namespace \
@@ -659,6 +680,7 @@ k8s_up() {
     NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
     ldx_save_namespace k8s "$NAMESPACE"
     [ -d "$CHART_DIR" ] || fatal "Chart directory not found: ${CHART_DIR}"
+    ensure_chart_deps "$CHART_DIR"
 
     local -a requested=()
     while IFS= read -r line; do
@@ -918,6 +940,7 @@ k8s_diff() {
         set_args+=("$line")
     done < <(set_flags_for "${current[@]}")
 
+    ensure_chart_deps "$CHART_DIR"
     helm diff upgrade "$RELEASE" "$CHART_DIR" \
         --namespace "$NAMESPACE" \
         ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \

@@ -20,7 +20,7 @@ show_help() {
     echo "Usage: $(basename "$0") <install|status|unseal|seal|create-user|sso|upgrade|snapshot|uninstall> [options]"
     echo ""
     echo "Commands:"
-    echo "  install     Install Vault, initialize it, and store keys. ('setup' is an alias)"
+    echo "  install     Install Vault, initialize it, and store keys."
     echo "  status      Show the current status of the Vault installation."
     echo "  unseal      Unseal the Vault using stored keys."
     echo "  seal        Seal the Vault."
@@ -69,10 +69,10 @@ main() {
         status)
             status_vault
             ;;
-        install|setup|unseal|seal|uninstall|create-user|enable-secrets)
+        install|unseal|seal|uninstall|create-user|enable-secrets)
             source "${VAULT_MODULE_DIR}/lifecycle.sh"
             case "$subcommand" in
-                install|setup)  setup_vault ;;
+                install)          setup_vault ;;
                 unseal)         unseal_vault ;;
                 seal)           seal_vault ;;
                 uninstall)      uninstall_vault ;;

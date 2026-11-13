@@ -37,6 +37,14 @@ spec:
     metadata:
       labels:
         app: agentgateway
+      {{- with .Values.podAnnotations }}
+      annotations:
+        # Config checksums (supplied by 'ldx agentgateway prepare-values').
+        # The config mounts use subPath, which never picks up ConfigMap
+        # updates on a running pod; hashing the CLI-owned ConfigMaps into the
+        # pod template makes a config change roll the deployment.
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount }}
       {{- with .Values.hostAliases }}

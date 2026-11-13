@@ -1,0 +1,10 @@
+# Values for the vendored Bitnami redis chart (see 'helm show values').
+redis:
+  fullnameOverride: redis
+  architecture: standalone
+  auth:
+    enabled: false
+
+# Expose the Redis master on the host via Rancher Desktop.
+hostAccess:
+  nodePort: 30379

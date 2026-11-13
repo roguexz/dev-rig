@@ -38,11 +38,22 @@ prepare_values() {
         log_warn "Could not determine Traefik ClusterIP; the gateway may not reach Authelia for OIDC."
     fi
 
+    # Checksums of the CLI-owned ConfigMaps, rendered into pod annotations
+    # (see chart): a config/models/templates change rolls the pods.
+    local config_sha agent_sha
+    config_sha=$(kubectl get configmap agentgateway-config -n "$NAMESPACE" \
+        -o jsonpath='{.data}' 2>/dev/null | shasum -a 256 | awk '{print $1}') || true
+    agent_sha=$(kubectl get configmap "$VAULT_AGENT_CONFIG_CM" -n "$NAMESPACE" \
+        -o jsonpath='{.data}' 2>/dev/null | shasum -a 256 | awk '{print $1}') || true
+
     cat >&3 <<EOF
 agentgatewayStack:
   image: ${live_image:-$AGENTGATEWAY_IMAGE}
   hostAliases:
 ${host_aliases:-"  []"}
+  podAnnotations:
+    checksum/config: "${config_sha:-none}"
+    checksum/vault-agent-config: "${agent_sha:-none}"
 EOF
 }
 
