@@ -306,7 +306,7 @@
             <span class="sev-chip on" data-sev="MEDIUM" style="color: var(--medium-color); border-color: var(--medium-color);">Medium</span>
             <span class="sev-chip on" data-sev="LOW" style="color: var(--low-color); border-color: var(--low-color);">Low</span>
           </div>
-          <label class="evidence-toggle" title="Hides rows that only appear in lockfiles or requirement pins — nothing installed, just a version pin somewhere.">
+          <label class="evidence-toggle" title="Hides rows that only appear in lockfiles or requirement pins - nothing installed, just a version pin somewhere.">
             <input type="checkbox" id="declToggle" checked>
             <span>Hide declaration-only</span>
           </label>
@@ -372,7 +372,7 @@
       const body = document.getElementById('tableBody');
       const rows = filteredSorted();
       if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="7" class="empty-state">Nothing installed to worry about — remaining hits are pins in lockfiles/requirements files. 🎉</td></tr>';
+        body.innerHTML = '<tr><td colspan="7" class="empty-state">Nothing installed to worry about - remaining hits are pins in lockfiles/requirements files. 🎉</td></tr>';
         return;
       }
       const slice = rows.slice(0, 500);

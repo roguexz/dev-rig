@@ -35,8 +35,8 @@ For services that terminate their own TLS (like Authelia), Traefik connects to t
 re-encryption). The `ServersTransport` resource configures how Traefik connects to backends.
 
 The `mkcert-ca` `ServersTransport` is created in `kube-system` with:
-- `rootCAsSecrets: [mkcert-ca-bundle]` — references the mkcert CA Secret
-- `insecureSkipVerify: true` — required because the `rootCAsSecrets` field does not enable verification
+- `rootCAsSecrets: [mkcert-ca-bundle]` - references the mkcert CA Secret
+- `insecureSkipVerify: true` - required because the `rootCAsSecrets` field does not enable verification
   in this Traefik version. Connections are still encrypted (HTTPS), just not verified.
 
 Services that use TLS re-encryption add these annotations to their Service:

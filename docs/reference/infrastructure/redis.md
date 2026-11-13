@@ -8,7 +8,7 @@ directly from your host machine.
 ### `ldx redis install`
 
 This command installs a standalone, unauthenticated Redis instance into the configured namespace (default `commons`, see
-[Configuration](./ldx.md#configuration)).
+[Configuration](../../ldx.md#configuration)).
 
 ### `ldx redis uninstall`
 

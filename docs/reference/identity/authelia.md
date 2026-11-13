@@ -1,8 +1,8 @@
 # Authelia (`ldx authelia`)
 
-This command deploys [Authelia](https://www.authelia.com) — an open-source Identity Provider — on the local Kubernetes
+This command deploys [Authelia](https://www.authelia.com) - an open-source Identity Provider - on the local Kubernetes
 cluster. It serves as a single OIDC provider for all web UIs in the dev-rig: **Vault**, **agentgateway**, and
-**Grafana**. After one-time Touch ID (WebAuthn) enrollment, every login becomes a biometric prompt — no more passwords
+**Grafana**. After one-time Touch ID (WebAuthn) enrollment, every login becomes a biometric prompt - no more passwords
 to remember.
 
 ## Architecture

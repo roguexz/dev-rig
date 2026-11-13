@@ -11,7 +11,7 @@ backend:
 - **Metrics** are sent to **Prometheus**.
 
 All components are deployed into the shared `commons` namespace by default; a custom namespace can be configured, see
-[Configuration](./ldx.md#configuration).
+[Configuration](../../ldx.md#configuration).
 
 ## Commands
 

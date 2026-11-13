@@ -409,7 +409,7 @@ sync_opencode() {
 
     local manifest
     manifest=$(mktemp)
-    # ${manifest:-} — the trap fires after an early set -e exit, once this
+    # ${manifest:-} - the trap fires after an early set -e exit, once this
     # function's locals are gone.
     trap 'rm -f "${manifest:-}"' EXIT
 
@@ -450,7 +450,7 @@ sync_opencode() {
     model_ref=$(jq -r '.meta["model"]' <<<"$result")
 
     if [ "$dry_run" = true ]; then
-        log_info "Dry run — merged config would be:"
+        log_info "Dry run - merged config would be:"
         jq . <<<"$(jq -r '.config' <<<"$result")" | sed -E 's/("apiKey"[[:space:]]*:[[:space:]]*")[^"]+(")/\1***REDACTED***\2/' | sed -E 's/(Bearer )[a-zA-Z0-9_-]+/\1***REDACTED***/'
         [ -n "$pruned" ] && log_info "Would prune stale models: ${pruned}"
         return 0

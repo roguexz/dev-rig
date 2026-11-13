@@ -18,8 +18,8 @@ Rebuilds the `provider.local` section and `mcp.agentgateway` section of `~/.conf
    configured agentgateway namespace, `commons` by default) via kubectl (Rancher Desktop context). Helpers (embedding
    models, MarkItDown, ModernBERT) are
    filtered out.
-2. **Settings join**: Merges each model's oMLX settings — `max_tokens`, `context_window`, `temperature`,
-   `top_p`, `top_k`, and reasoning configuration — into an opencode model cost/tracking manifest (`limit.context`,
+2. **Settings join**: Merges each model's oMLX settings - `max_tokens`, `context_window`, `temperature`,
+   `top_p`, `top_k`, and reasoning configuration - into an opencode model cost/tracking manifest (`limit.context`,
    `limit.output`, `options.*`).
 3. **Thinking variants**: Models with a configured `reasoning_parser` get three variants of `budgetTokens`
    (`low` = max (budget/4, 1024), `medium` = the oMLX budget, `high` = min (output, budget x 4)). Models with a
@@ -64,7 +64,7 @@ ldx opencode sync
 
 Step 2 reads the route names from the `agentgateway-llm-models` ConfigMap, so running it before step 1 only re-applies
 the old set. New models appear as extra `local/agw-*` entries; models the gateway dropped are pruned with a warning
-(`--keep-stale` keeps them). The default model reference is kept when the gateway still serves it — pass
+(`--keep-stale` keeps them). The default model reference is kept when the gateway still serves it - pass
 `--default-model <name>` when it does not, since a non-interactive run has no prompt to fall back on. Verify with
 `opencode models | grep local/`.
 
@@ -84,7 +84,7 @@ opencode ──(Bearer $AGENTGATEWAY_API_KEY)──▶ https://agentgateway.rd.l
 
 ## API key
 
-The key opencode uses is the gateway's **virtual client key** — not oMLX's own key:
+The key opencode uses is the gateway's **virtual client key** - not oMLX's own key:
 
 - Generated once as `agw-<48 hex>` and cached at `~/.cache/local-dev/agentgateway/api_key` (mode `0600`).
 - Stored in the cluster Secret `agentgateway-secrets` under `AGENTGATEWAY_API_KEY` and referenced from the gateway
@@ -119,4 +119,4 @@ opencode models | grep local/
 - The key is stored in plaintext in `~/.config/opencode/opencode.jsonc` (a 644 file). It is a virtual,
   gateway-scoped key, not an upstream credential; opencode's 0600 `auth.json` credential store may be used instead in
   the future.
-- Cost fields are all zero — the models are local.
+- Cost fields are all zero - the models are local.

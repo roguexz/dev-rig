@@ -6,7 +6,7 @@
 #   * it is untagged (dangling, <none>:<none>), or it is a tagged image that
 #     is simply no longer wanted; AND
 #   * NO container (running or stopped) is associated with it. Every candidate
-#     is checked with `docker ps -a --filter ancestor=<id>` first — images in
+#     is checked with `docker ps -a --filter ancestor=<id>` first - images in
 #     use by any container are always skipped.
 #
 # Usage:
@@ -147,7 +147,7 @@ for img_id in "${id_order[@]}"; do
   # 2) Untagged-only mode: skip images that still carry tags
   (( UNTAGGED_ONLY )) && [[ -n $tags ]] && continue
 
-  # 3) Container association check — NEVER touch images tied to a container
+  # 3) Container association check - NEVER touch images tied to a container
   containers="$(docker ps -aq --filter "ancestor=$img_id")"
   if [[ -n $containers ]]; then
     ncont=${#${(f)containers}}
@@ -193,7 +193,7 @@ for i in {1..${#cand_id[@]}}; do
 done
 
 if (( DRY_RUN )); then
-  log_info "Dry run — nothing removed."
+  log_info "Dry run - nothing removed."
   exit 0
 fi
 

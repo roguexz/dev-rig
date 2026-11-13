@@ -20,13 +20,13 @@ You can also run individual capability binaries directly, such as `ldx-vault uns
 ### Kubernetes namespaces
 
 Infrastructure tools (`otel`, `redis`, `postgres`, `vault`, `authelia`, `agentgateway`) deploy into the `commons` namespace by
-default. You can deploy them into a custom namespace instead. (`tls` and `certmanager` keep their fixed namespaces —
-`kube-system` and `cert-manager` — because Rancher Desktop and upstream conventions require them.)
+default. You can deploy them into a custom namespace instead. (`tls` and `certmanager` keep their fixed namespaces -
+`kube-system` and `cert-manager` - because Rancher Desktop and upstream conventions require them.)
 
 The namespace for a tool is resolved in this order, first match wins:
 
-1. `LDX_<TOOL>_NAMESPACE` environment variable — e.g. `LDX_VAULT_NAMESPACE`, `LDX_POSTGRES_NAMESPACE`
-2. `LDX_NAMESPACE` environment variable — applies to every tool
+1. `LDX_<TOOL>_NAMESPACE` environment variable - e.g. `LDX_VAULT_NAMESPACE`, `LDX_POSTGRES_NAMESPACE`
+2. `LDX_NAMESPACE` environment variable - applies to every tool
 3. `LDX_<TOOL>_NAMESPACE` in the local config file
 4. `LDX_NAMESPACE` in the local config file
 5. `commons` (default)
@@ -62,18 +62,18 @@ alphanumeric, at most 63 characters).
 | Command            | Category                | Description                                                           | Documentation                        |
 |:-------------------|:------------------------|:----------------------------------------------------------------------|:-------------------------------------|
 | `ldx install`      | Management              | Install `ldx` commands to local bin (`--copy` default, `--link` flag) | [README.md](../README.md)            |
-| `ldx skill`        | Agent Skills            | Manage agent skills (install, uninstall, list, info)                  | [skill.md](./skill.md)               |
-| `ldx cvescan`      | Host Security           | System-wide automated Grype vulnerability scanner daemon              | [cvescan.md](./cvescan.md)           |
-| `ldx touchid`      | Host Security           | Touch ID (biometric) authentication for `git push` via pre-push hook  | [touchid.md](./touchid.md)           |
-| `ldx tls`          | Dev Infrastructure      | Local TLS certificates & Traefik configuration                        | [tls.md](./tls.md)                   |
-| `ldx certmanager`  | Kubernetes Dev          | In-cluster `cert-manager` setup                                       | [cert-manager.md](./cert-manager.md) |
-| `ldx otel`         | Observability           | Grafana LGTM stack (Loki, Grafana, Tempo, Mimir)                      | [otel.md](./otel.md)                 |
-| `ldx redis`        | Dev Infrastructure      | Redis stack deployment                                                | [redis.md](./redis.md)               |
-| `ldx postgres`     | Dev Infrastructure      | PostgreSQL with `pgvector` extension                                  | [postgres.md](./postgres.md)         |
-| `ldx vault`        | Security / Secrets      | Local HashiCorp Vault deployment                                      | [vault.md](./vault.md)               |
-| `ldx authelia`     | Identity / SSO          | Authelia (OIDC provider with WebAuthn/Touch ID) for SSO               | [authelia.md](./authelia.md)         |
-| `ldx agentgateway` | AI / LLM Infrastructure | agentgateway (LLM/MCP/A2A gateway) with UI, Authelia SSO, oMLX sync   | [agentgateway.md](./agentgateway.md) |
-| `ldx opencode`     | AI / LLM Infrastructure | Configure the local opencode harness from agentgateway models         | [opencode.md](./opencode.md)         |
+| `ldx skill`        | Agent Skills            | Manage agent skills (install, uninstall, list, info)                  | [skill.md](./reference/ai/skill.md)               |
+| `ldx cvescan`      | Host Security           | System-wide automated Grype vulnerability scanner daemon              | [cvescan.md](./reference/security/cvescan.md)           |
+| `ldx touchid`      | Host Security           | Touch ID (biometric) authentication for `git push` via pre-push hook  | [touchid.md](./reference/security/touchid.md)           |
+| `ldx tls`          | Dev Infrastructure      | Local TLS certificates & Traefik configuration                        | [tls.md](./reference/infrastructure/tls.md)                   |
+| `ldx certmanager`  | Kubernetes Dev          | In-cluster `cert-manager` setup                                       | [cert-manager.md](./reference/infrastructure/cert-manager.md) |
+| `ldx otel`         | Observability           | Grafana LGTM stack (Loki, Grafana, Tempo, Mimir)                      | [otel.md](./reference/observability/otel.md)                 |
+| `ldx redis`        | Dev Infrastructure      | Redis stack deployment                                                | [redis.md](./reference/infrastructure/redis.md)                 |
+| `ldx postgres`     | Dev Infrastructure      | PostgreSQL with `pgvector` extension                                  | [postgres.md](./reference/infrastructure/postgres.md)         |
+| `ldx vault`        | Security / Secrets      | Local HashiCorp Vault deployment                                      | [vault.md](./reference/security/vault.md)               |
+| `ldx authelia`     | Identity / SSO          | Authelia (OIDC provider with WebAuthn/Touch ID) for SSO               | [authelia.md](./reference/identity/authelia.md)             |
+| `ldx agentgateway` | AI / LLM Infrastructure | agentgateway (LLM/MCP/A2A gateway) with UI, Authelia SSO, oMLX sync   | [agentgateway.md](./reference/ai/agentgateway.md) |
+| `ldx opencode`     | AI / LLM Infrastructure | Configure the local opencode harness from agentgateway models         | [opencode.md](./reference/ai/opencode.md)               |
 
 ---
 

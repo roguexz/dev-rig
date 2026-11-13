@@ -1,6 +1,6 @@
 # agentgateway (`ldx agentgateway`)
 
-This command deploys [agentgateway](https://agentgateway.dev) — an HTTP/gRPC gateway for LLM, MCP, and A2A traffic — as
+This command deploys [agentgateway](https://agentgateway.dev) - an HTTP/gRPC gateway for LLM, MCP, and A2A traffic - as
 a pod in the Kubernetes cluster and exposes it via Traefik Ingress and an internal ClusterIP.
 
 ## Commands
@@ -8,7 +8,7 @@ a pod in the Kubernetes cluster and exposes it via Traefik Ingress and an intern
 ### `ldx agentgateway install`
 
 This command installs agentgateway into the configured namespace (default `commons`, see
-[Configuration](./ldx.md#configuration)):
+[Configuration](../../docs/ldx.md#configuration)):
 
 1. **Service account**: Creates a dedicated `agentgateway` ServiceAccount (replacing the `default` SA), which is bound
    to a Vault role that grants the Vault Agent sidecar permission to read MCP credentials.
@@ -26,13 +26,13 @@ This command installs agentgateway into the configured namespace (default `commo
 6. **Vault Agent sidecar**: Adds a `vault-agent` container (same image as the Vault server, runs as uid 1000) to the
    Deployment. It authenticates to Vault via Kubernetes auth, reads MCP secrets, and writes them to files in the shared
    `/etc/agentgateway/mcp-credentials` directory with `0400` permissions. The gateway reads these files via
-   `backendAuth.key.value.file` — the credential never appears in the gateway's config, environment, or as a response
+   `backendAuth.key.value.file` - the credential never appears in the gateway's config, environment, or as a response
    to the harness.
 7. **Deployment**: Deploys the pinned agentgateway image (`cr.agentgateway.dev/agentgateway:v1.7.0`) with the config
    mounted read-only at `/etc/agentgateway/config.yaml`.
 8. **Client API key**: Ensures the gateway's virtual client API key exists (generated once as `agw-<48 hex>`, cached
    at `~/.cache/local-dev/agentgateway/api_key` with mode `0600`, stored in the Secret under `AGENTGATEWAY_API_KEY`)
-   and wires the `llm.policies.apiKey` policy into the config so every LLM request must present it — see
+   and wires the `llm.policies.apiKey` policy into the config so every LLM request must present it - see
    [`api-key`](#ldx-agentgateway-api-key).
 9. **Service & Ingress Exposure**: Exposes the gateway via Traefik Ingress (`https://agentgateway.rd.localhost`) and
    an internal ClusterIP for in-cluster clients.
@@ -61,13 +61,13 @@ Syncs the models served by the local [omlx](https://github.com/jundot/omlx) serv
 Use `--dry-run` to print the generated configuration without applying it.
 
 > **When to run:** whenever models are added to or removed from oMLX. The `llm.models` fragment is rebuilt from the live
-> `/v1/models` list, so a newly loaded model only gains a gateway route — and a removed model only stops being routed —
+> `/v1/models` list, so a newly loaded model only gains a gateway route - and a removed model only stops being routed -
 > once this command re-runs; the gateway pod restarts as part of it. Clients that cached the previous route list then
 > need their own refresh, see [Refreshing after oMLX model changes](./opencode.md#refreshing-after-omlx-model-changes).
 
 ### `ldx agentgateway api-key`
 
-Manages the gateway's virtual client API key — the credential clients must present to access both LLM and MCP routes:
+Manages the gateway's virtual client API key - the credential clients must present to access both LLM and MCP routes:
 
 - **Enforcement**: `apiKey` policies (mode `strict`) are configured on both the LLM routes (`llm.policies.apiKey`) and
   the `/mcp` route (`routes[].policies.apiKey`) by `install` and `sync-omlx`. Requests to `/v1/...` or `/mcp` without a
@@ -140,7 +140,7 @@ ldx agentgateway mcp rotate <name> --token <new-token>
    - Restarts the gateway pod.
 
 4. **`mcp rotate`**: Updates the Vault secret in place. The Vault Agent detects the change and refreshes the file
-   automatically — no gateway restart is needed because the gateway reads the file on each request.
+   automatically - no gateway restart is needed because the gateway reads the file on each request.
 
 #### Security model
 
@@ -200,7 +200,7 @@ to connect:
 
 LLM clients can call `http://agentgateway.commons.svc.cluster.local:4000/v1/chat/completions` (and the rest of the
 OpenAI-compatible surface) for models synced with `sync-omlx`, authenticating with the gateway client API key
-(`AGENTGATEWAY_API_KEY`, see [`api-key`](#ldx-agentgateway-api-key)) — not the omlx key, which stays server-side in
+(`AGENTGATEWAY_API_KEY`, see [`api-key`](#ldx-agentgateway-api-key)) - not the omlx key, which stays server-side in
 the gateway.
 
 *Note: `commons` in the DNS names is the deployment namespace; substitute your custom namespace if one is configured.*
@@ -209,8 +209,8 @@ the gateway.
 
 ### `ldx agentgateway upgrade [version]`
 
-Upgrades the running agentgateway to a new image version with a rolling restart. All runtime state — the SQLite
-database on the PVC, the ConfigMap, and the Secrets (SSO config, API keys, oMLX key) — is preserved; only the pod
+Upgrades the running agentgateway to a new image version with a rolling restart. All runtime state - the SQLite
+database on the PVC, the ConfigMap, and the Secrets (SSO config, API keys, oMLX key) - is preserved; only the pod
 image changes.
 
 ```bash
