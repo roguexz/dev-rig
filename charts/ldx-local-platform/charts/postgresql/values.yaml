@@ -1,0 +1,30 @@
+# Values for the vendored Bitnami postgresql chart (see 'helm show values').
+# The image is built locally by 'ldx k8s up --services postgresql' (pgvector
+# extension grafted onto the Bitnami base), hence the empty registry.
+postgresql:
+  fullnameOverride: postgresql
+  architecture: standalone
+  global:
+    security:
+      allowInsecureImages: true
+  auth:
+    postgresPassword: changeit
+  image:
+    registry: ""
+    repository: local/bitnami-postgresql-pgvector
+    tag: "18"
+    pullPolicy: IfNotPresent
+  primary:
+    initdb:
+      scripts:
+        init-pgvector.sql: |
+          -- Enable pgvector on template1 so any new database created inherits it
+          \connect template1
+          CREATE EXTENSION IF NOT EXISTS vector;
+          -- Also enable it on the default postgres database
+          \connect postgres
+          CREATE EXTENSION IF NOT EXISTS vector;
+
+# Expose the PostgreSQL primary on the host via Rancher Desktop.
+hostAccess:
+  nodePort: 30432

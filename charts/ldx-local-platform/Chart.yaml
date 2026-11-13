@@ -1,0 +1,23 @@
+apiVersion: v2
+name: ldx-local-platform
+description: Declarative local development platform managed by ldx (dev-rig)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - local-development
+  - rancher-desktop
+
+# Services deployed into one namespace as a single release. Each subchart is
+# opt-in (see values.yaml); 'ldx k8s up --services <a,b>' enables the set.
+dependencies:
+  - name: redis
+    alias: redisStack
+    version: 0.1.0
+    repository: "file://charts/redis"
+    condition: redisStack.enabled
+  - name: postgresql
+    alias: postgresqlStack
+    version: 0.1.0
+    repository: "file://charts/postgresql"
+    condition: postgresqlStack.enabled

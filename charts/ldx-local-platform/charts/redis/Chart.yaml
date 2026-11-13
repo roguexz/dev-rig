@@ -1,0 +1,9 @@
+apiVersion: v2
+name: redis
+description: Redis stack for ldx (Bitnami Redis plus host access)
+type: application
+version: 0.1.0
+dependencies:
+  - name: redis
+    version: "28.3.12"
+    repository: "https://charts.bitnami.com/bitnami"
