@@ -341,7 +341,10 @@ posthook_vault() {
     case "$sealed" in
         true)
             log_info "Vault is sealed (existing data detected). Unsealing from the host secret store..."
-            "${LDX_HOME}/bin/ldx" vault unseal
+            # Advisory: a failed unseal (e.g. missing keys) warns; the apply
+            # itself succeeded, so 'up' must not report failure.
+            "${LDX_HOME}/bin/ldx" vault unseal \
+                || log_warn "Unseal failed (keys missing from the secret store?). Run 'ldx vault status'."
             ;;
         false)
             log_info "Vault is running and unsealed."
@@ -534,6 +537,7 @@ apply_release() {
         ${recorded[@]+"${recorded[@]}"} \
         ${APPLY_VALUES[@]+"${APPLY_VALUES[@]}"} \
         "${set_args[@]}" \
+        --force-conflicts \
         --wait
 }
 
@@ -612,7 +616,7 @@ k8s_up() {
         esac
     done
 
-    state_set "$NAMESPACE" "${desired[@]}"
+    state_set "$NAMESPACE" "${main_desired[@]}"
 
     log_info "Platform is up."
     for service in "${desired[@]}"; do
