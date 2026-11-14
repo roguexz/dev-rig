@@ -37,6 +37,7 @@ jobs:
           v="${GITHUB_REF_NAME}"
           f="Formula/ldx.rb"
           api="repos/roguexz/homebrew-ldx/contents/$f"
+          mkdir -p "$(dirname "$f")"   # fresh runner: the tap is fetched via API, not cloned
           old_sha="$(gh api "$api" --jq .sha)"
           gh api "$api" --jq .content | base64 -d > "$f"
           sed -i -E \
