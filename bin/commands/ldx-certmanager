@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# ldx-help: infra Install cert-manager, ClusterIssuer, and ClusterTrustBundle (CA distribution) (alias for 'ldx k8s --services certmanager')
+#
+# ldx-certmanager - Thin alias for the declarative cert-manager chart
+# (charts/ldx-cert-manager, release 'ldx-cert-manager'). See 'ldx k8s'.
+#
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall|ca-bundle>"
+    echo ""
+    echo "Commands:"
+    echo "  install       Install cert-manager via Helm and configure local ClusterIssuer."
+    echo "  uninstall     Remove cert-manager and its configurations."
+    echo "  ca-bundle <ns> Create/update the 'extra-cas' ConfigMap in namespace <ns>"
+    echo "                 with hash-named local CA files (mkcert) for SSL_CERT_DIR."
+    echo ""
+    echo "install/uninstall are aliases for 'ldx k8s up/down --services certmanager'."
+    echo "ca-bundle is a standalone utility used by other ldx commands."
+}
+
+case "${1:-}" in
+    install)
+        exec "${LDX_HOME}/bin/ldx" k8s up --services certmanager "${@:2}"
+        ;;
+    uninstall)
+        exec "${LDX_HOME}/bin/ldx" k8s down --services certmanager "${@:2}"
+        ;;
+    ca-bundle)
+        require_command "kubectl"
+        shift
+        [ $# -ge 1 ] || { log_error "ca-bundle requires a namespace argument"; show_help; exit 1; }
+        create_extra_cas_configmap "$1"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    "")
+        show_help
+        exit 1
+        ;;
+    *)
+        log_error "Unknown subcommand: $1"
+        show_help
+        exit 1
+        ;;
+esac

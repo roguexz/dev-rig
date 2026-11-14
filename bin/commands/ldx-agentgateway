@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# ldx-help: infra Deploy agentgateway (LLM/MCP/A2A gateway) with oMLX sync and Authelia SSO
+
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+# Command logic lives in bin/commands/agentgateway/ modules; shared helpers
+# in common.sh, subcommand flows lazy-sourced on dispatch.
+source "${LDX_HOME}/bin/commands/agentgateway/common.sh"
+
+AGW_MODULE_DIR="${LDX_HOME}/bin/commands/agentgateway"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall|upgrade|status|sso|sync-omlx|api-key|mcp>"
+    echo ""
+    echo "Commands:"
+    echo "  install     Deploy agentgateway (LLM/MCP/A2A gateway) into the cluster."
+    echo "  uninstall   Remove agentgateway deployment, services, ingress, config and data."
+    echo "  upgrade     Upgrade agentgateway to a version (default: pinned) with a rollout."
+    echo "  status      Show deployment state: SSO, API key, synced models, MCP tools."
+    echo "  sso         Enable Authelia OIDC login for the agentgateway UI (Touch ID)."
+    echo "  sync-omlx   Sync local oMLX models into the gateway's LLM routes."
+    echo "  api-key     Manage the virtual client key. Enforcement is always on."
+    echo "  mcp         Manage MCP tools with Vault-backed credentials."
+    echo ""
+    echo "Options for upgrade:"
+    echo "  <version>    Target version (e.g. 1.7.0 or v1.7.0). Omit to use the pinned version."
+    echo "  --dry-run    Show what would change; do not touch the cluster."
+    echo ""
+    echo "Options for sso:"
+    echo "  (none required; requires 'ldx authelia install' to have been run first)"
+    echo ""
+    echo "Options for sync-omlx:"
+    echo "  --dry-run    Show the generated model configuration without applying it."
+    echo ""
+    echo "Options for api-key:"
+    echo "  api-key           Ensure the key exists, cache it locally, apply config and restart."
+    echo "  api-key print     Print the current virtual client key to stdout."
+    echo ""
+    echo "Options for mcp:"
+    echo "  mcp add <name> --url <url> [--token <token|->] [--header <name>]  Add an MCP tool (credential stored in Vault)."
+    echo "                                                                  --token '-' reads from stdin; omit for interactive prompt."
+    echo "                                                                  --header sets a custom header (default: Authorization: Bearer)."
+    echo "  mcp list                                     List all configured MCP tools."
+    echo "  mcp remove <name>                            Remove an MCP tool and its Vault credential."
+    echo "  mcp rotate <name> --token <new-token>       Rotate a tool's credential (Vault Agent refreshes the file)."
+    echo "                                                                  --token '-' reads from stdin (avoids shell history)."
+    echo ""
+    echo "Note: install preserves previously synced models and SSO configuration; uninstall removes everything."
+    echo "Note: SSO uses Authelia (deployed by 'ldx authelia install') as the OIDC provider."
+    echo "      Users are provisioned in Authelia's users_database.yml."
+    echo "Note: MCP credentials are stored in Vault and read by a Vault Agent sidecar; harnesses never see them."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        prepare-support|prepare-values|install|uninstall|upgrade)
+            source "${AGW_MODULE_DIR}/lifecycle.sh"
+            case "$subcommand" in
+                prepare-support)  prepare_support ;;
+                prepare-values)   prepare_values ;;
+                install)          install_agentgateway ;;
+                uninstall)        uninstall_agentgateway ;;
+                upgrade)          upgrade_agentgateway "$@" ;;
+            esac
+            ;;
+        status)
+            source "${AGW_MODULE_DIR}/status.sh"
+            status_agentgateway
+            ;;
+        sso)
+            source "${AGW_MODULE_DIR}/sso.sh"
+            sso_agentgateway "$@"
+            ;;
+        sync-omlx)
+            source "${AGW_MODULE_DIR}/sync-omlx.sh"
+            sync_omlx_models "$@"
+            ;;
+        api-key)
+            source "${AGW_MODULE_DIR}/api-key.sh"
+            api_key_command "$@"
+            ;;
+        mcp)
+            source "${AGW_MODULE_DIR}/mcp.sh"
+            mcp_command "$@"
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

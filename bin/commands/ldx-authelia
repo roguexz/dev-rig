@@ -1,0 +1,594 @@
+#!/usr/bin/env bash
+# ldx-help: infra Deploy Authelia (OIDC provider with WebAuthn/Touch ID support)
+
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+# --- Configuration -------------------------------------------------------------
+
+AUTHELIA_NAMESPACE="$(ldx_namespace authelia)"
+AUTHELIA_HOST="auth.rd.localhost"
+AUTHELIA_IMAGE="authelia/authelia:latest"
+AUTHELIA_PORT=9091
+
+# Cache directory for Authelia state
+AUTHELIA_DIR="${CACHE_DIR}/authelia"
+
+# OIDC client secrets are kept in the host secret store (see ldx_secret_put;
+# pre-Keychain installs cached them in this file, imported on first read)
+AUTHELIA_SECRETS_FILE="${AUTHELIA_DIR}/client_secrets"
+AUTHELIA_SECRETS_NS="authelia/client_secrets"
+
+# Core secrets are kept in the host secret store and reused across runs so the
+# database encryption key stays stable (changing it invalidates the existing DB).
+AUTHELIA_CORE_SECRETS_FILE="${AUTHELIA_DIR}/core_secrets"
+AUTHELIA_CORE_SECRETS_NS="authelia/core_secrets"
+
+# --- Commands ------------------------------------------------------------------
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall|status|enroll>"
+    echo ""
+    echo "Commands:"
+    echo "  install    Deploy Authelia via the ldx platform chart (the admin password is"
+    echo "             prompted once; everything lives in the host secret store)."
+    echo "  uninstall  Remove Authelia and its resources."
+    echo "  status     Show Authelia deployment status."
+    echo "  enroll     Guide one-time Touch ID / WebAuthn enrollment."
+}
+
+# --- Helpers -------------------------------------------------------------------
+
+# Generate a random hex string of the given length (in bytes)
+generate_secret() {
+    local bytes="$1"
+    openssl rand -hex "$bytes"
+}
+
+# Hash a password with Argon2id using the authelia image
+# Usage: hash_argon2 <password>
+hash_argon2() {
+    local password="$1"
+    docker run --rm "$AUTHELIA_IMAGE" authelia crypto hash generate argon2 --password "$password" | sed 's/^Digest: //'
+}
+
+# Hash a client secret with pbkdf2-sha512 using the authelia image
+# (Authelia expects pbkdf2-sha512 for OIDC client secrets)
+# Usage: hash_pbkdf2 <password>
+hash_pbkdf2() {
+    local password="$1"
+    docker run --rm "$AUTHELIA_IMAGE" authelia crypto hash generate pbkdf2 --password "$password" | sed 's/^Digest: //'
+}
+
+# Generate the RSA 2048 key pair for OIDC JWKS
+generate_jwks_key() {
+    local key_dir="$1"
+    mkdir -p "$key_dir"
+    local pem="${key_dir}/oidc_jwks.pem"
+    local pkcs8="${key_dir}/oidc_jwks_pkcs8.pem"
+
+    if [ ! -f "$pkcs8" ]; then
+        log_info "Generating RSA 2048 OIDC signing key..."
+        openssl genrsa -out "$pem" 2048
+        openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in "$pem" -out "$pkcs8"
+        rm -f "$pem"  # Keep only the PKCS8 form
+        chmod 600 "$pkcs8"
+    fi
+}
+
+# Ensure client secrets exist (generated once, cached)
+ensure_client_secrets() {
+    mkdir -p "$AUTHELIA_DIR"
+
+    if ldx_secret_has "$AUTHELIA_SECRETS_NS" VAULT_CLIENT_SECRET; then
+        log_info "Reusing existing OIDC client secrets (ldx/${AUTHELIA_SECRETS_NS}/*)"
+        return
+    fi
+    if [ -f "$AUTHELIA_SECRETS_FILE" ]; then
+        ldx_secret_get_kv "$AUTHELIA_SECRETS_NS" "$AUTHELIA_SECRETS_FILE" VAULT_CLIENT_SECRET >/dev/null
+        log_info "Reusing existing OIDC client secrets (migrated from ${AUTHELIA_SECRETS_FILE})"
+        return
+    fi
+
+    log_info "Generating OIDC client secrets..."
+    local vault_secret=$(generate_secret 32)
+    local agentgateway_secret=$(generate_secret 32)
+    local grafana_secret=$(generate_secret 32)
+
+    ldx_secret_put "$AUTHELIA_SECRETS_NS" VAULT_CLIENT_SECRET "$vault_secret"
+    ldx_secret_put "$AUTHELIA_SECRETS_NS" AGENTGATEWAY_CLIENT_SECRET "$agentgateway_secret"
+    ldx_secret_put "$AUTHELIA_SECRETS_NS" GRAFANA_CLIENT_SECRET "$grafana_secret"
+    log_info "OIDC client secrets stored in $(ldx_secret_backend) storage (ldx/${AUTHELIA_SECRETS_NS}/*)"
+}
+
+# Read a client secret from the secret store
+get_client_secret() {
+    local name="$1"
+    ldx_secret_has "$AUTHELIA_SECRETS_NS" "$name" || ensure_client_secrets
+    ldx_secret_get_kv "$AUTHELIA_SECRETS_NS" "$AUTHELIA_SECRETS_FILE" "$name"
+}
+
+# Ensure core secrets exist (generated once, cached so the DB key stays stable)
+ensure_core_secrets() {
+    mkdir -p "$AUTHELIA_DIR"
+
+    if ldx_secret_has "$AUTHELIA_CORE_SECRETS_NS" JWT_SECRET; then
+        log_info "Reusing existing Authelia core secrets (ldx/${AUTHELIA_CORE_SECRETS_NS}/*)"
+        return
+    fi
+    if [ -f "$AUTHELIA_CORE_SECRETS_FILE" ]; then
+        ldx_secret_get_kv "$AUTHELIA_CORE_SECRETS_NS" "$AUTHELIA_CORE_SECRETS_FILE" JWT_SECRET >/dev/null
+        log_info "Reusing existing Authelia core secrets (migrated from ${AUTHELIA_CORE_SECRETS_FILE})"
+        return
+    fi
+
+    log_info "Generating Authelia core secrets..."
+    local jwt_secret=$(generate_secret 32)
+    local storage_key=$(generate_secret 32)
+    local session_secret=$(generate_secret 32)
+    local oidc_hmac_secret=$(generate_secret 32)
+
+    ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" JWT_SECRET "$jwt_secret"
+    ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" STORAGE_KEY "$storage_key"
+    ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" SESSION_SECRET "$session_secret"
+    ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" OIDC_HMAC_SECRET "$oidc_hmac_secret"
+    log_info "Authelia core secrets stored in $(ldx_secret_backend) storage (ldx/${AUTHELIA_CORE_SECRETS_NS}/*)"
+}
+
+# Read a core secret from the secret store
+get_core_secret() {
+    local name="$1"
+    ldx_secret_has "$AUTHELIA_CORE_SECRETS_NS" "$name" || ensure_core_secrets
+    ldx_secret_get_kv "$AUTHELIA_CORE_SECRETS_NS" "$AUTHELIA_CORE_SECRETS_FILE" "$name"
+}
+
+
+# --- CoreDNS setup -------------------------------------------------------------
+# NOTE: CoreDNS rewrite rules for .rd.localhost are fragile in K3s (overwritten
+# on cluster restart by the addon system). Instead, services should use
+# hostAliases or the external URL with the CA PEM for TLS verification.
+# This function is kept as a no-op for backward compatibility.
+setup_coredns() {
+    log_info "Skipping CoreDNS rewrite setup (handled by service-specific configuration)"
+}
+
+# Remove the CoreDNS rewrite rule added by setup_coredns (no-op now)
+remove_coredns() {
+    log_info "Skipping CoreDNS rewrite removal"
+}
+
+# --- install -------------------------------------------------------------------
+
+# --- install -------------------------------------------------------------------
+
+# The Argon2id hash of the admin bootstrap password is cached so re-applying
+# the chart never regenerates (and thus never invalidates) the credential.
+BOOTSTRAP_HASH_KEY="BOOTSTRAP_PASSWORD_HASH"
+
+# YAML single-quoted scalar: hashes start with $argon2$/$pbkdf2$ and must
+# survive the values heredoc byte-for-byte.
+yaml_squote() {
+    local s="$1"
+    printf "'%s'" "${s//\'/\'\'}"
+}
+
+# Prepare Helm values for the authelia subchart: everything dynamic (core
+# secrets, pre-hashed OIDC client secrets, the JWKS key, Traefik annotations)
+# comes from the host secret store. Internal: 'ldx k8s' runs this as the
+# authelia pre-apply hook and feeds the output to helm as a values file.
+prepare_values() {
+    require_command "openssl"
+    require_command "docker"
+
+    # Stdout is the values file; all log/helper chatter goes to stderr.
+    exec 3>&1 1>&2
+
+    ensure_client_secrets
+    ensure_core_secrets
+    generate_jwks_key "$AUTHELIA_DIR"
+
+    local bootstrap_hash
+    bootstrap_hash=$(ldx_secret_get "$AUTHELIA_CORE_SECRETS_NS" "$BOOTSTRAP_HASH_KEY" 2>/dev/null) || true
+    [ -n "$bootstrap_hash" ] || fatal "No admin password hash (ldx/${AUTHELIA_CORE_SECRETS_NS}/${BOOTSTRAP_HASH_KEY}). Run 'ldx authelia install' first."
+
+    local jwks_key
+    jwks_key=$(ldx_secret_get_blob authelia "${AUTHELIA_DIR}/oidc_jwks_pkcs8.pem" jwks_pkcs8)
+    [ -n "$jwks_key" ] || fatal "Missing OIDC signing key (ldx/authelia/jwks_pkcs8)."
+
+    # PBKDF2 hashes of the OIDC client secrets, cached next to the secrets.
+    local name key secret hash
+    local hash_vault="" hash_agw="" hash_grafana=""
+    for pair in "VAULT_CLIENT_SECRET:vault" "AGENTGATEWAY_CLIENT_SECRET:agentgateway" "GRAFANA_CLIENT_SECRET:grafana"; do
+        name="${pair%%:*}"; key="${pair##*:}"
+        secret=$(get_client_secret "$name")
+        hash=$(ldx_secret_get "$AUTHELIA_SECRETS_NS" "${name}_HASH" 2>/dev/null) || true
+        if [ -z "$hash" ]; then
+            log_info "Hashing OIDC client secret ${name}..."
+            hash=$(hash_pbkdf2 "$secret")
+            ldx_secret_put "$AUTHELIA_SECRETS_NS" "${name}_HASH" "$hash"
+        fi
+        case "$key" in
+            vault) hash_vault="$hash" ;;
+            agentgateway) hash_agw="$hash" ;;
+            grafana) hash_grafana="$hash" ;;
+        esac
+    done
+
+    # TLS re-encryption annotations for the Service: verify the pod cert with
+    # the mkcert CA when the ServersTransport CRD exists, else skip verify
+    # (Rancher Desktop's built-in Traefik).
+    local ann_transport
+    if kubectl get crd serverstransports.traefik.io &>/dev/null; then
+        ann_transport="    traefik.ingress.kubernetes.io/service.serverstransport: kube-system-mkcert-ca@kubernetescrd"
+    else
+        ann_transport="    traefik.ingress.kubernetes.io/service.serversslVerify: \"false\""
+    fi
+
+    # Single autheliaStack mapping: a second top-level 'autheliaStack:' block
+    # (e.g. appended by a caller) would silently override this one.
+    cat >&3 <<EOF
+autheliaStack:
+  image: ${AUTHELIA_IMAGE}
+  namespaceOverride: ${AUTHELIA_NAMESPACE}
+  secrets:
+    JWT_SECRET: $(yaml_squote "$(get_core_secret JWT_SECRET)")
+    STORAGE_KEY: $(yaml_squote "$(get_core_secret STORAGE_KEY)")
+    SESSION_SECRET: $(yaml_squote "$(get_core_secret SESSION_SECRET)")
+    OIDC_HMAC_SECRET: $(yaml_squote "$(get_core_secret OIDC_HMAC_SECRET)")
+  config:
+    passwordHash: $(yaml_squote "${bootstrap_hash}")
+    jwksKey: |
+$(printf '%s\n' "$jwks_key" | sed 's/^/      /')
+    clients:
+      vault:
+        secretHash: $(yaml_squote "${hash_vault}")
+      agentgateway:
+        secretHash: $(yaml_squote "${hash_agw}")
+      grafana:
+        secretHash: $(yaml_squote "${hash_grafana}")
+  serviceAnnotations:
+    traefik.ingress.kubernetes.io/service.passhostheader: "true"
+${ann_transport}
+EOF
+}
+
+install_authelia() {
+    require_command "kubectl"
+    require_command "openssl"
+    require_command "docker"
+
+    mkdir -p "$AUTHELIA_DIR"
+    generate_jwks_key "$AUTHELIA_DIR"
+    ensure_client_secrets
+    ensure_core_secrets
+    ldx_save_namespace authelia "$AUTHELIA_NAMESPACE"
+
+    # One-time admin password; the hash (not the password) goes to the secret
+    # store, so 'ldx k8s up' stays idempotent.
+    local existing
+    existing=$(ldx_secret_get "$AUTHELIA_CORE_SECRETS_NS" "$BOOTSTRAP_HASH_KEY" 2>/dev/null) || true
+    if [ -z "$existing" ]; then
+        # Migration path: the imperative installer stored the hash in the
+        # running users ConfigMap. Adopt it so an upgrade never resets the
+        # admin credential the user already logs in with.
+        existing=$(kubectl get configmap authelia-users -n "$AUTHELIA_NAMESPACE" \
+            -o jsonpath='{.data.users_database\.yml}' 2>/dev/null \
+            | sed -n 's/.*password: "\(.*\)".*/\1/p' | head -1) || true
+        if [ -n "$existing" ]; then
+            log_info "Adopting the admin password hash from the running authelia-users ConfigMap."
+            ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" "$BOOTSTRAP_HASH_KEY" "$existing"
+        fi
+    fi
+    if [ -z "$existing" ]; then
+        local bootstrap_password
+        if [ -t 0 ]; then
+            read -rsp "Enter bootstrap password for the Authelia admin user: " bootstrap_password
+            echo ""
+            read -rsp "Confirm bootstrap password: " bootstrap_password_confirm
+            echo ""
+            if [ "$bootstrap_password" != "$bootstrap_password_confirm" ]; then
+                fatal "Passwords do not match."
+            fi
+        else
+            bootstrap_password=$(generate_secret 24)
+            echo ""
+            log_warn "Non-interactive mode: generated bootstrap password is displayed below."
+            log_warn "Store it securely (e.g., in your password manager). You will need it for the first login."
+            echo ""
+            echo "  Bootstrap password: ${bootstrap_password}"
+            echo ""
+            log_warn "This is the ONLY time it will be shown. After Touch ID enrollment, it is only a fallback."
+            echo ""
+        fi
+        log_info "Hashing bootstrap password..."
+        ldx_secret_put "$AUTHELIA_CORE_SECRETS_NS" "$BOOTSTRAP_HASH_KEY" "$(hash_argon2 "$bootstrap_password")"
+    else
+        log_info "Reusing the stored admin password hash (delete ldx/${AUTHELIA_CORE_SECRETS_NS}/${BOOTSTRAP_HASH_KEY} to reset it)."
+    fi
+
+    # Deployment lives in the ldx-local-platform chart (release 'ldx',
+    # service 'authelia'); prehook_authelia supplies the values via
+    # 'ldx authelia prepare'.
+    "${LDX_HOME}/bin/ldx" k8s up --services authelia
+
+    log_info "Authelia installation complete."
+    log_info "Authelia is accessible at: https://${AUTHELIA_HOST}"
+    log_info ""
+    log_info "Next steps:"
+    log_info "  1. Enroll Touch ID: run '$(basename "$0") enroll'"
+    log_info "  2. Wire up Vault: run 'ldx vault sso'"
+    log_info "  3. Wire up agentgateway: run 'ldx agentgateway sso'"
+    log_info "  4. Wire up Grafana: run 'ldx otel install' (re-run to add OIDC)"
+}
+
+# --- uninstall -----------------------------------------------------------------
+
+uninstall_authelia() {
+    require_command "kubectl"
+
+    # Chart teardown (authelia subchart incl. PVC, cert, config); host-side
+    # secrets are the user's to keep.
+    "${LDX_HOME}/bin/ldx" k8s down --services authelia --purge-data
+
+    local has_local_secrets=false
+    if [ -d "$AUTHELIA_DIR" ]; then has_local_secrets=true; fi
+    if ldx_secret_has "$AUTHELIA_SECRETS_NS" VAULT_CLIENT_SECRET \
+       || ldx_secret_has "$AUTHELIA_CORE_SECRETS_NS" JWT_SECRET; then
+        has_local_secrets=true
+    fi
+
+    if [ "$has_local_secrets" = true ] && [ -t 0 ]; then
+        read -rp "Remove local cached secrets and keys (cache dir and $(ldx_secret_backend) entries)? (y/N) " confirm
+        if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+            rm -rf "$AUTHELIA_DIR"
+            local key
+            for key in VAULT_CLIENT_SECRET AGENTGATEWAY_CLIENT_SECRET GRAFANA_CLIENT_SECRET \
+                       VAULT_CLIENT_SECRET_HASH AGENTGATEWAY_CLIENT_SECRET_HASH GRAFANA_CLIENT_SECRET_HASH; do
+                ldx_secret_delete "$AUTHELIA_SECRETS_NS" "$key"
+            done
+            for key in JWT_SECRET STORAGE_KEY SESSION_SECRET OIDC_HMAC_SECRET "$BOOTSTRAP_HASH_KEY"; do
+                ldx_secret_delete "$AUTHELIA_CORE_SECRETS_NS" "$key"
+            done
+            ldx_secret_delete authelia jwks_pkcs8
+            log_info "Removed local cache directory ${AUTHELIA_DIR} and ldx/${AUTHELIA_SECRETS_NS}, ldx/${AUTHELIA_CORE_SECRETS_NS} entries"
+        fi
+    fi
+
+    log_info "Authelia uninstall complete."
+}
+
+# --- status --------------------------------------------------------------------
+
+status_authelia() {
+    require_command "kubectl"
+
+    local phase
+    phase=$(kubectl get pods -n "$AUTHELIA_NAMESPACE" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || phase="NotFound"
+
+    log_info "Authelia namespace: ${AUTHELIA_NAMESPACE}"
+    log_info "Authelia host: https://${AUTHELIA_HOST}"
+    log_info "Pod phase: ${phase}"
+
+    if [ "$phase" = "Running" ]; then
+        local ready
+        ready=$(kubectl get pods -n "$AUTHELIA_NAMESPACE" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || ready="Unknown"
+        log_info "Pod ready: ${ready}"
+
+        # Check OIDC discovery endpoint
+        local issuer="https://${AUTHELIA_HOST}"
+        if curl -sf "${issuer}/.well-known/openid-configuration" > /dev/null 2>&1; then
+            log_info "OIDC discovery: OK"
+        else
+            log_warn "OIDC discovery endpoint not reachable (Traefik may not have TLS configured yet)"
+        fi
+    fi
+}
+
+# --- enroll --------------------------------------------------------------------
+
+enroll_authelia() {
+    require_command "kubectl"
+
+    local phase
+    phase=$(kubectl get pods -n "$AUTHELIA_NAMESPACE" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || phase="NotFound"
+
+    if [ "$phase" != "Running" ]; then
+        fatal "Authelia is not running (pod phase: ${phase}). Run '$(basename "$0") install' first."
+    fi
+
+    echo ""
+    echo "============================================================"
+    echo "  Authelia Touch ID Enrollment"
+    echo "============================================================"
+    echo ""
+    echo "This is a one-time setup. After enrollment, all future logins"
+    echo "to Authelia (and all your apps) will use Touch ID directly."
+    echo ""
+
+    # --- Step 1: Instructions (all shown before browser opens) ---
+    echo "Step 1: Log in and register your device"
+    echo "-----------------------------------------"
+    echo "I'll open your browser to https://${AUTHELIA_HOST}."
+    echo ""
+    echo "Here's what you'll do in the browser:"
+    echo ""
+    echo "  1. Sign in with username 'admin' and your bootstrap password."
+    echo "  2. You'll see a 'One-Time Password' screen with a 'Register device' link."
+    echo "  3. Click 'Register device'."
+    echo "  4. On the Settings page, click 'ADD' next to 'WebAuthn Credentials'."
+    echo "  5. An 'Identity Verification' dialog will appear. DON'T close it."
+    echo "  6. Come back here to fetch the one-time code."
+    echo ""
+    echo "After you come back, we'll continue step by step."
+    echo ""
+    read -rp "Press Enter to open the browser..."
+    echo ""
+    echo "Opening browser..."
+    open "https://${AUTHELIA_HOST}" 2>/dev/null || log_warn "Could not open browser automatically. Please open https://${AUTHELIA_HOST} manually."
+    echo ""
+
+    # --- Step 2: Wait for user to reach the Identity Verification dialog ---
+    echo "Step 2: Wait for the Identity Verification dialog"
+    echo "--------------------------------------------------"
+    echo "When you see the 'Identity Verification' dialog in the browser,"
+    echo "come back here and press Enter."
+    echo ""
+    read -rp "Press Enter when you see the Identity Verification dialog..."
+    echo ""
+
+    # --- Step 3: Fetch and display the OTP code ---
+    echo "Step 3: Fetch the one-time code"
+    echo "--------------------------------"
+    log_info "Fetching one-time code..."
+    local notification=""
+    local attempts=0
+    while [ $attempts -lt 10 ]; do
+        notification=$(kubectl exec -n "$AUTHELIA_NAMESPACE" deploy/authelia -- cat /data/notification.txt 2>/dev/null) || notification=""
+        if [ -n "$notification" ]; then
+            break
+        fi
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+
+    if [ -z "$notification" ]; then
+        fatal "No notification found. Did you click 'ADD' next to WebAuthn Credentials?"
+    fi
+
+    # Check if this is an OTP code notification (contains "Confirm your identity")
+    if echo "$notification" | grep -q "Confirm your identity"; then
+        # Extract the OTP code (between the dash lines)
+        local otp_code
+        otp_code=$(echo "$notification" | awk '/^-+$/{flag=!flag; next} flag && NF{print; exit}')
+
+        if [ -n "$otp_code" ]; then
+            echo ""
+            echo "  Your one-time code is:"
+            echo ""
+            echo "    ${otp_code}"
+            echo ""
+            echo "Go back to the browser, paste this code in the 'One-Time Code'"
+            echo "field, and click VERIFY."
+            echo ""
+            echo "Then complete the WebAuthn enrollment wizard:"
+            echo "  - Enter a description (e.g., 'MacBook Touch ID')"
+            echo "  - Click NEXT"
+            echo "  - Choose where to save your passkey (e.g., 'Your Chrome profile')"
+            echo "  - Tap Touch ID when macOS prompts you"
+            echo ""
+            read -rp "Press Enter when you've completed the WebAuthn wizard..."
+            echo ""
+        else
+            fatal "Could not extract the one-time code from the notification."
+        fi
+    else
+        # If it's not an OTP code notification, something unexpected happened
+        fatal "Unexpected notification format. Expected an identity verification code."
+    fi
+
+    # --- Step 4: Verify enrollment is complete ---
+    echo "Step 4: Verify enrollment"
+    echo "--------------------------"
+    log_info "Checking enrollment status..."
+    notification=""
+    attempts=0
+    while [ $attempts -lt 10 ]; do
+        notification=$(kubectl exec -n "$AUTHELIA_NAMESPACE" deploy/authelia -- cat /data/notification.txt 2>/dev/null) || notification=""
+        if [ -n "$notification" ]; then
+            break
+        fi
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+
+    if [ -z "$notification" ]; then
+        log_warn "No notification found yet. Authelia may not have written the event log."
+        log_warn "If you completed the wizard, your Touch ID is likely registered."
+    elif echo "$notification" | grep -q "Second Factor Method Added"; then
+        log_info "✅ WebAuthn credential registered successfully."
+        # Extract the credential description from the notification
+        local credential_desc
+        credential_desc=$(echo "$notification" | awk '/^Description:/{print $2}')
+        if [ -n "$credential_desc" ]; then
+            log_info "  Credential: ${credential_desc}"
+        fi
+    else
+        log_warn "Unexpected notification. Enrollment may still be in progress."
+    fi
+
+    # --- Step 5: Verify (API) ---
+    echo ""
+    echo "Step 5: Verify"
+    echo "---------------"
+
+    # API test: check the health endpoint. The real Touch ID prompt is part
+    # of the wizard you just completed; a browser re-open on an existing
+    # session would not exercise it, so we do not run a browser test here.
+    log_info "Running API test..."
+    local health
+    health=$(curl -sf "https://${AUTHELIA_HOST}/api/health" 2>&1) || health=""
+    if [ -n "$health" ]; then
+        log_info "✅ API health check passed."
+    else
+        log_warn "⚠️ API health check failed. Touch ID enrollment may not be complete."
+    fi
+
+    # --- Final ---
+    echo ""
+    echo "============================================================"
+    echo "  ✅ Enrollment complete!"
+    echo "============================================================"
+    echo ""
+    echo "Touch ID is now your primary login method for Authelia"
+    echo "and all connected apps (Vault, agentgateway, Grafana)."
+    echo ""
+    echo "You can now wire up your apps:"
+    echo "  ldx vault sso"
+    echo "  ldx agentgateway sso"
+    echo "  ldx otel install"
+    echo ""
+}
+
+# --- main ----------------------------------------------------------------------
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        install)
+            install_authelia "$@"
+            ;;
+        prepare)
+            prepare_values ;;
+        uninstall)
+            uninstall_authelia "$@"
+            ;;
+        status)
+            status_authelia "$@"
+            ;;
+        enroll)
+            enroll_authelia "$@"
+            ;;
+        help|-h|--help)
+            show_help
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

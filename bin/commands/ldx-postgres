@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# ldx-help: infra Deploy PostgreSQL with pgvector (alias for 'ldx k8s --services postgres')
+#
+# ldx-postgres - Thin alias for the declarative platform stack.
+# PostgreSQL is managed by the ldx-local-platform Helm chart; the local
+# pgvector image is built by 'ldx k8s up' when missing. See 'ldx k8s'.
+#
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo ""
+    echo "Commands:"
+    echo "  install    Install PostgreSQL with pgvector and expose port 5432 to the host."
+    echo "  uninstall  Remove the PostgreSQL deployment and its data (PVC)."
+    echo ""
+    echo "Alias for 'ldx k8s up/down --services postgres' (uninstall adds"
+    echo "--purge-data, matching the historical behavior). For flags, status"
+    echo "and diffs use 'ldx k8s' directly."
+}
+
+case "${1:-}" in
+    install)
+        exec "${LDX_HOME}/bin/ldx" k8s up --services postgres "${@:2}"
+        ;;
+    uninstall)
+        exec "${LDX_HOME}/bin/ldx" k8s down --services postgres --purge-data "${@:2}"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    "")
+        show_help
+        exit 1
+        ;;
+    *)
+        log_error "Unknown subcommand: $1"
+        show_help
+        exit 1
+        ;;
+esac

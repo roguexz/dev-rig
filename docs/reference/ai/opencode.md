@@ -86,11 +86,12 @@ opencode ──(Bearer $AGENTGATEWAY_API_KEY)──▶ https://agentgateway.rd.l
 
 The key opencode uses is the gateway's **virtual client key** - not oMLX's own key:
 
-- Generated once as `agw-<48 hex>` and cached at `~/.cache/local-dev/agentgateway/api_key` (mode `0600`).
+- Generated once as `agw-<48 hex>` and cached in the host secret store as `ldx/agentgateway/api_key` (macOS
+  Keychain; `security find-generic-password -s ldx/agentgateway/api_key -w` or `ldx agentgateway api-key print`).
 - Stored in the cluster Secret `agentgateway-secrets` under `AGENTGATEWAY_API_KEY` and referenced from the gateway
   config as `$AGENTGATEWAY_API_KEY`, so the Secret is the canonical copy and reconciles survive.
 - Rotate or repair with `ldx agentgateway api-key`; `ldx opencode sync` picks the new value up on the next run (delete
-  the local cache file first to force regeneration).
+  the cached secret first (`ldx agentgateway api-key` regenerates) to force regeneration).
 
 ## Example
 

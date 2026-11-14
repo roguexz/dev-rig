@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# ldx-help: tools Manage system-wide automated Grype vulnerability scanner
+
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+find_cvescan_dir() {
+  local candidates=(
+    "${LDX_HOME}/cvescan"
+    "${HOME}/.local/share/ldx/cvescan"
+    "/usr/local/share/ldx/cvescan"
+  )
+  for dir in "${candidates[@]}"; do
+    if [ -n "$dir" ] && [ -f "${dir}/cvescan.sh" ]; then
+      echo "$dir"
+      return 0
+    fi
+  done
+  return 1
+}
+
+CVESCAN_SRC_DIR="$(find_cvescan_dir || true)"
+
+source "${LDX_HOME}/bin/lib/common.sh"
+
+PLIST_DEST="/Library/LaunchDaemons/com.system.cvescan.plist"
+SCRIPT_DEST="/usr/local/bin/cvescan.sh"
+CONF_DEST="/usr/local/etc/cvescan.conf"
+LOG_DIR="/var/log/cvescan"
+
+show_help() {
+  echo "Usage: ldx cvescan <command> [options]"
+  echo ""
+  echo "Commands:"
+  echo "  install      Deploy scanner script & LaunchDaemon plist into system directories (requires sudo)"
+  echo "  uninstall    Unload LaunchDaemon and remove system files (requires sudo)"
+  echo "  status       Check status of LaunchDaemon, scanner binary, and last scan state"
+  echo "  dry-run      Perform binary checks and list target folders without executing scan"
+  echo "               Flags: --target <folder> (-t <folder>)"
+  echo "  trigger      Manually trigger an immediate scan"
+  echo "               Flags: --target <folder> (-t <folder>), --full, --force, --dry-run"
+  echo "  logs         Tail or view recent scan execution logs"
+  echo "               Flags: --run 1 (default), --run 2, --run 3"
+  echo "  report       Open the visual HTML report in your default browser"
+  echo "               Flags: --regenerate (-r), --run 1 (default), --run 2, --run 3"
+  echo "  config       Show current configuration from /usr/local/etc/cvescan.conf"
+  echo ""
+}
+
+check_sudo() {
+  if [ "$EUID" -ne 0 ]; then
+    log_warn "This command requires elevated privileges. Prompting for sudo..."
+  fi
+}
+
+cmd_install() {
+  log_info "Verifying prerequisites..."
+
+  if [ -z "${CVESCAN_SRC_DIR}" ] || [ ! -f "${CVESCAN_SRC_DIR}/cvescan.sh" ]; then
+    fatal "Could not locate cvescan source assets (cvescan.sh). Please reinstall ldx using 'ldx install'."
+  fi
+
+  # Check grype
+  if ! command -v grype &>/dev/null && [ ! -x "/opt/homebrew/bin/grype" ] && [ ! -x "/usr/local/bin/grype" ]; then
+    log_warn "Grype binary not found. Please install it using: brew install grype"
+  fi
+
+  # Check terminal-notifier
+  if ! command -v terminal-notifier &>/dev/null && [ ! -x "/opt/homebrew/bin/terminal-notifier" ] && [ ! -x "/usr/local/bin/terminal-notifier" ]; then
+    log_warn "terminal-notifier not found. Desktop notifications will be disabled until installed: brew install terminal-notifier"
+  fi
+
+  check_sudo
+
+  log_info "Deploying scanner script to ${SCRIPT_DEST}..."
+  sudo mkdir -p "$(dirname "${SCRIPT_DEST}")"
+  sudo cp "${CVESCAN_SRC_DIR}/cvescan.sh" "${SCRIPT_DEST}"
+  sudo chown root:wheel "${SCRIPT_DEST}"
+  sudo chmod 755 "${SCRIPT_DEST}"
+
+  if [ -f "${CVESCAN_SRC_DIR}/report_template.html" ]; then
+    log_info "Deploying HTML report template to $(dirname "${SCRIPT_DEST}")/report_template.html..."
+    sudo cp "${CVESCAN_SRC_DIR}/report_template.html" "$(dirname "${SCRIPT_DEST}")/report_template.html"
+    sudo chown root:wheel "$(dirname "${SCRIPT_DEST}")/report_template.html"
+    sudo chmod 644 "$(dirname "${SCRIPT_DEST}")/report_template.html"
+  fi
+
+  log_info "Deploying LaunchDaemon plist to ${PLIST_DEST}..."
+  sudo mkdir -p "$(dirname "${PLIST_DEST}")"
+  sudo cp "${CVESCAN_SRC_DIR}/com.system.cvescan.plist" "${PLIST_DEST}"
+  sudo chown root:wheel "${PLIST_DEST}"
+  sudo chmod 644 "${PLIST_DEST}"
+
+  if [ ! -f "${CONF_DEST}" ]; then
+    log_info "Installing default configuration to ${CONF_DEST}..."
+    sudo mkdir -p "$(dirname "${CONF_DEST}")"
+    sudo cp "${CVESCAN_SRC_DIR}/cvescan.conf" "${CONF_DEST}"
+    sudo chown root:wheel "${CONF_DEST}"
+    sudo chmod 644 "${CONF_DEST}"
+  fi
+
+  sudo mkdir -p "${LOG_DIR}"
+  sudo chmod 755 "${LOG_DIR}"
+
+  log_info "Bootstrapping LaunchDaemon into system domain..."
+  # Unload first if previously loaded
+  sudo launchctl bootout system "${PLIST_DEST}" 2>/dev/null || true
+  sudo launchctl bootstrap system "${PLIST_DEST}"
+
+  log_info "cvescan installed and scheduled successfully!"
+  log_info "Run 'ldx cvescan status' to check service status."
+  log_info "Run 'ldx cvescan trigger' to execute an immediate test scan."
+}
+
+cmd_uninstall() {
+  check_sudo
+  log_info "Unloading LaunchDaemon..."
+  sudo launchctl bootout system "${PLIST_DEST}" 2>/dev/null || true
+
+  log_info "Removing system files..."
+  sudo rm -f "${SCRIPT_DEST}"
+  sudo rm -f "$(dirname "${SCRIPT_DEST}")/report_template.html"
+  sudo rm -f "${PLIST_DEST}"
+
+  log_info "cvescan system files removed. Configuration (${CONF_DEST}) and logs (${LOG_DIR}) were preserved."
+}
+
+cmd_status() {
+  echo "=== cvescan System Status ==="
+  echo ""
+
+  # Check Script
+  if [ -x "${SCRIPT_DEST}" ]; then
+    echo "Scanner Script: INSTALLED (${SCRIPT_DEST})"
+  else
+    echo "Scanner Script: NOT INSTALLED"
+  fi
+
+  # Check Plist
+  if [ -f "${PLIST_DEST}" ]; then
+    echo "LaunchDaemon Plist: INSTALLED (${PLIST_DEST})"
+  else
+    echo "LaunchDaemon Plist: NOT INSTALLED"
+  fi
+
+  # Check launchctl service status
+  echo ""
+  echo "=== launchctl Service Status ==="
+  if launchctl print system/com.system.cvescan &>/dev/null; then
+    echo "Service 'com.system.cvescan' is LOADED and ACTIVE in system domain."
+    launchctl print system/com.system.cvescan | head -n 15 || true
+  else
+    echo "Service 'com.system.cvescan' is NOT currently loaded in launchctl."
+  fi
+
+  # Check State JSON
+  if [ -f "${LOG_DIR}/state.json" ]; then
+    echo ""
+    echo "=== Last Scan State ==="
+    cat "${LOG_DIR}/state.json"
+  fi
+}
+
+cmd_trigger() {
+  local extra_args=("$@")
+
+  # If --dry-run is specified or if system script is not installed, run local script directly
+  local is_dry_run=false
+  for arg in "${extra_args[@]}"; do
+    if [ "$arg" = "--dry-run" ]; then
+      is_dry_run=true
+      break
+    fi
+  done
+
+  if [ "$is_dry_run" = true ] || [ ! -x "${SCRIPT_DEST}" ]; then
+    if [ -z "${CVESCAN_SRC_DIR}" ] || [ ! -f "${CVESCAN_SRC_DIR}/cvescan.sh" ]; then
+      fatal "Could not locate scanner script at ${SCRIPT_DEST} or in source assets."
+    fi
+    log_info "Executing scanner script (${CVESCAN_SRC_DIR}/cvescan.sh)..."
+    "${CVESCAN_SRC_DIR}/cvescan.sh" "${extra_args[@]}"
+  else
+    log_info "Triggering scanner script at ${SCRIPT_DEST}..."
+    if [ "$EUID" -ne 0 ]; then
+      sudo "${SCRIPT_DEST}" "${extra_args[@]}"
+    else
+      "${SCRIPT_DEST}" "${extra_args[@]}"
+    fi
+    log_info "Scan triggered successfully. Check logs with 'ldx cvescan logs'."
+  fi
+}
+
+cmd_logs() {
+  local target_log="${LOG_DIR}/grype_scan_latest.log"
+  if [ ! -f "$target_log" ] && [ -f "${HOME}/.cache/cvescan/grype_scan_latest.log" ]; then
+    target_log="${HOME}/.cache/cvescan/grype_scan_latest.log"
+  fi
+
+  if [ -f "$target_log" ]; then
+    echo "=== Displaying Latest Log: ${target_log} ==="
+    echo ""
+    cat "$target_log"
+  else
+    log_warn "Log file '${target_log}' does not exist yet. Run a scan first!"
+  fi
+}
+
+cmd_report() {
+  local do_regenerate=false
+  local run_num=1
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --regenerate|-r)
+        do_regenerate=true
+        shift 1
+        ;;
+      --run)
+        if [ -n "${2:-}" ]; then
+          run_num="$2"
+          shift 2
+        else
+          shift 1
+        fi
+        ;;
+      *)
+        shift 1
+        ;;
+    esac
+  done
+
+  local log_dir="${LOG_DIR}"
+  if [ ! -d "$log_dir" ] || [ ! -w "$log_dir" ]; then
+    if [ -d "${HOME}/.cache/cvescan" ]; then
+      log_dir="${HOME}/.cache/cvescan"
+    fi
+  fi
+
+  local target_html="${log_dir}/grype_report_latest.html"
+  local target_json="${log_dir}/grype_report_latest.json"
+
+  if [ "$run_num" -gt 1 ]; then
+    local json_files=()
+    while IFS= read -r f; do
+      [ -n "$f" ] && json_files+=("$f")
+    done < <(ls -1t "${log_dir}"/grype_report_20*.json 2>/dev/null || true)
+    
+    local idx=$(( run_num - 1 ))
+    if [ "$idx" -lt "${#json_files[@]}" ]; then
+      target_json="${json_files[$idx]}"
+      target_html="${target_json%.json}.html"
+    fi
+  fi
+
+  if [ "$do_regenerate" = true ]; then
+    log_info "Regenerating visual HTML report from existing scan data..."
+    if [ -x "${SCRIPT_DEST}" ]; then
+      "${SCRIPT_DEST}" --regenerate
+    elif [ -n "${CVESCAN_SRC_DIR}" ] && [ -f "${CVESCAN_SRC_DIR}/cvescan.sh" ]; then
+      "${CVESCAN_SRC_DIR}/cvescan.sh" --regenerate
+    fi
+  fi
+
+  if [ -f "$target_html" ]; then
+    log_info "Opening visual HTML report in default browser: ${target_html}..."
+    open "$target_html"
+  else
+    log_warn "HTML report '${target_html}' does not exist yet. Run a scan first!"
+  fi
+}
+
+cmd_config() {
+  if [ -f "${CONF_DEST}" ]; then
+    echo "=== Configuration File: ${CONF_DEST} ==="
+    cat "${CONF_DEST}"
+  elif [ -n "${CVESCAN_SRC_DIR}" ] && [ -f "${CVESCAN_SRC_DIR}/cvescan.conf" ]; then
+    log_warn "Configuration file '${CONF_DEST}' does not exist. Default template (${CVESCAN_SRC_DIR}/cvescan.conf):"
+    cat "${CVESCAN_SRC_DIR}/cvescan.conf"
+  else
+    log_warn "Configuration file '${CONF_DEST}' does not exist."
+  fi
+}
+
+if [ $# -lt 1 ]; then
+  show_help
+  exit 0
+fi
+
+SUBCOMMAND="$1"
+
+case "$SUBCOMMAND" in
+  install)
+    cmd_install
+    ;;
+  uninstall)
+    cmd_uninstall
+    ;;
+  status)
+    cmd_status
+    ;;
+  dry-run)
+    cmd_trigger --dry-run "$@"
+    ;;
+  trigger|run)
+    cmd_trigger "$@"
+    ;;
+  logs)
+    cmd_logs "$@"
+    ;;
+  report)
+    cmd_report "$@"
+    ;;
+  config)
+    cmd_config
+    ;;
+  help|-h|--help)
+    show_help
+    ;;
+  *)
+    log_error "Unknown subcommand: ${SUBCOMMAND}"
+    show_help
+    exit 1
+    ;;
+esac

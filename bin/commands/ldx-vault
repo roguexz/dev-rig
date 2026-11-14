@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# ldx-help: infra Manage local Vault deployment
+
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Base version guard: the chart pins the Vault app version
+# Command logic lives in bin/commands/vault/ modules; shared helpers in
+# common.sh, subcommand flows lazy-sourced on dispatch.
+source "${LDX_HOME}/bin/commands/vault/common.sh"
+
+VAULT_MODULE_DIR="${LDX_HOME}/bin/commands/vault"
+
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|status|unseal|seal|create-user|sso|upgrade|snapshot|uninstall> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  install     Install Vault, initialize it, and store keys."
+    echo "  status      Show the current status of the Vault installation."
+    echo "  unseal      Unseal the Vault using stored keys."
+    echo "  seal        Seal the Vault."
+    echo "  create-user Create (or update) a userpass user with entity metadata."
+    echo "  enable-secrets  Enable the KV v2 secrets engine and Kubernetes auth method."
+    echo "  sso         Configure Vault to use Authelia as its OIDC provider (Touch ID login)."
+    echo "  upgrade     Upgrade Vault to a chart version (default: latest) with a snapshot + checks."
+    echo "  snapshot    Save a storage snapshot (Raft or file backend; Vault must be unsealed)."
+    echo "  uninstall   Remove Vault and its stored keys."
+    echo ""
+    echo "Options for install:"
+    echo "  --oidc-client-id <id>          Google OIDC Client ID (enables OIDC login with WebAuthn/Passkeys)"
+    echo "  --oidc-client-secret <secret>  Google OIDC Client Secret"
+    echo "  --disable-userpass             Disable the default 'admin' userpass login (useful if relying purely on OIDC)"
+    echo ""
+    echo "Options for create-user:"
+    echo "  --password <pass>      Password (prompted when omitted)"
+    echo "  --full-name <name>     Display name exposed to OIDC clients via the profile scope"
+    echo "  --email <email>        Email exposed to OIDC clients via the profile scope"
+    echo "  --policies <list>      Vault policies for the user (default: default)"
+    echo ""
+    echo "Options for enable-secrets:"
+    echo "  (none required; enables KV v2 at 'secret', Kubernetes auth, and the mcp-secrets-read policy)"
+    echo ""
+    echo "Options for sso:"
+    echo "  (none required; requires 'ldx authelia install' to have been run first)"
+    echo ""
+    echo "Options for upgrade:"
+    echo "  <chart-version>        Target chart version (e.g. 0.34.1, app Vault 2.0.4)."
+    echo "                         Omit to upgrade to the latest chart."
+    echo "  --dry-run              Show what would change; do not touch the cluster."
+    echo ""
+    echo "Alternatively, you can set OIDC_CLIENT_ID and OIDC_CLIENT_SECRET environment variables."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        status)
+            status_vault
+            ;;
+        install|unseal|seal|uninstall|create-user|enable-secrets)
+            source "${VAULT_MODULE_DIR}/lifecycle.sh"
+            case "$subcommand" in
+                install)          setup_vault ;;
+                unseal)         unseal_vault ;;
+                seal)           seal_vault ;;
+                uninstall)      uninstall_vault ;;
+                create-user)    create_user_vault "$@" ;;
+                enable-secrets) enable_secrets_vault ;;
+            esac
+            ;;
+        sso)
+            source "${VAULT_MODULE_DIR}/sso.sh"
+            sso_vault "$@"
+            ;;
+        snapshot)
+            source "${VAULT_MODULE_DIR}/snapshot.sh"
+            snapshot_vault "$@"
+            ;;
+        upgrade)
+            source "${VAULT_MODULE_DIR}/upgrade.sh"
+            upgrade_vault "$@"
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

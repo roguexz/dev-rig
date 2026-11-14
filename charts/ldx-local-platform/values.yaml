@@ -1,0 +1,107 @@
+# Default values for ldx-local-platform.
+#
+# The .enabled flags are deployment switches, not user settings: 'ldx k8s'
+# passes one --set per service in its recorded set (see the state file under
+# $LDX_CONFIG_DIR) on every apply, so the enabled set survives upgrades
+# without relying on Helm value reuse.
+#
+# Everything below an enabled flag is tunable user config: pass a file with
+# 'ldx k8s up -f my-values.yaml'.
+#
+# hostAccess exposes each service on the host through Rancher Desktop:
+# a NodePort (nodePort) and a LoadBalancer (localhost).
+
+redisStack:
+  enabled: false
+  redis:
+    # Matches the pre-chart 'ldx redis install' resource names, so existing
+    # clusters keep their names and PVCs on upgrade.
+    fullnameOverride: redis
+    architecture: standalone
+    auth:
+      enabled: false
+  hostAccess:
+    nodePort: 30379
+
+postgresqlStack:
+  enabled: false
+  postgresql:
+    fullnameOverride: postgresql
+    architecture: standalone
+    global:
+      security:
+        allowInsecureImages: true
+    auth:
+      postgresPassword: changeit
+    image:
+      registry: ""
+      repository: local/bitnami-postgresql-pgvector
+      tag: "18"
+      pullPolicy: IfNotPresent
+    primary:
+      initdb:
+        scripts:
+          init-pgvector.sql: |
+            -- Enable pgvector on template1 so any new database created inherits it
+            \connect template1
+            CREATE EXTENSION IF NOT EXISTS vector;
+            -- Also enable it on the default postgres database
+            \connect postgres
+            CREATE EXTENSION IF NOT EXISTS vector;
+  hostAccess:
+    nodePort: 30432
+
+otelStack:
+  enabled: false
+  # .oidc and image settings are supplied by 'ldx k8s up' (Authelia probe,
+  # host secret store); override any of them with -f.
+
+agentgatewayStack:
+  enabled: false
+  # Gateway config, Vault Agent templates (per MCP tool) and the runtime
+  # Secret are CLI-owned; the chart carries the static deployment. The
+  # prehook supplies hostAliases and pins the image from the CLI constant.
+
+autheliaStack:
+  enabled: false
+  # Core secrets, hashed OIDC client secrets, JWKS key and Traefik
+  # annotations are supplied by 'ldx k8s' (prehook runs 'ldx authelia
+  # prepare'); the subchart defaults keep its resources in namespace
+  # 'authelia' (namespaceOverride).
+
+vaultStack:
+  enabled: false
+  # Matches the pre-chart 'ldx vault setup' resource names (vault, vault-0,
+  # PVC data-vault-0), so existing data survives the migration.
+  fullnameOverride: vault
+  # This chart (0.34.1 -> Vault 2.0.4) hard-codes required pod anti-affinity
+  # on hostname for the agent injector. On Rancher Desktop a rolling update
+  # can then never place its surge pod, so 'helm upgrade --wait' dies with
+  # "Progress deadline exceeded". Surge 0 / unavailable 1 makes the old pod
+  # leave before the new one schedules, which is what a single node needs.
+  server:
+    dev:
+      enabled: false
+    ha:
+      enabled: false
+    standalone:
+      enabled: true
+    dataStorage:
+      size: 1Gi
+    ingress:
+      enabled: true
+      ingressClassName: traefik
+      hosts:
+        - host: vault.rd.localhost
+          paths:
+            - /
+      tls:
+        - secretName: default-tls-secret
+          hosts:
+            - vault.rd.localhost
+  injector:
+    affinity: {}
+    strategy:
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1

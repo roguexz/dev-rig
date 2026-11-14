@@ -2,193 +2,84 @@
 #
 # ldx - Top-level CLI dispatcher for Local Development Experience & system tools
 #
+# Subcommands are auto-discovered as ldx-<name> executables in bin/commands/
+# (bin/ is also searched for back-compat). Each command contributes one line
+# of help metadata, "# ldx-help: <group> <text>", where <group> is one of the
+# GROUP_TITLES keys below. Adding a command = dropping a file in bin/commands/.
+#
 
 set -euo pipefail
 
-# Get the physical directory of the current script to locate library and subcommands
-get_script_dir() {
-  local SOURCE="${BASH_SOURCE[0]}"
-  while [ -L "$SOURCE" ]; do
-    local DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
-    SOURCE="$(readlink "$SOURCE")"
-    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
-  done
-  cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd
+# Locate the dev-rig checkout (LDX_HOME) from this script's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+COMMAND_DIRS=("${LDX_HOME}/bin/commands" "${LDX_HOME}/bin")
+
+# Group key -> help section title, in display order.
+GROUP_TITLES=(
+  "cli:CLI Management:"
+  "tools:Agent Skills & Utilities:"
+  "infra:Local Kubernetes & Infrastructure Setup (Rancher Desktop):"
+)
+
+ldx_version() {
+  local v=""
+  if command -v git &>/dev/null && [ -d "${LDX_HOME}/.git" ]; then
+    v="$(git -C "${LDX_HOME}" describe --tags --always --dirty 2>/dev/null || true)"
+  fi
+  [ -n "$v" ] || v="$(cat "${LDX_HOME}/VERSION" 2>/dev/null || echo dev)"
+  printf '%s\n' "$v"
 }
 
-SCRIPT_DIR="$(get_script_dir)"
+# Echoes the path of the handler for <name>, or returns non-zero.
+find_command() {
+  local name="$1" dir
+  [[ "$name" =~ ^[a-z0-9-]+$ ]] || return 1
+  for dir in "${COMMAND_DIRS[@]}"; do
+    if [ -x "${dir}/ldx-${name}" ]; then
+      printf '%s\n' "${dir}/ldx-${name}"
+      return 0
+    fi
+  done
+  return 1
+}
 
-# Source common utilities if available
-if [ -f "${SCRIPT_DIR}/lib/common.sh" ]; then
-  source "${SCRIPT_DIR}/lib/common.sh"
-else
-  log_info() { echo -e "\033[0;32m[INFO]\033[0m $1"; }
-  log_warn() { echo -e "\033[1;33m[WARN]\033[0m $1"; }
-  log_error() { echo -e "\033[0;31m[ERROR]\033[0m $1"; }
-  fatal() { log_error "$1"; exit 1; }
-fi
+# Extracts the "# ldx-help: <group> <text>" metadata line from a command file.
+command_help_tag() {
+  grep -m1 '^[# ]*# ldx-help:' "$1" 2>/dev/null | sed 's/.*# ldx-help: //' || true
+}
 
 show_help() {
-  echo "ldx - Local Development Experience CLI"
+  local entry group title file tag name desc line
+  echo "ldx - Local Development Experience CLI ($(ldx_version))"
   echo ""
   echo "Usage: $(basename "$0") <command> [subcommand] [flags]"
-  echo ""
-  echo "CLI Management:"
-  echo "  install       Install ldx binaries into local bin directory (default: copy mode, use --link for symlinks)"
-  echo ""
-  echo "Agent Skills & Utilities:"
-  echo "  skill         Manage agent skills (install, uninstall, list, info)"
-  echo "  cvescan       Manage system-wide automated Grype vulnerability scanner"
-  echo "  touchid       Manage Touch ID authentication for git push (pre-push hook)"
-  echo ""
-  echo "Local Kubernetes & Infrastructure Setup (Rancher Desktop):"
-  echo "  tls           Manage TLS certificates and Traefik configuration"
-  echo "  certmanager   Install cert-manager, ClusterIssuer, and ClusterTrustBundle (CA distribution)"
-  echo "  otel          Deploy and configure OpenTelemetry LGTM stack"
-  echo "  redis         Deploy Redis stack"
-  echo "  postgres      Deploy PostgreSQL with pgvector extension"
-  echo "  vault         Manage local Vault deployment"
-  echo "  authelia      Deploy Authelia (OIDC provider with WebAuthn/Touch ID support)"
-  echo "  agentgateway  Deploy agentgateway (LLM/MCP/A2A gateway) with oMLX sync and Authelia SSO"
-  echo "  opencode      Configure the local opencode harness from agentgateway models"
+  for entry in "${GROUP_TITLES[@]}"; do
+    group="${entry%%:*}"
+    title="${entry#*:}"
+    local -a lines=()
+    for file in "${COMMAND_DIRS[0]}"/ldx-*; do
+      [ -x "$file" ] || continue
+      tag="$(command_help_tag "$file")"
+      [ -n "$tag" ] || continue
+      [ "${tag%% *}" = "$group" ] || continue
+      desc="${tag#* }"
+      name="$(basename "$file")"
+      lines+=("$(printf '  %-13s %s' "${name#ldx-}" "$desc")")
+    done
+    if [ "${#lines[@]}" -gt 0 ]; then
+      echo ""
+      echo "$title"
+      for line in "${lines[@]}"; do
+        echo "$line"
+      done
+    fi
+  done
   echo ""
   echo "Run '$(basename "$0") <command> help' for detailed usage of a specific command."
-}
-
-install_binaries() {
-  local target_dir=""
-  local mode="copy" # Default mode is copy
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dir)
-        target_dir="$2"
-        shift 2
-        ;;
-      --link|-l|--mode=link|--mode=symlink)
-        mode="link"
-        shift
-        ;;
-      --copy|--mode=copy)
-        mode="copy"
-        shift
-        ;;
-      --help|-h)
-        echo "Usage: ldx install [options]"
-        echo ""
-        echo "Options:"
-        echo "  --dir <path>  Target directory (default: \$HOME/.local/bin or \$HOME/bin)"
-        echo "  --copy        Install by copying files (default)"
-        echo "  --link, -l    Install by creating symlinks to repository source"
-        exit 0
-        ;;
-      *)
-        fatal "Unknown install flag: $1"
-        ;;
-    esac
-  done
-
-  if [ -z "$target_dir" ]; then
-    if [ -d "${HOME}/.local/bin" ] || [ ! -d "${HOME}/bin" ]; then
-      target_dir="${HOME}/.local/bin"
-    else
-      target_dir="${HOME}/bin"
-    fi
-  fi
-
-  mkdir -p "$target_dir"
-
-  log_info "Installing ldx commands into '${target_dir}' using ${mode} mode..."
-
-  local scripts=("ldx" "ldx-skill" "ldx-cvescan" "ldx-touchid" "ldx-certmanager" "ldx-otel" "ldx-postgres" "ldx-redis" "ldx-tls" "ldx-vault" "ldx-authelia" "ldx-agentgateway" "ldx-opencode")
-  local repo_dir="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
-  local share_dir="$(cd "${target_dir}/.." &>/dev/null && pwd)/share/ldx"
-  [ -z "$share_dir" ] && share_dir="${target_dir}/share/ldx"
-
-  if [ "$mode" = "copy" ]; then
-    for script in "${scripts[@]}"; do
-      if [ -f "${SCRIPT_DIR}/${script}" ]; then
-        cp "${SCRIPT_DIR}/${script}" "${target_dir}/${script}"
-        chmod +x "${target_dir}/${script}"
-        log_info "Copied ${script} -> ${target_dir}/${script}"
-      fi
-    done
-    if [ -d "${SCRIPT_DIR}/lib" ]; then
-      mkdir -p "${target_dir}/lib"
-      cp -R "${SCRIPT_DIR}/lib/"* "${target_dir}/lib/"
-      log_info "Copied lib/ utilities -> ${target_dir}/lib/"
-    fi
-    if [ -d "${repo_dir}/config" ]; then
-      mkdir -p "${target_dir}/config"
-      cp -R "${repo_dir}/config/"* "${target_dir}/config/"
-      log_info "Copied config/ templates -> ${target_dir}/config/"
-    fi
-    if [ -d "${repo_dir}/cvescan" ]; then
-      mkdir -p "${share_dir}/cvescan"
-      cp -R "${repo_dir}/cvescan/"* "${share_dir}/cvescan/"
-      log_info "Copied cvescan/ assets -> ${share_dir}/cvescan/"
-    fi
-    if [ -d "${repo_dir}/lib" ]; then
-      mkdir -p "${share_dir}/lib"
-      cp -R "${repo_dir}/lib/"* "${share_dir}/lib/"
-      log_info "Copied lib/ assets -> ${share_dir}/lib/"
-    fi
-    if [ -d "${repo_dir}/skills" ]; then
-      mkdir -p "${share_dir}/skills"
-      cp -R "${repo_dir}/skills/"* "${share_dir}/skills/"
-      log_info "Copied skills/ assets -> ${share_dir}/skills/"
-    fi
-  else
-    for script in "${scripts[@]}"; do
-      if [ -f "${SCRIPT_DIR}/${script}" ]; then
-        ln -sf "${SCRIPT_DIR}/${script}" "${target_dir}/${script}"
-        chmod +x "${SCRIPT_DIR}/${script}"
-        log_info "Linked ${script} -> ${target_dir}/${script}"
-      fi
-    done
-    if [ -d "${SCRIPT_DIR}/lib" ]; then
-      mkdir -p "${target_dir}/lib"
-      for libfile in "${SCRIPT_DIR}/lib/"*; do
-        local libname="$(basename "$libfile")"
-        ln -sf "$libfile" "${target_dir}/lib/${libname}"
-      done
-      log_info "Linked lib/ utilities -> ${target_dir}/lib/"
-    fi
-    if [ -d "${repo_dir}/config" ]; then
-      mkdir -p "${target_dir}/config"
-      ln -snf "${repo_dir}/config" "${target_dir}/config"
-      log_info "Linked config/ templates -> ${target_dir}/config/"
-    fi
-    if [ -d "${repo_dir}/cvescan" ]; then
-      mkdir -p "${share_dir}"
-      ln -snf "${repo_dir}/cvescan" "${share_dir}/cvescan"
-      log_info "Linked cvescan/ assets -> ${share_dir}/cvescan/"
-    fi
-    if [ -d "${repo_dir}/lib" ]; then
-      mkdir -p "${share_dir}"
-      ln -snf "${repo_dir}/lib" "${share_dir}/lib"
-      log_info "Linked lib/ assets -> ${share_dir}/lib/"
-    fi
-    if [ -d "${repo_dir}/skills" ]; then
-      mkdir -p "${share_dir}"
-      ln -snf "${repo_dir}/skills" "${share_dir}/skills"
-      log_info "Linked skills/ assets -> ${share_dir}/skills/"
-    fi
-  fi
-
-  log_info "Installation complete!"
-
-  # Check if target_dir is in PATH
-  case ":$PATH:" in
-    *":${target_dir}:"*)
-      log_info "'${target_dir}' is already in your PATH."
-      ;;
-    *)
-      log_warn "'${target_dir}' is NOT currently in your PATH."
-      log_warn "Add the following line to your shell configuration (~/.zshrc or ~/.bashrc):"
-      echo -e "\n  export PATH=\"${target_dir}:\$PATH\"\n"
-      ;;
-  esac
 }
 
 if [ $# -lt 1 ]; then
@@ -200,32 +91,28 @@ COMMAND="$1"
 shift
 
 case "$COMMAND" in
-  install)
-    install_binaries "$@"
+  --version|-v|version)
+    ldx_version
     exit 0
-    ;;
-  skill|cvescan|touchid|tls|certmanager|otel|redis|postgres|vault|authelia|agentgateway|opencode)
-    EXEC_SCRIPT="${SCRIPT_DIR}/ldx-${COMMAND}"
     ;;
   help|-h|--help)
     show_help
     exit 0
     ;;
   *)
-    log_error "Unknown command: ${COMMAND}"
-    show_help
-    exit 1
+    if EXEC_SCRIPT="$(find_command "$COMMAND")"; then
+      :
+    else
+      log_error "Unknown command: ${COMMAND}"
+      show_help
+      exit 1
+    fi
     ;;
 esac
 
 if [ ! -x "${EXEC_SCRIPT}" ]; then
-  if [ -f "${EXEC_SCRIPT}" ]; then
-    log_warn "Script '${EXEC_SCRIPT}' exists but is not executable. Run 'chmod +x ${EXEC_SCRIPT}'."
-    exit 1
-  else
-    log_error "Command handler '${EXEC_SCRIPT}' was not found."
-    exit 1
-  fi
+  log_warn "Script '${EXEC_SCRIPT}' exists but is not executable. Run 'chmod +x ${EXEC_SCRIPT}'."
+  exit 1
 fi
 
 exec "${EXEC_SCRIPT}" "$@"

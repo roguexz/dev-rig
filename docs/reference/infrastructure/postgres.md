@@ -3,6 +3,14 @@
 This command deploys a standalone PostgreSQL instance in the Kubernetes cluster with the `pgvector` extension enabled
 and exposes it so that it is accessible directly from your host machine.
 
+`ldx postgres` is a thin alias for the declarative platform stack: it runs `ldx k8s up/down --services postgres
+--purge-data` (uninstall). PostgreSQL is a subchart of the `ldx-local-platform` umbrella chart - see
+[the platform stack reference](./k8s.md).
+
+Before installing, `ldx k8s` builds the `local/bitnami-postgresql-pgvector:18` image in the Rancher Desktop Docker
+context if it is not present: the pgvector extension is grafted onto the Bitnami PostgreSQL base image, which is why
+the chart pins an image built on the host rather than pulling one.
+
 ## Commands
 
 ### `ldx postgres install`
@@ -13,7 +21,8 @@ This command installs a standalone PostgreSQL instance into the configured names
 
 ### `ldx postgres uninstall`
 
-This command cleans up the PostgreSQL deployment, including the persistent storage PVC, leaving the namespace intact.
+This command removes PostgreSQL from the platform release, including its persistent storage PVC, leaving the namespace
+and the other services intact.
 
 ## Connecting to PostgreSQL
 

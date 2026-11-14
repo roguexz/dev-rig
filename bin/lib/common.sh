@@ -4,31 +4,33 @@ set -euo pipefail
 
 # --- Config directory ---------------------------------------------------------
 # The repository's config/ directory holds K8s templates (.yaml.tpl) and Helm
-# values files. Scripts locate it relative to their own directory:
-#   - Running from the repo:   repo/bin/ldx-*  → repo/config/
-#   - Installed (copy mode):   ~/.local/bin/   → ~/.local/bin/config/
-#   - Installed (link mode):   ~/.local/bin/   → repo/config/ (symlinked)
+# values files. Scripts locate it through LDX_HOME, the dev-rig checkout root
+# exported by the command bootstrap:
+#   - Running from the repo:   LDX_HOME=repo       -> repo/config/
+#   - Symlink install:         realpath -> repo    -> repo/config/
+#   - Package install (brew):  LDX_HOME=<libexec>  -> <libexec>/config/
 #
-# The resolver checks alongside the script first, then one level up (repo root).
-# The caller sets SCRIPT_DIR before sourcing this file.
+# The resolver checks the checkout root first, then falls back to a
+# repo-layout parent lookup. The caller exports LDX_HOME (or sets
+# SCRIPT_DIR) before sourcing this file.
 get_config_dir() {
-    local script_dir="${1:-.}"
-    # Check alongside the script (copy-mode install puts config/ here)
-    if [ -d "${script_dir}/config" ]; then
-        echo "${script_dir}/config"
+    local root="${1:-.}"
+    # Checkout/package root (link installs and brew libexec keep
+    # config/ next to the installed tree)
+    if [ -d "${root}/config" ]; then
+        echo "${root}/config"
         return
     fi
-    # Check the repo root (running from the repo, or link-mode install)
-    local parent="$(cd "${script_dir}/.." 2>/dev/null && pwd)"
+    # Repo layout: sourced with only SCRIPT_DIR known (bin/ -> repo root)
+    local parent="$(cd "${root}/.." 2>/dev/null && pwd)"
     if [ -d "${parent}/config" ]; then
         echo "${parent}/config"
         return
     fi
-    # Fallback: alongside the script (will fail gracefully later if missing)
-    echo "${script_dir}/config"
+    # Fallback: alongside the root (will fail gracefully later if missing)
+    echo "${root}/config"
 }
-
-export CONFIG_DIR="$(get_config_dir "${SCRIPT_DIR:-.}")"
+export CONFIG_DIR="$(get_config_dir "${LDX_HOME:-${SCRIPT_DIR:-.}}")"
 
 # Renders a K8s template file, substituting {{VAR}} placeholders with the given
 # VAR=value pairs. Uses sed with escaped special characters for safety.
@@ -209,6 +211,136 @@ require_command() {
 init_dirs() {
     mkdir -p "${CERTS_DIR}"
     mkdir -p "${VAULT_DIR}"
+}
+
+# --- Host secret storage ------------------------------------------------------
+# Small host-side secrets (OIDC client secrets, API keys, Vault unseal keys)
+# are stored in the macOS Keychain as generic passwords named
+# "ldx/<namespace>/<key>" (account: $USER). On non-macOS hosts, or with
+# LDX_SECRETS_BACKEND=file, they fall back to files under
+# ${CACHE_DIR}/secrets/<namespace>/<key> (mode 0600).
+#
+# ldx_secret_get_kv migrates legacy KEY=VALUE cache files: on the first read
+# of a key, every line of the file is imported into the backend and the file
+# is removed.
+ldx_secret_backend() {
+    if [ "${LDX_SECRETS_BACKEND:-}" = "file" ]; then
+        echo "file"
+    elif [ "$(uname -s)" = "Darwin" ] && command -v security &>/dev/null; then
+        echo "keychain"
+    else
+        echo "file"
+    fi
+}
+
+ldx_secret_service() { printf 'ldx/%s/%s' "$1" "$2"; }
+
+# Usage: ldx_secret_put <namespace> <key> <value>
+ldx_secret_put() {
+    local ns="$1" key="$2" value="$3"
+    case "$(ldx_secret_backend)" in
+        keychain)
+            # The security CLI mangles values with newlines or a leading dash
+            # (PEM blocks: "-----BEGIN ..."), so such values are stored with a
+            # transparent "b64:" envelope; ldx_secret_get decodes it. Plain
+            # values stay byte-identical for compatibility.
+            local stored="$value"
+            case "$value" in
+                *$'\n'*|-$*) stored="b64:$(printf '%s' "$value" | base64 | tr -d '\n')" ;;
+            esac
+            security add-generic-password -a "$USER" -s "$(ldx_secret_service "$ns" "$key")" \
+                -l "ldx secret ${ns}/${key}" -w "$stored" -U >/dev/null
+            ;;
+        file)
+            mkdir -p "${CACHE_DIR}/secrets/${ns}"
+            printf '%s' "$value" > "${CACHE_DIR}/secrets/${ns}/${key}"
+            chmod 600 "${CACHE_DIR}/secrets/${ns}/${key}"
+            ;;
+    esac
+}
+
+# Usage: ldx_secret_get <namespace> <key>   (echoes value; rc 1 if absent)
+ldx_secret_get() {
+    local ns="$1" key="$2"
+    case "$(ldx_secret_backend)" in
+        keychain)
+            local v
+            v=$(security find-generic-password -s "$(ldx_secret_service "$ns" "$key")" -w 2>/dev/null) || return 1
+            case "$v" in
+                b64:*) printf '%s\n' "${v#b64:}" | base64 -d ;;
+                *)     printf '%s\n' "$v" ;;
+            esac
+            ;;
+        file)
+            [ -f "${CACHE_DIR}/secrets/${ns}/${key}" ] || return 1
+            cat "${CACHE_DIR}/secrets/${ns}/${key}"
+            ;;
+    esac
+}
+
+# Usage: ldx_secret_has <namespace> <key>
+ldx_secret_has() {
+    local ns="$1" key="$2"
+    ldx_secret_get "$ns" "$key" >/dev/null 2>&1
+}
+
+# Usage: ldx_secret_delete <namespace> <key>   (ignores absence)
+ldx_secret_delete() {
+    local ns="$1" key="$2"
+    case "$(ldx_secret_backend)" in
+        keychain)
+            security delete-generic-password -s "$(ldx_secret_service "$ns" "$key")" >/dev/null 2>&1 || true
+            ;;
+        file)
+            rm -f "${CACHE_DIR}/secrets/${ns}/${key}"
+            ;;
+    esac
+}
+
+# Usage: ldx_secret_get_kv <namespace> <legacy_file> <key>
+# Reads <key> from the backend. If the backend has no entry yet and
+# <legacy_file> (KEY=VALUE lines, the pre-Keychain cache format) exists,
+# imports every line first. The file is removed ONLY after at least one
+# line imported successfully - a file in the wrong format is kept, never
+# silently destroyed.
+ldx_secret_get_kv() {
+    local ns="$1" legacy_file="$2" key="$3"
+    if ! ldx_secret_has "$ns" "$key" && [ -f "$legacy_file" ]; then
+        local line imported=0
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -n "$line" ] || continue
+            [ "${line#*=}" != "$line" ] || continue
+            ldx_secret_put "$ns" "${line%%=*}" "${line#*=}"
+            imported=$((imported + 1))
+        done < "$legacy_file"
+        if [ "$imported" -gt 0 ] && ldx_secret_has "$ns" "$key"; then
+            rm -f "$legacy_file"
+            log_info "Migrated ${legacy_file} (${imported} entries) into $(ldx_secret_backend) storage (ldx/${ns}/*)." >&2
+        else
+            log_warn "Not migrating ${legacy_file}: no KEY=VALUE lines recognized (file kept; use ldx_secret_get_blob for whole-file secrets)." >&2
+        fi
+    fi
+    ldx_secret_get "$ns" "$key"
+}
+
+# Usage: ldx_secret_get_blob <namespace> <legacy_file> <key>
+# Same migration idea, for whole-file values (JSON blobs, single tokens).
+# The entire file becomes one secret under <key>; the file is removed only
+# after the stored value is verified to match.
+ldx_secret_get_blob() {
+    local ns="$1" legacy_file="$2" key="$3"
+    if ! ldx_secret_has "$ns" "$key" && [ -f "$legacy_file" ]; then
+        local content
+        content=$(cat "$legacy_file")
+        ldx_secret_put "$ns" "$key" "$content"
+        if [ "$(ldx_secret_get "$ns" "$key")" = "$content" ]; then
+            rm -f "$legacy_file"
+            log_info "Migrated ${legacy_file} into $(ldx_secret_backend) storage (ldx/${ns}/${key})." >&2
+        else
+            log_warn "Verification failed after migrating ${legacy_file}; keeping the file." >&2
+        fi
+    fi
+    ldx_secret_get "$ns" "$key"
 }
 
 # --- Wrapper Functions ---

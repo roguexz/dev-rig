@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# ldx-help: infra Deploy Redis stack (alias for 'ldx k8s --services redis')
+#
+# ldx-redis - Thin alias for the declarative platform stack.
+# Redis is managed by the ldx-local-platform Helm chart; see 'ldx k8s'.
+#
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo ""
+    echo "Commands:"
+    echo "  install    Install Redis and expose port 6379 to the host."
+    echo "  uninstall  Remove the Redis deployment."
+    echo ""
+    echo "Alias for 'ldx k8s up/down --services redis'. For flags, status and"
+    echo "diffs use 'ldx k8s' directly."
+}
+
+case "${1:-}" in
+    install)
+        exec "${LDX_HOME}/bin/ldx" k8s up --services redis "${@:2}"
+        ;;
+    uninstall)
+        exec "${LDX_HOME}/bin/ldx" k8s down --services redis "${@:2}"
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    "")
+        show_help
+        exit 1
+        ;;
+    *)
+        log_error "Unknown subcommand: $1"
+        show_help
+        exit 1
+        ;;
+esac

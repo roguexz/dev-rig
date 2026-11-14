@@ -1,0 +1,12 @@
+{{- if .Values.ca.cert }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mkcert-root-ca
+  labels:
+    app.kubernetes.io/name: mkcert
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ .Values.ca.cert | b64enc | quote }}
+  tls.key: {{ required "ca.key is required when ca.cert is set" .Values.ca.key | b64enc | quote }}
+{{- end }}

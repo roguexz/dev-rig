@@ -1,5 +1,10 @@
 # OpenTelemetry Stack (`ldx otel`)
 
+`ldx otel` is a thin alias for the declarative platform stack: it runs `ldx k8s up/down --services otel`. The LGTM
+stack is a subchart of the `ldx-local-platform` umbrella chart - see
+[the platform stack reference](../infrastructure/k8s.md). Authelia OIDC SSO for Grafana is detected at install time; the client secret
+is read from the host secret store, not from disk.
+
 This command deploys a complete, push-based observability stack based on the `docker-otel-lgtm` model. It allows you to
 send logs, traces, and metrics from your applications to a single endpoint and visualize them in Grafana.
 

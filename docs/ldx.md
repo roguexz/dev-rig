@@ -11,7 +11,8 @@ automation and host security utilities.
 ldx <command> [subcommand] [flags]
 ```
 
-You can also run individual capability binaries directly, such as `ldx-vault unseal`, `ldx-postgres install`, etc.
+You can also run individual command scripts directly from the repository, such as `bin/commands/ldx-vault unseal`,
+`bin/commands/ldx-postgres install`, etc. Commands are auto-discovered as `bin/commands/ldx-<command>` executables.
 
 ---
 
@@ -35,7 +36,7 @@ One-off override:
 
 ```bash
 LDX_NAMESPACE=devtools ldx redis install     # Redis into 'devtools'
-LDX_VAULT_NAMESPACE=secrets ldx vault setup  # Vault into 'secrets', other tools unaffected
+LDX_VAULT_NAMESPACE=secrets ldx vault install  # Vault into 'secrets', other tools unaffected
 ```
 
 ### Local config file
@@ -61,13 +62,13 @@ alphanumeric, at most 63 characters).
 
 | Command            | Category                | Description                                                           | Documentation                        |
 |:-------------------|:------------------------|:----------------------------------------------------------------------|:-------------------------------------|
-| `ldx install`      | Management              | Install `ldx` commands to local bin (`--copy` default, `--link` flag) | [README.md](../README.md)            |
 | `ldx skill`        | Agent Skills            | Manage agent skills (install, uninstall, list, info)                  | [skill.md](./reference/ai/skill.md)               |
 | `ldx cvescan`      | Host Security           | System-wide automated Grype vulnerability scanner daemon              | [cvescan.md](./reference/security/cvescan.md)           |
 | `ldx touchid`      | Host Security           | Touch ID (biometric) authentication for `git push` via pre-push hook  | [touchid.md](./reference/security/touchid.md)           |
 | `ldx tls`          | Dev Infrastructure      | Local TLS certificates & Traefik configuration                        | [tls.md](./reference/infrastructure/tls.md)                   |
 | `ldx certmanager`  | Kubernetes Dev          | In-cluster `cert-manager` setup                                       | [cert-manager.md](./reference/infrastructure/cert-manager.md) |
 | `ldx otel`         | Observability           | Grafana LGTM stack (Loki, Grafana, Tempo, Mimir)                      | [otel.md](./reference/observability/otel.md)                 |
+| `ldx k8s`          | Dev Infrastructure      | Declarative platform stack (Helm umbrella chart)                      | [k8s.md](./reference/infrastructure/k8s.md)                |
 | `ldx redis`        | Dev Infrastructure      | Redis stack deployment                                                | [redis.md](./reference/infrastructure/redis.md)                 |
 | `ldx postgres`     | Dev Infrastructure      | PostgreSQL with `pgvector` extension                                  | [postgres.md](./reference/infrastructure/postgres.md)         |
 | `ldx vault`        | Security / Secrets      | Local HashiCorp Vault deployment                                      | [vault.md](./reference/security/vault.md)               |
@@ -77,22 +78,16 @@ alphanumeric, at most 63 characters).
 
 ---
 
-## Installation to User PATH
+## Installation
 
-You can install all `ldx` tools to your user's bin directory (`$HOME/.local/bin` or `$HOME/bin`) by executing:
-
-```bash
-ldx install
-```
-
-To create symlinks back to this git repository instead of copying files:
+Installation is through the Homebrew tap:
 
 ```bash
-ldx install --link
+brew tap hashicorp/tap   # vault dependency (not in homebrew-core)
+brew tap roguexz/ldx
+brew install roguexz/ldx/ldx
 ```
 
-Ensure `$HOME/.local/bin` (or your installation target) is in your shell's configuration (`~/.zshrc` or `~/.bashrc`):
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+See the [README](../README.md). The commands resolve their assets through
+`LDX_HOME`, derived at runtime from the dispatcher's real path, so running
+`bin/ldx` directly from a checkout works without any install step.

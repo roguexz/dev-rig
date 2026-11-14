@@ -1,0 +1,38 @@
+# Static deployment only. Everything dynamic is CLI-owned (ldx agentgateway):
+#   - the gateway config ConfigMap (models/SSO merged in by sync-omlx / sso)
+#   - the Vault Agent ConfigMap (one template per registered MCP tool)
+#   - the runtime Secret (virtual client key, OIDC client secret, oMLX key)
+# The image is pinned in bin/commands/ldx-agentgateway (AGENTGATEWAY_IMAGE);
+# 'ldx k8s' overrides it there at apply time so the CLI stays the single
+# source of truth.
+nameOverride: agentgateway
+
+image: cr.agentgateway.dev/agentgateway:v1.7.0
+host: agentgateway.rd.localhost
+port: 4000
+
+serviceAccount: agentgateway
+
+# CLI-owned resources referenced by name (created by 'ldx agentgateway').
+secretName: agentgateway-secrets
+configCMName: agentgateway-config
+vaultAgentConfigCM: agentgateway-vault-agent-config
+extraCasCMName: extra-cas
+
+vaultAgent:
+  image: hashicorp/vault:2.0.4
+
+# Shared credentials dir: the Vault Agent writes provider tokens here, the
+# gateway reads them.
+mcpCredentialsDir: /etc/agentgateway/mcp-credentials
+
+storage:
+  size: 1Gi
+
+# Optional: resolve auth.rd.localhost to Traefik's ClusterIP (supplied by
+# 'ldx k8s' so the gateway reaches Authelia without external DNS).
+hostAliases: []
+
+# Pod annotations supplied by 'ldx agentgateway prepare-values' (checksums of
+# the CLI-owned ConfigMaps; changing them rolls the deployment).
+podAnnotations: {}

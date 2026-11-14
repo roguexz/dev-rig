@@ -1,0 +1,58 @@
+{{- if .Values.ca.cert }}
+{{- /*
+  Distribute the mkcert CA to all pods using K8s trust bundles.
+  Two APIs exist depending on K8s version:
+    - ClusterTrustBundle (certificates.k8s.io, K8s 1.32+): cluster-scoped
+    - TrustBundle (trustbundles.k8s.io, K8s 1.28-1.31): namespaced
+  Both project the CA to: /var/run/secrets/kubernetes.io/trust-bundles/<name>/ca-bundle.pem
+  .Capabilities.APIVersions reflects the live cluster during helm upgrade.
+*/ -}}
+{{- $ctb := "" -}}
+{{- if .Capabilities.APIVersions.Has "certificates.k8s.io/v1/ClusterTrustBundle" -}}
+  {{- $ctb = "certificates.k8s.io/v1" -}}
+{{- else if .Capabilities.APIVersions.Has "certificates.k8s.io/v1beta1/ClusterTrustBundle" -}}
+  {{- $ctb = "certificates.k8s.io/v1beta1" -}}
+{{- else if .Capabilities.APIVersions.Has "certificates.k8s.io/v1alpha1/ClusterTrustBundle" -}}
+  {{- $ctb = "certificates.k8s.io/v1alpha1" -}}
+{{- end -}}
+{{- if ne $ctb "" }}
+apiVersion: {{ $ctb }}
+kind: ClusterTrustBundle
+metadata:
+  name: mkcert-ca
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "20"
+spec:
+  # The trustBundle field expects raw PEM content (not base64-encoded).
+  trustBundle: |
+    {{- .Values.ca.cert | nindent 4 }}
+{{- else if .Capabilities.APIVersions.Has "trustbundles.k8s.io/v1alpha1" }}
+apiVersion: trustbundles.k8s.io/v1alpha1
+kind: TrustBundle
+metadata:
+  name: mkcert-ca
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "20"
+spec:
+  secretName: mkcert-root-ca
+  secretKey: tls.crt
+{{- else if .Capabilities.APIVersions.Has "trustbundles.k8s.io/v1" }}
+apiVersion: trustbundles.k8s.io/v1
+kind: TrustBundle
+metadata:
+  name: mkcert-ca
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "20"
+spec:
+  secretName: mkcert-root-ca
+  secretKey: tls.crt
+{{- end }}
+{{- end }}

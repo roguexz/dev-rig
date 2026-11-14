@@ -3,6 +3,10 @@
 This command deploys a standalone Redis instance in the Kubernetes cluster and exposes it so that it is accessible
 directly from your host machine.
 
+`ldx redis` is a thin alias for the declarative platform stack: it runs `ldx k8s up/down --services redis`. Redis is a
+subchart of the `ldx-local-platform` umbrella chart, so its lifecycle, values and diffs are shared with the other
+services - see [the platform stack reference](./k8s.md).
+
 ## Commands
 
 ### `ldx redis install`
@@ -12,7 +16,8 @@ This command installs a standalone, unauthenticated Redis instance into the conf
 
 ### `ldx redis uninstall`
 
-This command cleans up the Redis deployment, leaving the namespace intact.
+This command removes Redis from the platform release, leaving the namespace and the other services intact. Redis keeps
+no persistent volume, so nothing survives; PostgreSQL's PVC is unaffected.
 
 ## Connecting to Redis
 

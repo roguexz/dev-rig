@@ -1,0 +1,31 @@
+# Grafana OTel LGTM all-in-one image (Loki, Grafana, Tempo, Mimir, collector).
+# Tracks 'latest' like the pre-chart installer; pin via values to freeze.
+image:
+  repository: grafana/otel-lgtm
+  tag: "latest"
+  pullPolicy: Always
+
+adminPassword: changeit
+
+ingress:
+  className: traefik
+  host: otel.rd.localhost
+
+# Extra CA volume: the 'extra-cas' ConfigMap is created by the ldx CLI
+# (shared with other services), the deployment only mounts it.
+extraCAs:
+  enabled: true
+
+# Authelia OIDC SSO for Grafana. 'ldx k8s up' enables this when Authelia is
+# running and the GRAFANA_CLIENT_SECRET exists in the host secret store.
+oidc:
+  enabled: false
+  clientSecret: ""
+  clientId: grafana
+  issuerHost: auth.rd.localhost
+  autheliaNamespace: authelia
+  autheliaPort: 9091
+
+otlp:
+  grpcNodePort: null
+  httpNodePort: null

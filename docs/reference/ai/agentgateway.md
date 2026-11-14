@@ -8,7 +8,10 @@ a pod in the Kubernetes cluster and exposes it via Traefik Ingress and an intern
 ### `ldx agentgateway install`
 
 This command installs agentgateway into the configured namespace (default `commons`, see
-[Configuration](../../docs/ldx.md#configuration)):
+[Configuration](../../docs/ldx.md#configuration)). The static deployment (ServiceAccount, PVC, Deployment, Service,
+Ingress) ships as the `agentgateway` subchart of `ldx-local-platform` (`ldx k8s up --services agentgateway`); the
+dynamic pieces stay CLI-owned — the gateway config ConfigMap (oMLX models + SSO policy merged in), the Vault Agent
+ConfigMap (one template per registered MCP tool), the runtime Secret, and the Vault role binding:
 
 1. **Service account**: Creates a dedicated `agentgateway` ServiceAccount (replacing the `default` SA), which is bound
    to a Vault role that grants the Vault Agent sidecar permission to read MCP credentials.
@@ -31,7 +34,7 @@ This command installs agentgateway into the configured namespace (default `commo
 7. **Deployment**: Deploys the pinned agentgateway image (`cr.agentgateway.dev/agentgateway:v1.7.0`) with the config
    mounted read-only at `/etc/agentgateway/config.yaml`.
 8. **Client API key**: Ensures the gateway's virtual client API key exists (generated once as `agw-<48 hex>`, cached
-   at `~/.cache/local-dev/agentgateway/api_key` with mode `0600`, stored in the Secret under `AGENTGATEWAY_API_KEY`)
+   in the host secret store as `ldx/agentgateway/api_key`, stored in the Secret under `AGENTGATEWAY_API_KEY`)
    and wires the `llm.policies.apiKey` policy into the config so every LLM request must present it - see
    [`api-key`](#ldx-agentgateway-api-key).
 9. **Service & Ingress Exposure**: Exposes the gateway via Traefik Ingress (`https://agentgateway.rd.localhost`) and
@@ -43,7 +46,7 @@ the client API key policy; the UI itself is authenticated separately (Vault SSO 
 > **Note:** The ConfigMap mount is read-only, so the gateway runs with `config.storage.mode: hybrid`: the ConfigMap is
 > the baseline and resources managed through the UI or API are stored in the SQLite database on the PVC and merged over
 > it, surviving pod restarts. Saving the *whole* config file from the UI's config editor is still not possible (the
-> mounted file itself stays read-only). To change the baseline permanently, edit the manifest in `bin/ldx-agentgateway`
+> mounted file itself stays read-only). To change the baseline permanently, edit the manifest in `bin/commands/ldx-agentgateway`
 > and re-run `ldx agentgateway install`, or use `sync-omlx` / `sso` below.
 
 ### `ldx agentgateway sync-omlx`
@@ -73,11 +76,11 @@ Manages the gateway's virtual client API key - the credential clients must prese
   the `/mcp` route (`routes[].policies.apiKey`) by `install` and `sync-omlx`. Requests to `/v1/...` or `/mcp` without a
   valid key get `401`. The UI and its OIDC flow are not affected.
 - **Generation**: On first use, a key `agw-<48 hex>` is generated, written to
-  `~/.cache/local-dev/agentgateway/api_key` (mode `0600`), and stored in the `agentgateway-secrets` Secret under
+  the host secret store as `ldx/agentgateway/api_key`, and stored in the `agentgateway-secrets` Secret under
   `AGENTGATEWAY_API_KEY`. The config references it as `$AGENTGATEWAY_API_KEY` (expanded by agentgateway at load time),
   so the Secret is the canonical copy.
 - **Reuse and rotation**: Re-running the command is idempotent (reuses the cached key, repairs the Secret/config if
-  they drifted). Delete the cache file first to generate a fresh key. `--dry-run` prints without applying.
+  they drifted). Delete the `ldx/agentgateway/api_key` secret first to generate a fresh key. `--dry-run` prints without applying.
 
 Clients such as `ldx opencode sync` pick the key up from the cache file or the Secret automatically, and configure it
 for both the LLM provider and the MCP endpoint.
@@ -87,7 +90,7 @@ for both the LLM provider and the MCP endpoint.
 Enables Authelia (deployed by `ldx authelia install`) as the OIDC identity provider for the agentgateway UI:
 
 1. Checks that Authelia is running and its OIDC discovery endpoint responds.
-2. Reads the agentgateway client secret from the Authelia cache (`~/.cache/local-dev/authelia/client_secrets`).
+2. Reads the agentgateway client secret from the Authelia secret store (`ldx/authelia/client_secrets/*`).
 3. Stores the client secret and OIDC configuration in the `agentgateway-secrets` Secret.
 4. Updates the gateway's `ui.policies.oidc` block to point at Authelia's endpoints.
 5. Restarts the gateway.
@@ -160,7 +163,7 @@ ldx agentgateway mcp rotate <name> --token <new-token>
 
 #### Prerequisites
 
-- Vault must be set up with `ldx vault setup` (or `ldx vault enable-secrets` on an existing install) so that the KV v2
+- Vault must be set up with `ldx vault install` (or `ldx vault enable-secrets` on an existing install) so that the KV v2
   secrets engine, Kubernetes auth method, and `mcp-secrets-read` policy are in place.
 - The gateway must be installed with `ldx agentgateway install` (which creates the dedicated ServiceAccount, Vault
   role, and Vault Agent sidecar).

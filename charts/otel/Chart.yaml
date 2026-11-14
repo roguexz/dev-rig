@@ -1,0 +1,5 @@
+apiVersion: v2
+name: otel
+description: Grafana OTel LGTM all-in-one stack for ldx
+type: application
+version: 0.1.0

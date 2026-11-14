@@ -1,0 +1,1002 @@
+#!/usr/bin/env bash
+# ldx-help: infra Declare the local platform stack (Helm umbrella chart)
+#
+# ldx-k8s - Declarative lifecycle for the local platform stack.
+#
+# One Helm release ('ldx') of the ldx-local-platform umbrella chart owns
+# every service it enables. The service set is recorded per namespace (see
+# STATE_FILE) so 'up' is idempotent: re-running it reconciles the release to
+# the recorded set instead of re-specifying it.
+#
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+CHART_DIR="${LDX_HOME}/charts/ldx-local-platform"
+
+# Chart dependencies are NOT committed (charts/*/charts/ is gitignored): the
+# first-party subcharts are packaged from this repo's own charts/ source and
+# third-party charts (vault, cert-manager) are fetched from their upstream
+# Helm repositories, pinned by the committed Chart.lock. 'helm dependency
+# build' resolves exactly that lock; it runs automatically whenever anything
+# consumes a chart (fresh checkout, cleaned artifacts).
+ensure_chart_deps() {
+    local chart_dir="$1"
+    helm repo add hashicorp https://helm.releases.hashicorp.com >/dev/null 2>&1 || true
+    helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
+    helm repo add bitnami https://charts.bitnami.com/bitnami >/dev/null 2>&1 || true
+
+    # Layer below this one first: a file:// dependency that is a thin wrapper
+    # around a remote chart (redis, postgresql -> bitnami) must have its own
+    # charts/ resolved BEFORE the parent packages its directory, because helm
+    # packages subchart directories as-is and does not recurse.
+    local dep_name dep_repo dep_path
+    while read -r dep_name dep_repo; do
+        case "$dep_repo" in
+            file://*)
+                dep_path="$(cd "${chart_dir}/${dep_repo#file://}" 2>/dev/null && pwd)" || true
+                [ -n "$dep_path" ] && [ -f "${dep_path}/Chart.yaml" ] && ensure_chart_deps "$dep_path"
+                ;;
+        esac
+    done < <(helm show dependencies "$chart_dir" 2>/dev/null | awk 'NR>1 && NF >= 3 { print $1, $3 }')
+
+    if helm dependency list "$chart_dir" 2>/dev/null | awk 'NR>1 && $NF != "" && $NF != "ok" { found = 1 } END { exit !found }'; then
+        log_info "Building chart dependencies for $(basename "$chart_dir") (helm dependency build)..."
+        if ! helm dependency build "$chart_dir" >/dev/null; then
+            log_warn "dependency build failed (lock out of date?); falling back to helm dependency update..."
+            helm dependency update "$chart_dir" >/dev/null \
+                || fatal "Failed to resolve Helm chart dependencies for ${chart_dir}. Check network access to the chart repositories."
+        fi
+    fi
+}
+RELEASE="ldx"
+
+# Records the enabled service set, per namespace: 'ldx k8s up' adds to it and
+# 'ldx k8s down' removes from it, so 'up' needs no re-specification.
+STATE_FILE="${LDX_CONFIG_DIR}/k8s-services"
+
+show_help() {
+    echo "Usage: $(basename "$0") <up|down|status|diff|services> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  up        Reconcile the release toward the recorded service set."
+    echo "  down      Disable services, or remove the whole release."
+    echo "  status    Show the release, its services, and pod health."
+    echo "  diff      Preview the changes 'up' would apply (helm diff)."
+    echo "  services  List the recorded service set for a namespace."
+    echo ""
+    echo "Options (up/down/status/diff/services):"
+    echo "  --services <a,b>    Comma-separated services (default: all the chart supports)."
+    echo "  --namespace <ns>    Namespace of the release (default: see below)."
+    echo "  --purge-data        With 'down': also delete the services' PVCs."
+    echo "  -f, --values <file> Extra Helm values file, kept as the release's"
+    echo "                      user config and reused on every 'up' (repeatable)."
+    echo ""
+    echo "Services: $(services_supported)"
+    echo ""
+    echo "'up --services postgres' adds postgres to the set; 'down --services redis'"
+    echo "removes redis. 'up' with no --services reconciles what is already recorded."
+    echo ""
+    echo "Namespace resolution: --namespace, LDX_K8S_NAMESPACE, LDX_NAMESPACE,"
+    echo "then the recorded value from a previous run (default: ${LDX_DEFAULT_NAMESPACE})."
+}
+
+services_supported() {
+    echo "redis, postgres, otel, vault, authelia, agentgateway, certmanager"
+}
+
+# Services owned by the main 'ldx' umbrella release (certmanager is a
+# separate release: it spans namespaces and cluster-scoped resources).
+main_services_supported() {
+    echo "redis, postgres, otel, vault, authelia, agentgateway"
+}
+
+# Release-scoped service: the cert-manager chart lives in its own release
+# and namespace, driven by the same recorded service set.
+CM_RELEASE="ldx-cert-manager"
+CM_NAMESPACE="cert-manager"
+CM_TRAEFIK_NS="kube-system"
+
+service_scope() {
+    case "$1" in
+        certmanager) echo "certmanager" ;;
+        *)           echo "main" ;;
+    esac
+}
+
+# Maps a user-facing service name to its umbrella values key.
+service_key() {
+    case "$1" in
+        redis)    echo "redisStack" ;;
+        postgres) echo "postgresqlStack" ;;
+        otel)     echo "otelStack" ;;
+        vault)    echo "vaultStack" ;;
+        authelia) echo "autheliaStack" ;;
+        agentgateway) echo "agentgatewayStack" ;;
+        *)        return 1 ;;
+    esac
+}
+
+# Legacy per-tool Helm releases that predate the umbrella chart. Adoption
+# uninstalls the old release in-place; the chart uses identical resource
+# names (fullnameOverride), so StatefulSets rebind to the existing PVCs.
+legacy_release() {
+    case "$1" in
+        redis)    echo "redis" ;;
+        postgres) echo "postgresql" ;;
+        vault)    echo "vault" ;;
+        *)        return 1 ;;
+    esac
+}
+
+# Claims Helm ownership of existing resources (kubectl-applied, from the
+# pre-chart installers) so 'helm upgrade --install' adopts them into the
+# release instead of failing the ownership check. Args: <release> <ns>
+# <kind/name>...; a ref may carry '@other-ns' for resources living outside
+# the release namespace. Missing resources are skipped silently.
+adopt_resources() {
+    local rel="$1" relns="$2"; shift 2
+    local ref kind name ns
+    for ref in "$@"; do
+        ns="$relns"
+        [[ "$ref" == *"@"* ]] && { ns="${ref##*@}"; ref="${ref%@*}"; }
+        kind="${ref%%/*}"; name="${ref#*/}"
+        if kubectl get "$kind" "$name" -n "$ns" &>/dev/null 2>&1 \
+           || kubectl get "$kind" "$name" &>/dev/null 2>&1; then
+            kubectl annotate "$ref" -n "$ns" \
+                meta.helm.sh/release-name="$rel" \
+                meta.helm.sh/release-namespace="$relns" --overwrite >/dev/null 2>&1 \
+                || kubectl annotate "$ref" \
+                    meta.helm.sh/release-name="$rel" \
+                    meta.helm.sh/release-namespace="$relns" --overwrite >/dev/null
+            kubectl label "$ref" -n "$ns" app.kubernetes.io/managed-by=Helm --overwrite >/dev/null 2>&1 \
+                || kubectl label "$ref" app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
+            log_info "Adopted ${ref} (ns ${ns}) into release '${rel}'."
+        fi
+    done
+}
+
+resolve_namespace() {
+    local override="$1"
+    if [ -n "$override" ]; then
+        ldx_validate_namespace "$override"
+        echo "$override"
+    else
+        ldx_namespace k8s
+    fi
+}
+
+# --- Recorded service set -----------------------------------------------------
+# Format: one '<namespace>=<svc> <svc>' line per namespace.
+
+state_get() {
+    local ns="$1"
+    [ -f "$STATE_FILE" ] || return 0
+    grep "^[[:space:]]*${ns}=" "$STATE_FILE" 2>/dev/null \
+        | tail -n1 | cut -d= -f2- | tr ' ' '\n' | grep -v '^$' || true
+}
+
+state_set() {
+    local ns="$1"; shift
+    mkdir -p "$LDX_CONFIG_DIR"
+    local tmp="${STATE_FILE}.tmp.$$"
+    if [ -f "$STATE_FILE" ]; then
+        grep -v "^[[:space:]]*${ns}=" "$STATE_FILE" > "$tmp" || true
+    else
+        : > "$tmp"
+    fi
+    if [ "$#" -gt 0 ]; then
+        printf '%s=%s\n' "$ns" "$*" >> "$tmp"
+    fi
+    mv "$tmp" "$STATE_FILE"
+}
+
+# --- Builds -------------------------------------------------------------------
+
+# Builds the local pgvector image the postgresql subchart expects. The chart
+# pins its image by design, so the build stays in the CLI.
+ensure_postgres_image() {
+    local local_image="local/bitnami-postgresql-pgvector:18"
+
+    if ! command -v docker &>/dev/null; then
+        fatal "Required command 'docker' is not installed or not in PATH. Docker is needed to build the local pgvector image."
+    fi
+
+    if DOCKER_HOST="" docker --context rancher-desktop image inspect "$local_image" &>/dev/null; then
+        log_info "Found local pgvector image '$local_image'."
+        return
+    fi
+
+    log_info "Local pgvector image '$local_image' not found. Building it now..."
+    local tmp_dir
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ldx-pgvector-build.XXXXXX")"
+
+    {
+        echo "FROM pgvector/pgvector:pg18 AS builder"
+        echo "FROM registry-1.docker.io/bitnami/postgresql:latest"
+        echo "USER root"
+        echo "COPY --from=builder /usr/lib/postgresql/18/lib/vector.so /opt/bitnami/postgresql/lib/"
+        echo "COPY --from=builder /usr/share/postgresql/18/extension/vector* /opt/bitnami/postgresql/share/extension/"
+        echo "USER 1001"
+    } > "${tmp_dir}/Dockerfile"
+
+    DOCKER_HOST="" docker --context rancher-desktop build -t "$local_image" "${tmp_dir}"
+    rm -rf "$tmp_dir"
+    log_info "Local pgvector image built successfully."
+}
+
+# --- Per-service pre-apply hooks ----------------------------------------------
+# Hooks prepare the values a chart needs but cannot compute itself (cluster
+# probes, mkcert CA, host secret store). They append a generated values file
+# to APPLY_VALUES, applied on this run only (not recorded).
+
+APPLY_VALUES=()
+
+prehook_otel() {
+    # Extra CAs ConfigMap (mkcert CA) for the LGTM pod, shared mechanism with
+    # the other services (created by the CLI, mounted by the chart).
+    create_extra_cas_configmap "$NAMESPACE"
+
+    # Authelia OIDC: enable Grafana SSO when Authelia runs and its Grafana
+    # client secret exists in the host secret store.
+    local authelia_namespace grafana_secret="" values_file
+    authelia_namespace="$(ldx_namespace authelia)"
+    local phase
+    phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    if [ "$phase" = "Running" ]; then
+        grafana_secret=$(ldx_secret_get_kv authelia/client_secrets "${CACHE_DIR}/authelia/client_secrets" GRAFANA_CLIENT_SECRET 2>/dev/null) || true
+    fi
+
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-otel.XXXXXX.yaml")"
+    TMP_FILES+=("$values_file")
+    {
+        echo "otelStack:"
+        echo "  oidc:"
+        if [ -n "$grafana_secret" ]; then
+            echo "    enabled: true"
+            printf '    clientSecret: "%s"\n' "$grafana_secret"
+            printf '    autheliaNamespace: "%s"\n' "$authelia_namespace"
+        else
+            echo "    enabled: false"
+        fi
+    } > "$values_file"
+    APPLY_VALUES+=(--values "$values_file")
+
+    # Adopt resources the pre-chart installer created via kubectl apply.
+    adopt_resources "$RELEASE" "$NAMESPACE" \
+        deployment/lgtm service/grafana service/otel-collector ingress/grafana secret/grafana-secrets
+}
+
+prehook_certmanager() {
+    require_command "mkcert"
+
+    local ca_root root_cert root_key
+    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
+    root_cert="${ca_root}/rootCA.pem"
+    root_key="${ca_root}/rootCA-key.pem"
+    [ -f "$root_cert" ] && [ -f "$root_key" ] \
+        || fatal "mkcert root CA not found at ${ca_root}. Run 'mkcert -install' (or 'ldx tls install') first."
+
+    # The pre-chart installer ran cert-manager as release 'cert-manager'.
+    # Uninstalling it removes its resources (helm-owned); CRDs are preserved
+    # by Helm and reused by the new release. The kubectl-created mkcert
+    # resources are adopted by annotation.
+    local old
+    old=$(helm list -n "$CM_NAMESPACE" -f '^cert-manager$' -o json 2>/dev/null \
+        | jq -r '.[0].name // empty') || true
+    if [ -n "$old" ]; then
+        log_info "Adopting legacy '${old}' release into '${CM_RELEASE}'..."
+        helm uninstall "$old" -n "$CM_NAMESPACE" >/dev/null
+    fi
+    # crds.enabled=true made the pre-chart installer's release own the CRDs;
+    # uninstalling a release keeps them (helm never deletes CRDs) with the
+    # old release's ownership annotations. Re-tag any cert-manager-group CRD
+    # whose ownership points elsewhere.
+    local crd cur rel_adopted=0
+    for crd in $(kubectl get crd -o name 2>/dev/null \
+        | grep -E '\.(cert-manager|acme\.cert-manager)\.io$'); do
+        cur=$(kubectl get "$crd" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null) || cur=""
+        [ "$cur" = "$CM_RELEASE" ] && continue
+        kubectl annotate "$crd" \
+            meta.helm.sh/release-name="$CM_RELEASE" \
+            meta.helm.sh/release-namespace="$CM_NAMESPACE" --overwrite >/dev/null
+        kubectl label "$crd" app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
+        rel_adopted=$((rel_adopted + 1))
+    done
+    [ "$rel_adopted" -gt 0 ] && log_info "Adopted ${rel_adopted} cert-manager CRDs into release '${CM_RELEASE}'."
+    # The ClusterIssuer is applied as a post-install hook (after the webhook
+    # is Ready), so it is not adopted here - annotating it now would be
+    # validated by the very webhook that is not ready mid-migration.
+    adopt_resources "$CM_RELEASE" "$CM_NAMESPACE" \
+        secret/mkcert-root-ca \
+        "secret/mkcert-ca-bundle@${CM_TRAEFIK_NS}" \
+        "serverstransport/mkcert-ca@${CM_TRAEFIK_NS}" \
+        clustertrustbundle/mkcert-ca \
+        trustbundle/mkcert-ca
+}
+
+apply_certmanager() {
+    local ca_root
+    ca_root=$(mkcert -CAROOT)
+    log_info "Applying ${CM_RELEASE} (cert-manager + mkcert CA) ..."
+    ensure_chart_deps "${LDX_HOME}/charts/ldx-cert-manager"
+    helm upgrade --install "$CM_RELEASE" "${LDX_HOME}/charts/ldx-cert-manager" \
+        --namespace "$CM_NAMESPACE" \
+        --create-namespace \
+        --set-file ca.cert="${ca_root}/rootCA.pem" \
+        --set-file ca.key="${ca_root}/rootCA-key.pem" \
+        ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
+        --wait
+    kubectl rollout status deployment -n "$CM_NAMESPACE" \
+        -l app.kubernetes.io/instance="$CM_RELEASE" --timeout=120s || true
+}
+
+# Pre-apply: vault's pod must resolve auth.rd.localhost to Traefik's
+# ClusterIP (so Vault reaches Authelia through Traefik and the OIDC issuer
+# Host header matches, without external DNS). Moved from 'ldx vault setup'.
+prehook_vault() {
+    local traefik_ip="" ns svc ip
+    for ns in kube-system traefik ingress; do
+        svc=$(kubectl get svc -n "$ns" -l app.kubernetes.io/name=traefik -o 'jsonpath={.items[0].metadata.name}' 2>/dev/null) || true
+        if [ -n "$svc" ]; then
+            ip=$(kubectl get svc -n "$ns" "$svc" -o 'jsonpath={.spec.clusterIP}' 2>/dev/null) || true
+            [ -n "$ip" ] && [ "$ip" != "None" ] && traefik_ip="$ip" && break
+        fi
+    done
+
+    local values_file
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-vault.XXXXXX.yaml")"
+    TMP_FILES+=("$values_file")
+    {
+        echo "vaultStack:"
+        if [ -n "$traefik_ip" ]; then
+            echo "  server:"
+            echo "    hostAliases:"
+            echo "      - ip: \"${traefik_ip}\""
+            echo "        hostnames: [\"auth.rd.localhost\"]"
+        fi
+    } > "$values_file"
+    if [ -n "$traefik_ip" ]; then
+        log_info "Configuring Vault pod to resolve auth.rd.localhost to Traefik (${traefik_ip})..."
+    else
+        log_warn "Could not determine Traefik ClusterIP. Vault may not be able to reach Authelia for OIDC."
+    fi
+    APPLY_VALUES+=(--values "$values_file")
+    record_service_values vault "$values_file"
+}
+
+# Pre-apply: Authelia keeps its own namespace; the CLI supplies the dynamic
+# values (core secrets, hashed OIDC client secrets, JWKS key, Traefik
+# annotations) from the host secret store via 'ldx authelia prepare'.
+# Legacy installs were kubectl-applied, so adopt their resources first.
+prehook_authelia() {
+    local ans
+    ans="$(ldx_namespace authelia)"
+    kubectl create namespace "$ans" --dry-run=client -o yaml | kubectl apply -f -
+
+    adopt_resources "$RELEASE" "$NAMESPACE" \
+        "deployment/authelia@${ans}" "service/authelia@${ans}" "ingress/authelia@${ans}" \
+        "configmap/authelia-config@${ans}" "configmap/authelia-users@${ans}" \
+        "secret/authelia-secrets@${ans}" "pvc/authelia-data@${ans}" \
+        "certificate/authelia-cert@${ans}"
+
+    local values_file
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-authelia.XXXXXX.yaml")"
+    TMP_FILES+=("$values_file")
+    if ! "${LDX_HOME}/bin/ldx" authelia prepare > "$values_file"; then
+        fatal "Failed to render Authelia values ('ldx authelia prepare')."
+    fi
+    chmod 600 "$values_file"
+    # ('ldx authelia prepare' emits namespaceOverride inside its single
+    # autheliaStack block; appending a second block here would override it.)
+    APPLY_VALUES+=(--values "$values_file")
+    record_service_values authelia "$values_file"
+
+    # Pre-apply the rendered subchart. Authelia mounts its ConfigMap/Secret as
+    # files at pod creation; pods scheduled during the helm apply must mount
+    # the NEW config, which they only do once it exists on the API server.
+    # Server-side apply with --force-conflicts takes the fields back from any
+    # previous (even rolled-back) state; the helm apply that follows is then a
+    # no-op for these resources.
+    helm template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
+        --values "$CHART_DIR/values.yaml" --values "$values_file" \
+        --set autheliaStack.enabled=true 2>/dev/null \
+        | kubectl apply --server-side --force-conflicts -f - >/dev/null \
+        || log_warn "Authelia pre-apply failed; the helm apply will retry."
+}
+
+# Post-apply: the cert-manager Certificate must be Ready (the pod mounts its
+# TLS secret) and the deployment must roll out.
+posthook_authelia() {
+    local ans
+    ans="$(ldx_namespace authelia)"
+    kubectl wait --for=condition=Ready "certificate/authelia-cert" -n "$ans" --timeout=60s &>/dev/null \
+        || log_warn "TLS certificate not ready yet (cert-manager may be catching up)."
+    kubectl rollout status deployment/authelia -n "$ans" --timeout=120s \
+        || log_warn "Authelia rollout did not finish in time; check 'ldx authelia status'."
+}
+
+# Post-apply: vault must become Available before unsealing; a fresh (never
+# initialized) vault is left for 'ldx vault install', an initialized-but-sealed
+# vault is unsealed from the host secret store.
+posthook_vault() {
+    log_info "Waiting for vault-0..."
+    kubectl rollout status statefulset/vault -n "$NAMESPACE" --timeout=120s &>/dev/null || true
+
+    local sealed=""
+    sealed=$(kubectl exec -n "$NAMESPACE" vault-0 -- vault status -format=json 2>/dev/null         | jq -r .sealed 2>/dev/null) || true
+    case "$sealed" in
+        true)
+            log_info "Vault is sealed (existing data detected). Unsealing from the host secret store..."
+            # Advisory: a failed unseal (e.g. missing keys) warns; the apply
+            # itself succeeded, so 'up' must not report failure.
+            "${LDX_HOME}/bin/ldx" vault unseal \
+                || log_warn "Unseal failed (keys missing from the secret store?). Run 'ldx vault status'."
+            ;;
+        false)
+            log_info "Vault is running and unsealed."
+            ;;
+        *)
+            log_info "Vault is not initialized yet. Run 'ldx vault install'."
+            ;;
+    esac
+}
+
+# Uninstalls a legacy release that the chart is about to take over. PVCs are
+# left in place (helm uninstall does not delete them) and rebound by name.
+adopt_legacy() {
+    local service="$1" namespace="$2" old chart other
+    old="$(legacy_release "$service")" || return 0
+
+    chart=$(helm list -n "$namespace" -f "^${old}$" -o json 2>/dev/null \
+        | jq -r '.[0].chart // empty') || true
+
+    if [ -z "$chart" ]; then
+        # Not in the target namespace: warn if it exists elsewhere.
+        other=$(helm list -A -f "^${old}$" -o json 2>/dev/null \
+            | jq -r '.[0].namespace // empty') || true
+        if [ -n "$other" ] && [ "$other" != "$namespace" ]; then
+            log_warn "Legacy '${old}' release found in namespace '${other}', not '${namespace}'."
+            log_warn "It was left untouched. Migrate it with: helm uninstall ${old} -n ${other}"
+        fi
+        return 0
+    fi
+
+    log_info "Adopting legacy '${old}' release (chart ${chart}) into '${RELEASE}'..."
+    helm uninstall "$old" -n "$namespace" >/dev/null
+    log_info "Legacy release removed; the chart recreates the same resource names and rebinds the existing PVCs."
+}
+
+# --- Options ------------------------------------------------------------------
+
+SERVICES_CSV=""
+NAMESPACE_OVERRIDE=""
+PURGE_DATA=false
+declare -a VALUES_ARGS=()
+
+parse_common_options() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --services)
+                SERVICES_CSV="${2:?--services requires a value}"
+                shift 2
+                ;;
+            --services=*)
+                SERVICES_CSV="${1#*=}"
+                shift
+                ;;
+            --namespace)
+                NAMESPACE_OVERRIDE="${2:?--namespace requires a value}"
+                shift 2
+                ;;
+            --namespace=*)
+                NAMESPACE_OVERRIDE="${1#*=}"
+                shift
+                ;;
+            --purge-data)
+                PURGE_DATA=true
+                shift
+                ;;
+            -f|--values)
+                VALUES_ARGS+=(--values "${2:?$1 requires a value}")
+                shift 2
+                ;;
+            --values=*)
+                VALUES_ARGS+=(--values "${1#*=}")
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                # Bare words are service names: 'up redis postgres'.
+                case "$1" in
+                    redis|postgres|otel|vault|authelia|agentgateway|certmanager)
+                        SERVICES_CSV="${SERVICES_CSV:+${SERVICES_CSV},}$1"
+                        shift
+                        ;;
+                    *)
+                        fatal "Unknown option: $1"
+                        ;;
+                esac
+                ;;
+        esac
+    done
+}
+
+# Echoes validated, de-duplicated service names (one per line) from
+# SERVICES_CSV. With no --services, echoes nothing.
+parse_services() {
+    [ -n "${SERVICES_CSV:-}" ] || return 0
+
+    local out=() service
+    local IFS=','
+    for service in $SERVICES_CSV; do
+        service="${service//[[:space:]]/}"
+        [ -n "$service" ] || continue
+        case "$service" in
+            redis|postgres|otel|vault|authelia|agentgateway|certmanager) ;;
+            *) fatal "Unknown service: ${service} (supported: $(services_supported))" ;;
+        esac
+        local seen
+        for seen in "${out[@]+"${out[@]}"}"; do
+            [ "$seen" = "$service" ] && service="" && break
+        done
+        [ -n "$service" ] && out+=("$service")
+    done
+    unset IFS
+    printf '%s\n' "${out[@]}"
+}
+
+# Records the release's user values files so a plain 'ldx k8s up' keeps
+# applying them (helm takes values from the command line, not from state).
+VALUES_DIR="${LDX_CONFIG_DIR}/k8s-values"
+
+record_values_files() {
+    [ "${#VALUES_ARGS[@]}" -gt 0 ] || return 0
+    mkdir -p "$VALUES_DIR"
+    local i arg
+    for (( i=0; i<${#VALUES_ARGS[@]}; i++ )); do
+        arg="${VALUES_ARGS[$i]}"
+        [ "$arg" = "--values" ] || continue
+        cp "${VALUES_ARGS[$((i+1))]}" "${VALUES_DIR}/${NAMESPACE}-${VALUES_ARGS[$((i+1))]:?}.values"
+    done
+}
+
+# Echoes --values args for the namespace's recorded files.
+recorded_values_args() {
+    local f
+    for f in "${VALUES_DIR}/${NAMESPACE}-"*.values; do
+        [ -f "$f" ] || continue
+        printf -- '--values\n%s\n' "$f"
+    done
+}
+
+# --- Commands -----------------------------------------------------------------
+
+NAMESPACE=""
+TMP_FILES=()
+trap '[ "${#TMP_FILES[@]}" -gt 0 ] && rm -f "${TMP_FILES[@]}" || true' EXIT
+
+# Pre-apply: agentgateway's chart carries the static deployment; the dynamic
+# parts (config with merged models/SSO, Vault Agent per-tool templates, the
+# runtime Secret, extra CAs) are CLI-owned and (re)created idempotently by
+# 'ldx agentgateway prepare-support'. Legacy installs were kubectl-applied:
+# adopt the static resources first.
+prehook_agentgateway() {
+    "${LDX_HOME}/bin/ldx" agentgateway prepare-support \
+        || fatal "Failed to prepare agentgateway support resources."
+
+    adopt_resources "$RELEASE" "$NAMESPACE" \
+        "deployment/agentgateway" "service/agentgateway" "ingress/agentgateway" \
+        "pvc/agentgateway-data" "serviceaccount/agentgateway"
+
+    local values_file
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-agentgateway.XXXXXX.yaml")"
+    TMP_FILES+=("$values_file")
+    if ! "${LDX_HOME}/bin/ldx" agentgateway prepare-values > "$values_file"; then
+        fatal "Failed to render agentgateway values ('ldx agentgateway prepare-values')."
+    fi
+    chmod 600 "$values_file"
+    APPLY_VALUES+=(--values "$values_file")
+    record_service_values agentgateway "$values_file"
+}
+
+# Post-apply: the gateway (plus Vault Agent sidecar) must become Available.
+posthook_agentgateway() {
+    kubectl rollout status deployment/agentgateway -n "$NAMESPACE" --timeout=120s \
+        || log_warn "agentgateway rollout did not finish in time; check 'kubectl rollout status deployment/agentgateway -n $NAMESPACE'."
+}
+
+# Persist a service's generated values next to the state file so every later
+# reconcile (plain 'up', 'down') renders the chart identically. Secrets live
+# in ~/.config/ldx (mode 600), same trust level as the Keychain file backend.
+record_service_values() {
+    local service="$1" src="$2" dst
+    mkdir -p "$VALUES_DIR"
+    chmod 700 "$VALUES_DIR" 2>/dev/null || true
+    dst="${VALUES_DIR}/${NAMESPACE}-${service}.values"
+    cp "$src" "$dst"
+    chmod 600 "$dst"
+}
+
+# Run the pre-apply hooks for a list of main-scope services.
+service_prehooks() {
+    local s
+    for s in "$@"; do
+        case "$s" in
+            otel)         prehook_otel ;;
+            vault)        prehook_vault ;;
+            authelia)     prehook_authelia ;;
+            agentgateway) prehook_agentgateway ;;
+        esac
+    done
+}
+
+# Builds the helm --set flags for the main release, given a main-scope
+# service list (stdout, one arg per line).
+set_flags_for() {
+    local service
+    for service in "$@"; do
+        [ "$(service_scope "$service")" = "main" ] || continue
+        printf -- '--set\n%s.enabled=true\n' "$(service_key "$service")"
+    done
+    # Everything the main chart supports, disabled by default, so 'up' fully
+    # specifies the set instead of inheriting chart defaults for the rest.
+    local all svc
+    for all in $(main_services_supported | tr ',' ' '); do
+        svc="${all//[[:space:]]/}"
+        local in_set=false s
+        for s in "$@"; do
+            [ "$s" = "$svc" ] && in_set=true && break
+        done
+        [ "$in_set" = true ] || printf -- '--set\n%s.enabled=false\n' "$(service_key "$svc")"
+    done
+}
+
+apply_release() {
+    local -a services=("$@")
+    local -a set_args=() recorded=()
+
+    while IFS= read -r line; do
+        set_args+=("$line")
+    done < <(set_flags_for "${services[@]}")
+
+    while IFS= read -r line; do
+        recorded+=("$line")
+    done < <(recorded_values_args)
+
+    local -a main_only=()
+    local s
+    for s in "${services[@]}"; do
+        [ "$(service_scope "$s")" = "main" ] && main_only+=("$s")
+    done
+
+    helm upgrade --install "$RELEASE" "$CHART_DIR" \
+        --namespace "$NAMESPACE" \
+        ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
+        ${recorded[@]+"${recorded[@]}"} \
+        ${APPLY_VALUES[@]+"${APPLY_VALUES[@]}"} \
+        "${set_args[@]}" \
+        --force-conflicts \
+        --wait
+}
+
+k8s_up() {
+    require_command "helm"
+    require_command "kubectl"
+    require_command "jq"
+
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+    ldx_save_namespace k8s "$NAMESPACE"
+    [ -d "$CHART_DIR" ] || fatal "Chart directory not found: ${CHART_DIR}"
+    ensure_chart_deps "$CHART_DIR"
+
+    local -a requested=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && requested+=("$line")
+    done < <(parse_services)
+
+    local -a current=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && current+=("$line")
+    done < <(state_get "$NAMESPACE")
+
+    # Union of the recorded set and the requested services.
+    local -a desired=("${current[@]+"${current[@]}"}")
+    local want seen
+    for want in "${requested[@]+"${requested[@]}"}"; do
+        seen=false
+        for seen in "${desired[@]+"${desired[@]}"}"; do
+            [ "$seen" = "$want" ] && want="" && break
+        done
+        [ -n "$want" ] && desired+=("$want")
+    done
+
+    [ "${#desired[@]}" -gt 0 ] || fatal "No services recorded. Run 'ldx k8s up --services <name, name>' (supported: $(services_supported))."
+
+    # Split the set by release scope: the main umbrella vs. cert-manager.
+    local -a main_desired=()
+    local want_cm=false
+    local service
+    for service in "${desired[@]}"; do
+        if [ "$(service_scope "$service")" = "main" ]; then
+            main_desired+=("$service")
+        else
+            want_cm=true
+        fi
+    done
+
+    record_values_files "$NAMESPACE"
+
+    if [ "${#main_desired[@]}" -gt 0 ]; then
+        log_info "Namespace: ${NAMESPACE}"
+        kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+        for service in "${main_desired[@]}"; do
+            [ "$service" = "postgres" ] && ensure_postgres_image
+            adopt_legacy "$service" "$NAMESPACE"
+        done
+        service_prehooks "${main_desired[@]}"
+
+        log_info "Applying ${RELEASE} (${main_desired[*]}) ..."
+        apply_release "${main_desired[@]}"
+    fi
+
+    if [ "$want_cm" = true ]; then
+        prehook_certmanager
+        apply_certmanager
+    fi
+
+    for service in "${main_desired[@]}"; do
+        case "$service" in
+            vault)        posthook_vault ;;
+            authelia)     posthook_authelia ;;
+            agentgateway) posthook_agentgateway ;;
+        esac
+    done
+
+    state_set "$NAMESPACE" "${main_desired[@]}"
+
+    log_info "Platform is up."
+    for service in "${desired[@]}"; do
+        case "$service" in
+            redis)       log_info "Redis         -> localhost:6379" ;;
+            postgres)    log_info "PostgreSQL    -> localhost:5432 (postgres/changeit)" ;;
+            otel)        log_info "Grafana/LGTM  -> https://otel.rd.localhost (OTLP: localhost:4317/4318)" ;;
+            vault)       log_info "Vault         -> https://vault.rd.localhost (UI + API)" ;;
+            authelia)    log_info "Authelia      -> https://auth.rd.localhost (OIDC + WebAuthn)" ;;
+            agentgateway) log_info "agentgateway  -> https://agentgateway.rd.localhost (UI /ui, LLM /v1, MCP /mcp)" ;;
+            certmanager) log_info "cert-manager  -> release '${CM_RELEASE}' in namespace '${CM_NAMESPACE}', ClusterIssuer 'mkcert-issuer'" ;;
+        esac
+    done
+}
+
+k8s_down() {
+    require_command "helm"
+    require_command "kubectl"
+
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+
+    local -a current=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && current+=("$line")
+    done < <(state_get "$NAMESPACE")
+
+    local release_exists=true
+    helm status "$RELEASE" -n "$NAMESPACE" &>/dev/null || release_exists=false
+
+    # Whole-platform teardown: no --services, or the set empty afterwards.
+    local -a requested=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && requested+=("$line")
+    done < <(parse_services)
+
+    # Drop every requested service from the recorded set.
+    local -a remaining=()
+    local want svc keep
+    for svc in "${current[@]+"${current[@]}"}"; do
+        keep=true
+        for want in "${requested[@]+"${requested[@]}"}"; do
+            [ "$svc" = "$want" ] && keep=false && break
+        done
+        [ "$keep" = true ] && remaining+=("$svc")
+    done
+
+    # cert-manager teardown (its own release + namespace).
+    teardown_certmanager() {
+        if helm status "$CM_RELEASE" -n "$CM_NAMESPACE" &>/dev/null; then
+            log_info "Removing the '${CM_RELEASE}' release and the '${CM_NAMESPACE}' namespace..."
+            helm uninstall "$CM_RELEASE" -n "$CM_NAMESPACE"
+            # Hook-managed resources are not part of the release: remove
+            # them explicitly (mirrors the pre-chart uninstaller).
+            kubectl delete clusterissuer mkcert-issuer --ignore-not-found
+            kubectl delete clustertrustbundle mkcert-ca --ignore-not-found 2>/dev/null || true
+            kubectl delete trustbundle mkcert-ca -n "$CM_NAMESPACE" --ignore-not-found 2>/dev/null || true
+            kubectl delete namespace "$CM_NAMESPACE" --ignore-not-found
+        fi
+    }
+
+    if [ "${#requested[@]}" -eq 0 ] || [ "${#remaining[@]}" -eq 0 ]; then
+        if [ "$release_exists" = true ]; then
+            log_info "Removing the '${RELEASE}' release from '${NAMESPACE}'..."
+            helm uninstall "$RELEASE" -n "$NAMESPACE"
+            if [ "$PURGE_DATA" = true ]; then
+                log_info "Removing persistent volumes..."
+                kubectl delete pvc -n "$NAMESPACE" --all --ignore-not-found
+            fi
+        fi
+        teardown_certmanager
+        state_set "$NAMESPACE"
+        rm -f "${VALUES_DIR}/${NAMESPACE}-"*.values
+        log_info "Platform removed. The '${NAMESPACE}' namespace was not deleted."
+        return 0
+    fi
+
+    [ "$release_exists" = true ] || {
+        log_warn "No '${RELEASE}' release in namespace '${NAMESPACE}'. Nothing to do."
+        return 0
+    }
+
+    log_info "Disabling: ${requested[*]} (keeping: ${remaining[*]})"
+
+    local -a remaining_main=()
+    local rsvc
+    for rsvc in "${remaining[@]}"; do
+        [ "$(service_scope "$rsvc")" = "main" ] && remaining_main+=("$rsvc")
+    done
+    for rsvc in "${requested[@]}"; do
+        [ "$rsvc" = "certmanager" ] && teardown_certmanager
+    done
+
+    if [ "${#remaining_main[@]}" -gt 0 ]; then
+        # Kept services (authelia, vault) supply dynamic values through
+        # prehooks; without them the chart renders with empty defaults.
+        service_prehooks "${remaining_main[@]}"
+        apply_release "${remaining_main[@]}"
+    elif [ "$release_exists" = true ]; then
+        helm uninstall "$RELEASE" -n "$NAMESPACE"
+    fi
+    state_set "$NAMESPACE" "${remaining[@]}"
+
+    if [ "$PURGE_DATA" = true ]; then
+        log_info "Removing persistent volumes for the disabled services..."
+        for svc in "${requested[@]}"; do
+            case "$svc" in
+                redis)
+                    kubectl delete pvc -n "$NAMESPACE" -l app.kubernetes.io/name=redis --ignore-not-found
+                    ;;
+                postgres)
+                    kubectl delete pvc -n "$NAMESPACE" -l app.kubernetes.io/name=postgresql --ignore-not-found
+                    ;;
+                vault)
+                    kubectl delete pvc -n "$NAMESPACE" data-vault-0 --ignore-not-found
+                    ;;
+                authelia)
+                    kubectl delete pvc -n "$(ldx_namespace authelia)" authelia-data --ignore-not-found
+                    ;;
+                agentgateway)
+                    kubectl delete pvc -n "$NAMESPACE" agentgateway-data --ignore-not-found
+                    ;;
+            esac
+        done
+    fi
+
+    log_info "Done. The '${NAMESPACE}' namespace was not deleted."
+}
+
+k8s_status() {
+    require_command "helm"
+    require_command "kubectl"
+    require_command "jq"
+
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+
+    if ! helm status "$RELEASE" -n "$NAMESPACE" &>/dev/null; then
+        log_warn "No '${RELEASE}' release in namespace '${NAMESPACE}'. Run 'ldx k8s up'."
+        exit 1
+    fi
+
+    echo "=== Helm release ==="
+    helm status "$RELEASE" -n "$NAMESPACE" | sed -n '1,12p'
+
+    echo ""
+    echo "=== Recorded services (${NAMESPACE}) ==="
+    local svc
+    for svc in $(state_get "$NAMESPACE"); do
+        echo "  ${svc}"
+    done
+
+    echo ""
+    echo "=== Enabled in the release ==="
+    helm get values "$RELEASE" -n "$NAMESPACE" -a -o json 2>/dev/null \
+        | jq -r 'to_entries[]
+                 | select((.value | type) == "object" and (.value.enabled? == true))
+                 | "  " + (.key | sub("Stack$"; ""))'
+
+    echo ""
+    echo "=== Pods in ${NAMESPACE} ==="
+    kubectl get pods -n "$NAMESPACE" -o wide 2>/dev/null || true
+
+    if helm status "$CM_RELEASE" -n "$CM_NAMESPACE" &>/dev/null; then
+        echo ""
+        echo "=== cert-manager release (${CM_NAMESPACE}) ==="
+        helm status "$CM_RELEASE" -n "$CM_NAMESPACE" | sed -n '1,6p'
+        kubectl get clusterissuer mkcert-issuer \
+            -o 'jsonpath=ClusterIssuer mkcert-issuer: {.status.conditions[0].type}={.status.conditions[0].status}{nl}' 2>/dev/null || true
+    fi
+}
+
+k8s_diff() {
+    require_command "helm"
+
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+
+    if ! helm plugin list 2>/dev/null | grep -q '^diff'; then
+        fatal "The 'helm-diff' plugin is required: helm plugin install https://github.com/databus23/helm-diff"
+    fi
+
+    local -a current=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && current+=("$line")
+    done < <(state_get "$NAMESPACE")
+    [ "${#current[@]}" -gt 0 ] || fatal "No services recorded for '${NAMESPACE}'. Run 'ldx k8s up --services <name, name>' first."
+
+    local -a set_args=()
+    while IFS= read -r line; do
+        set_args+=("$line")
+    done < <(set_flags_for "${current[@]}")
+
+    ensure_chart_deps "$CHART_DIR"
+    helm diff upgrade "$RELEASE" "$CHART_DIR" \
+        --namespace "$NAMESPACE" \
+        ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
+        "${set_args[@]}"
+}
+
+k8s_services() {
+    parse_common_options "$@"
+    NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+
+    local svc found=false
+    for svc in $(state_get "$NAMESPACE"); do
+        echo "$svc"
+        found=true
+    done
+    [ "$found" = true ] || log_info "No services recorded for namespace '${NAMESPACE}'."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        up)       k8s_up "$@" ;;
+        down)     k8s_down "$@" ;;
+        status)   k8s_status "$@" ;;
+        diff)     k8s_diff "$@" ;;
+        services) k8s_services "$@" ;;
+        help|-h|--help) show_help ;;
+        *)
+            log_error "Unknown subcommand: ${subcommand}"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
