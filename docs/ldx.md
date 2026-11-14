@@ -62,7 +62,6 @@ alphanumeric, at most 63 characters).
 
 | Command            | Category                | Description                                                           | Documentation                        |
 |:-------------------|:------------------------|:----------------------------------------------------------------------|:-------------------------------------|
-| `ldx install`      | Management              | Symlink `ldx` into local bin (`--dir` to choose target)              | [README.md](../README.md)            |
 | `ldx skill`        | Agent Skills            | Manage agent skills (install, uninstall, list, info)                  | [skill.md](./reference/ai/skill.md)               |
 | `ldx cvescan`      | Host Security           | System-wide automated Grype vulnerability scanner daemon              | [cvescan.md](./reference/security/cvescan.md)           |
 | `ldx touchid`      | Host Security           | Touch ID (biometric) authentication for `git push` via pre-push hook  | [touchid.md](./reference/security/touchid.md)           |
@@ -79,21 +78,16 @@ alphanumeric, at most 63 characters).
 
 ---
 
-## Installation to User PATH
+## Installation
 
-Install `ldx` into your user's bin directory (`$HOME/.local/bin` or `$HOME/bin`) by executing:
-
-```bash
-ldx install
-```
-
-This symlinks the `ldx` dispatcher into the target directory; commands and assets resolve through the checkout, so
-`git pull` in the repository is the upgrade. Use `--dir <path>` to choose a different target.
-
-Ensure `$HOME/.local/bin` (or your installation target) is in your shell's configuration (`~/.zshrc` or `~/.bashrc`):
+Installation is through the Homebrew tap:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+brew tap hashicorp/tap   # vault dependency (not in homebrew-core)
+brew tap roguexz/ldx
+brew install roguexz/ldx/ldx
 ```
 
-
+See the [README](../README.md). The commands resolve their assets through
+`LDX_HOME`, derived at runtime from the dispatcher's real path, so running
+`bin/ldx` directly from a checkout works without any install step.

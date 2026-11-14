@@ -19,8 +19,8 @@ whether Vault is sealed or unsealed, and the URLs to access it.
 
 ### `ldx vault unseal` (or `ldx-vault unseal`)
 
-This command unseals the Vault after a restart. You can run this directly from any directory once `ldx` binaries are
-installed in your local PATH (`ldx install`).
+This command unseals the Vault after a restart. Run it from any directory once `ldx` is installed
+(`brew install roguexz/ldx/ldx`), or invoke `bin/ldx` from a checkout.
 
 ### `ldx vault seal`
 

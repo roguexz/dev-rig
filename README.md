@@ -42,63 +42,35 @@ The same tools, if you prefer installing them by hand:
   xcode-select --install
   ```
 
-## Quick Start & Installation
+## Installation
 
-### Option 1: Homebrew (Recommended)
-
-This repository doubles as a Homebrew tap:
+`ldx` installs through Homebrew, from this organization's tap:
 
 ```bash
-brew tap roguexz/dev-rig
-brew install roguexz/dev-rig/ldx
+brew tap hashicorp/tap   # vault dependency (not in homebrew-core)
+brew tap roguexz/ldx
+brew install roguexz/ldx/ldx
 ```
 
-Upgrades are then just `brew upgrade roguexz/dev-rig/ldx`. The formula installs the whole toolkit under Homebrew's
-prefix and symlinks `ldx` onto your PATH; the command scripts live under that prefix and are resolved at run time.
+Homebrew does not tap third-party taps automatically, so `hashicorp/tap`
+(for `vault`) must be tapped explicitly before installing.
 
-### Option 2: Local Repository Installation
+The formula installs the whole toolkit under Homebrew's prefix and links `ldx`
+into `/opt/homebrew/bin`, which is already on the PATH of any shell configured
+for Homebrew. Upgrades are `brew upgrade roguexz/ldx/ldx`.
 
-Without Homebrew, clone the repository to a stable location (the install is a symlink, so the checkout must persist)
-and run the installer from it:
+### Development use
+
+Working on `ldx` itself means running the dispatcher straight from a checkout
+- there is no install step for the code in this repository:
 
 ```bash
-git clone --depth 1 https://github.com/roguexz/dev-rig.git ~/.local/share/ldx
-~/.local/share/ldx/bin/ldx install
+git clone https://github.com/roguexz/dev-rig.git
+cd dev-rig
+./bin/ldx --version   # LDX_HOME resolves to the checkout
 ```
-
-Upgrades are `git -C ~/.local/share/ldx pull`.
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/roguexz/dev-rig.git
-   cd dev-rig
-   ```
-
-2. **Install `ldx` into your local PATH:**
-   ```bash
-   ./bin/ldx install
-   ```
-    This symlinks the `ldx` dispatcher into `$HOME/.local/bin` (or `$HOME/bin`). Commands and assets resolve through
-    the checkout, so **`git pull` is the upgrade** - no reinstall step.
-
-    - **Custom target directory**:
-      ```bash
-      ./bin/ldx install --dir /custom/path/bin
-      ```
 
 ---
-
-### Shell PATH Configuration
-
-Ensure `$HOME/.local/bin` (or your chosen install directory) is present in your shell configuration (`~/.zshrc` or
-`~/.bashrc`):
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-After reloading your shell (`source ~/.zshrc`), `ldx` commands will be accessible from anywhere (e.g.,
-`ldx vault unseal`, `ldx postgres install`).
 
 ## Available Commands
 
@@ -107,7 +79,6 @@ The scripts can also be run directly from the repository (`bin/commands/ldx-vaul
 
 | Command                         | Description                                                                                 | Command script         |
 |---------------------------------|---------------------------------------------------------------------------------------------|------------------------|
-| `ldx install [flags]`           | Symlinks `ldx` into `$HOME/.local/bin` (`--dir` to choose the target).                       | `ldx install`          |
 | `ldx cvescan <subcommand>`      | System-wide automated Grype vulnerability scanner LaunchDaemon.                             | `bin/commands/ldx-cvescan` |
 | `ldx touchid <subcommand>`      | Touch ID (biometric) authentication for `git push` via a global pre-push hook.              | `bin/commands/ldx-touchid` |
 | `ldx tls <subcommand>`          | Manages local TLS certificates and Java keystores.                                          | `bin/commands/ldx-tls` |

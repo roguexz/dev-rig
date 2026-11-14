@@ -57,9 +57,6 @@ show_help() {
   echo "ldx - Local Development Experience CLI ($(ldx_version))"
   echo ""
   echo "Usage: $(basename "$0") <command> [subcommand] [flags]"
-  echo ""
-  echo "CLI Management:"
-  echo "  install       Symlink ldx into a local bin directory (use --link for the legacy flag; it is the default)"
   for entry in "${GROUP_TITLES[@]}"; do
     group="${entry%%:*}"
     title="${entry#*:}"
@@ -85,88 +82,6 @@ show_help() {
   echo "Run '$(basename "$0") <command> help' for detailed usage of a specific command."
 }
 
-# Link-only install: symlink the dispatcher into a bin directory. Commands and
-# assets are resolved through LDX_HOME at run time, so 'git pull' in the repo
-# (or 'brew upgrade') is the upgrade - no reinstall step exists anymore.
-install_binaries() {
-  local target_dir=""
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dir)
-        target_dir="$2"
-        shift 2
-        ;;
-      --link|-l|--mode=link|--mode=symlink)
-        shift # symlinks are now the only mode; flag kept for compatibility
-        ;;
-      --copy|--mode=copy)
-        fatal "Copy mode was removed; ldx installs by symlink (the checkout IS the install). Run 'bin/ldx' directly from the repo for development."
-        shift
-        ;;
-      --help|-h)
-        echo "Usage: ldx install [options]"
-        echo ""
-        echo "Options:"
-        echo "  --dir <path>  Target directory (default: \$HOME/.local/bin or \$HOME/bin)"
-        echo "  --link, -l    Accepted for compatibility; symlink is the only mode"
-        exit 0
-        ;;
-      *)
-        fatal "Unknown install flag: $1"
-        ;;
-    esac
-  done
-
-  if [ -z "$target_dir" ]; then
-    if [ -d "${HOME}/.local/bin" ] || [ ! -d "${HOME}/bin" ]; then
-      target_dir="${HOME}/.local/bin"
-    else
-      target_dir="${HOME}/bin"
-    fi
-  fi
-
-  mkdir -p "$target_dir"
-
-  # Remove leftovers from older copy/link installs (loose ldx-* binaries and
-  # the copied asset directories they used).
-  local legacy
-  for legacy in "${target_dir}"/ldx-* "${target_dir}"/dev-rig "${target_dir}"/dev-setup; do
-    [ -e "$legacy" ] || [ -L "$legacy" ] || continue
-    rm -f "$legacy"
-    log_info "Removed legacy install: ${legacy}"
-  done
-  if [ -f "${target_dir}/lib/common.sh" ]; then
-    rm -rf "${target_dir}/lib"
-    log_info "Removed legacy asset dir: ${target_dir}/lib"
-  fi
-  if [ -f "${target_dir}/config/redis.yaml.tpl" ]; then
-    rm -rf "${target_dir}/config"
-    log_info "Removed legacy asset dir: ${target_dir}/config"
-  fi
-  if [ -d "${target_dir}/../share/ldx" ]; then
-    rm -rf "${target_dir}/../share/ldx"
-    log_info "Removed legacy asset dir: ${target_dir}/../share/ldx"
-  fi
-
-  log_info "Installing ldx into '${target_dir}' (symlink -> ${LDX_HOME}/bin/ldx)..."
-  ln -sf "${LDX_HOME}/bin/ldx" "${target_dir}/ldx"
-  log_info "Installed $(ldx_version)."
-
-  # Check if target_dir is in PATH
-  case ":$PATH:" in
-    *":${target_dir}:"*)
-      log_info "'${target_dir}' is already in your PATH."
-      ;;
-    *)
-      log_warn "'${target_dir}' is NOT currently in your PATH."
-      log_warn "Add the following line to your shell configuration (~/.zshrc or ~/.bashrc):"
-      echo -e "\n  export PATH=\"${target_dir}:\$PATH\"\n"
-      ;;
-  esac
-
-}
-
 if [ $# -lt 1 ]; then
   show_help
   exit 0
@@ -176,10 +91,6 @@ COMMAND="$1"
 shift
 
 case "$COMMAND" in
-  install)
-    install_binaries "$@"
-    exit 0
-    ;;
   --version|-v|version)
     ldx_version
     exit 0
