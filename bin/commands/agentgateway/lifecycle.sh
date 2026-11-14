@@ -73,7 +73,7 @@ install_agentgateway() {
 
     log_info "agentgateway installation complete."
     log_info "agentgateway UI is accessible at: https://${AGENTGATEWAY_HOST}/ui"
-    log_info "In-cluster DNS: http://agentgateway.${namespace}.svc.cluster.local:4000"
+    log_info "In-cluster DNS: http://agentgateway.${NAMESPACE}.svc.cluster.local:4000"
     if get_oidc_state; then
         log_info "Vault SSO is enabled for the UI (issuer: ${OIDC_ISSUER})."
     fi

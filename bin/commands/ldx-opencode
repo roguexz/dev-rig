@@ -28,14 +28,8 @@ OPENCODE_CONFIG="${HOME}/.config/opencode/opencode.jsonc"
 # Virtual client key cached by 'ldx agentgateway api-key'.
 AGENTGATEWAY_KEY_CACHE="${CACHE_DIR}/agentgateway/api_key"
 
-# Helper (non-LLM) models served by omlx but useless as coding models; same
-# exclusion list as ldx-agentgateway sync-omlx, extended with embeddings.
-is_helper_model() {
-    case "$1" in
-        MarkItDown|nomicai-modernbert|*modernbert*|*embedding*|*embed*) return 0 ;;
-    esac
-    return 1
-}
+# Helper-model filtering lives in ldx.harness.opencode (single source:
+# build_manifest applies it).
 
 show_help() {
     echo "Usage: $(basename "$0") <sync>"
@@ -81,102 +75,24 @@ get_gateway_models() {
 }
 
 # Reads the current default model id (without provider prefix or #variant)
-# from the existing opencode config, if any.
+# from the existing opencode config, if any. Rendering: ldx.harness.opencode.
 get_current_default() {
     [ -f "$OPENCODE_CONFIG" ] || return 0
     OPENCODE_CONFIG="$OPENCODE_CONFIG" PROVIDER_ID="$PROVIDER_ID" \
-    LDX_LIB_DIR="${LDX_HOME}/bin/lib" python3 - <<'PY'
-import os, sys
-sys.path.insert(0, os.environ["LDX_LIB_DIR"])
-import jsonc
-
-# Note: this heredoc IS python's stdin, so the config is read by path rather
-# than piped through strip_jsonc.
-try:
-    raw = open(os.environ["OPENCODE_CONFIG"], encoding="utf-8").read()
-    cfg = jsonc.loads(raw)
-except Exception:
-    sys.exit(0)
-
-model = cfg.get("model") or ""
-if "/" in model:
-    provider, rest = model.split("/", 1)
-    if provider == os.environ.get("PROVIDER_ID", "local"):
-        mid = rest.split("#", 1)[0]
-        # Config keys carry the 'agw-' prefix; manifest ids don't.
-        if mid.startswith("agw-"):
-            mid = mid[len("agw-"):]
-        print(mid)
-PY
+    PYTHONPATH="${LDX_HOME}/bin/lib" python3 -m ldx.harness.opencode current-default
 }
 
-# Builds the model manifest consumed by merge_config: one JSON object per line
-# with the fields needed to render the opencode provider block. Reads model ids
-# from stdin; helpers and hidden/unknown entries are skipped.
+# Builds the model manifest (one JSON object per line) from model ids on
+# stdin, enriched from the omlx settings files. Helper/unknown/hidden models
+# are skipped. Rendering: ldx.harness.opencode.
 build_manifest() {
-    local manifest="$1" model_id
+    local manifest="$1"
     : > "$manifest"
-    while IFS= read -r model_id; do
-        [ -n "$model_id" ] || continue
-        is_helper_model "$model_id" && continue
-        MODEL_ID="$model_id" \
-        OMLX_SETTINGS="$OMLX_SETTINGS" \
-        OMLX_MODEL_SETTINGS="$OMLX_MODEL_SETTINGS" \
-        OMLX_MODELS_DIR="${OMLX_DIR}/models" \
-        python3 - <<'PY' >> "$manifest"
-import glob, json, os, sys
-
-model_id = os.environ["MODEL_ID"]
-settings = json.load(open(os.environ["OMLX_SETTINGS"], encoding="utf-8"))
-mset = json.load(open(os.environ["OMLX_MODEL_SETTINGS"], encoding="utf-8")).get("models", {})
-
-# Match by alias first, then by model folder name.
-entry, folder = None, model_id
-for key, value in mset.items():
-    if value.get("model_alias") == model_id or key == model_id:
-        entry, folder = value, key
-        break
-# Unknown to omlx settings (e.g. removed there but still routed), or hidden:
-# skip so the harness only offers fully-configured models.
-if entry is None or entry.get("is_hidden"):
-    sys.exit(0)
-
-sampling = settings.get("sampling", {})
-context = entry.get("max_context_window") or sampling.get("max_context_window") or 8192
-output = sampling.get("max_tokens") or 8192
-
-# Vision: probe the model config.json for vision_*/image_* keys.
-vision = False
-pattern = os.path.join(os.environ["OMLX_MODELS_DIR"], "*", folder, "config.json")
-for path in glob.glob(pattern):
-    try:
-        conf = json.load(open(path, encoding="utf-8"))
-    except Exception:
-        continue
-    if any(k.startswith("vision") or k.startswith("image_") for k in conf):
-        vision = True
-        break
-
-# Display name: humanize the id (qwen-3.8-moe-full -> Qwen 3.8 MoE Full).
-def humanize(word):
-    if word.lower() == "moe":
-        return "MoE"
-    return word.capitalize()
-
-name = " ".join(humanize(w) for w in model_id.split("-"))
-
-print(json.dumps({
-    "id": model_id,
-    "name": name,
-    "vision": vision,
-    "context": context,
-    "output": output,
-    "parser": bool(entry.get("reasoning_parser")),
-    "budget_enabled": bool(entry.get("thinking_budget_enabled")),
-    "budget": entry.get("thinking_budget_tokens") or 4096,
-}))
-PY
-    done
+    OMLX_SETTINGS="$OMLX_SETTINGS" \
+    OMLX_MODEL_SETTINGS="$OMLX_MODEL_SETTINGS" \
+    OMLX_MODELS_DIR="${OMLX_DIR}/models" \
+    PYTHONPATH="${LDX_HOME}/bin/lib" python3 -m ldx.harness.opencode build-manifest \
+        > "$manifest"
 }
 
 # ---------------------------------------------------------------------------
@@ -248,6 +164,8 @@ select_default_model() {
 # Config merge
 # ---------------------------------------------------------------------------
 
+# Merge the gateway provider into the existing config. Rendering:
+# ldx.harness.opencode (emits {"config": ..., "meta": ...}).
 merge_config() {
     local manifest="$1" default_id="$2" keep_stale="$3" client_key="$4"
 
@@ -257,120 +175,11 @@ merge_config() {
     CLIENT_KEY="$client_key" \
     OPENCODE_CONFIG="$OPENCODE_CONFIG" \
     PROVIDER_ID="$PROVIDER_ID" \
-    LDX_LIB_DIR="${LDX_HOME}/bin/lib" \
     GATEWAY_BASE_URL="https://${AGENTGATEWAY_HOST}/v1" \
     MCP_URL="https://${AGENTGATEWAY_HOST}/mcp" \
-    python3 - <<'PY'
-import json, os, sys
-sys.path.insert(0, os.environ["LDX_LIB_DIR"])
-import jsonc
-
-provider_id = os.environ["PROVIDER_ID"]
-base_url = os.environ["GATEWAY_BASE_URL"]
-mcp_url = os.environ["MCP_URL"]
-client_key = os.environ.get("CLIENT_KEY") or ""
-default_id = os.environ["DEFAULT_ID"]
-keep_stale = os.environ.get("KEEP_STALE") == "true"
-path = os.environ["OPENCODE_CONFIG"]
-
-models = [json.loads(line) for line in open(os.environ["MANIFEST"], encoding="utf-8") if line.strip()]
-if not models:
-    sys.exit("no models in manifest")
-
-def variants_for(m):
-    if not m["budget_enabled"]:
-        return None
-    budget = m["budget"]
-    low = min(int(budget * 0.25), 1024)
-    medium = int(budget * 0.5)
-    high = budget
-    return {
-        level: {"options": {"thinking": {"type": "enabled", "budgetTokens": tokens}}}
-        for level, tokens in (("low", low), ("medium", medium), ("high", high))
-    }
-
-def model_entry(m):
-    # Wire id must match the gateway's model name (with 'agw-' prefix); the
-    # gateway strips the prefix when forwarding to oMLX via params.model.
-    wire_id = m["id"] if m["id"].startswith("agw-") else "agw-" + m["id"]
-    entry = {
-        "id": wire_id,
-        "name": m["name"],
-        "capabilities": {"vision": m["vision"]},
-        "limit": {"context": m["context"], "output": m["output"]},
-    }
-    variants = variants_for(m)
-    if variants:
-        entry["variants"] = variants
-    return entry
-
-provider = {
-    "npm": "@ai-sdk/openai-compatible",
-    "name": "Local Server",
-    "options": {
-        # Virtual client key validated by the gateway's apiKey policy; the
-        # gateway swaps it for the real omlx key ($OMLX_API_KEY) upstream.
-        # Falls back to a placeholder only when enforcement is not enabled.
-        "baseURL": base_url,
-        "apiKey": os.environ.get("CLIENT_KEY") or "omlx",
-    },
-    # Config key and wire id both carry the 'agw-' prefix: the config key
-    # avoids collisions with other providers' models in opencode's catalog,
-    # and the wire id must match the gateway's model name for routing.
-    "models": {("agw-" + m["id"] if not m["id"].startswith("agw-") else m["id"]): model_entry(m) for m in models},
+    PYTHONPATH="${LDX_HOME}/bin/lib" python3 -m ldx.harness.opencode merge
 }
 
-# Load the existing config (JSONC: // and /* */ comments, trailing commas).
-cfg = {}
-had_comments = False
-try:
-    raw = open(path, encoding="utf-8").read()
-    stripped, had_comments = jsonc.strip_comments(raw)
-    cfg = json.loads(jsonc.strip_trailing_commas(stripped))
-except FileNotFoundError:
-    pass
-except Exception as e:
-    sys.exit(f"Failed to parse {path}: {e}")
-
-old_provider = cfg.get("provider", {}).get(provider_id, {})
-old_models = old_provider.get("models", {})
-new_ids = set(provider["models"])
-
-def is_stale(old_key):
-    if old_key in new_ids:
-        return False
-    # Keys gained the 'agw-' prefix at some point; don't report the rename as
-    # a stale model when the prefixed twin exists now.
-    return ("agw-" + old_key) not in new_ids
-
-pruned = sorted(k for k in old_models if is_stale(k)) if old_models else []
-if pruned and keep_stale:
-    for mid in pruned:
-        provider["models"][mid] = old_models[mid]
-    pruned = []
-
-# Merge: update/add provider.<id> and model; leave everything else untouched.
-cfg.setdefault("$schema", "https://opencode.ai/config.json")
-cfg.setdefault("provider", {})[provider_id] = provider
-key = default_id if default_id.startswith("agw-") else "agw-" + default_id
-suffix = "#low" if "variants" in provider["models"][key] else ""
-cfg["model"] = f"{provider_id}/{key}{suffix}"
-
-# MCP endpoint: the gateway's /mcp path, secured with the same virtual key.
-# Merging preserves any other MCP servers the user has configured.
-cfg.setdefault("mcp", {})["agentgateway"] = {
-    "type": "remote",
-    "url": mcp_url,
-    "headers": {
-        "Authorization": f"Bearer {client_key}" if client_key else ""
-    },
-}
-
-out = json.dumps(cfg, indent=2) + "\n"
-meta = {"pruned": pruned, "had_comments": had_comments, "model": cfg["model"]}
-print(json.dumps({"config": out, "meta": meta}))
-PY
-}
 
 # ---------------------------------------------------------------------------
 # sync

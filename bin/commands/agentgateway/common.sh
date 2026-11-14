@@ -53,7 +53,7 @@ AUTHELIA_SECRETS_FILE="${AUTHELIA_SECRETS_DIR}/client_secrets"
 # ---------------------------------------------------------------------------
 
 # In-cluster Vault URL is referenced directly in the Vault Agent sidecar config
-# (see render_vault_agent_config).
+# (see apply_vault_agent_config).
 
 # Reads OIDC state (issuer + clientId) from the runtime Secret. Returns non-zero
 # when SSO has not been configured.
@@ -200,107 +200,42 @@ get_mcp_targets_yaml() {
             else "" end)
     ' 2>/dev/null || true
 }
-
-# Renders the full gateway config.yaml to stdout, preserving optional features
-# that are already configured (Vault SSO, synced oMLX models).
-#
-# Uses the config template file for static structure and injects dynamic
-# sections (OIDC policy, LLM routes, MCP targets) at marker positions.
-#
-# Note: literal agentgateway env-var references ($UI_CLIENT_SECRET, etc.) in
-# the template are passed through as-is for agentgateway to expand from the
-# pod environment.
+# Assembles the gateway config. Raw materials are collected here with
+# kubectl; the text assembly (sections, template markers) is
+# ldx.render.agentgateway (bin/lib/ldx/render/agentgateway.py, tested in
+# tests/test_ldx_render_agentgateway.py).
 render_config() {
-    local oidc_section="" llm_section="" models_fragment=""
-    if get_oidc_state; then
-        oidc_section=$(cat <<EOF
-  policies:
-    oidc:
-      issuer: https://${AUTHELIA_HOST}
-      authorizationEndpoint: https://${AUTHELIA_HOST}/api/oidc/authorization
-      tokenEndpoint: https://${AUTHELIA_HOST}/api/oidc/token
-      jwks:
-        url: https://${AUTHELIA_HOST}/jwks.json
-      clientId: ${OIDC_CLIENT_ID}
-      clientSecret: \$UI_CLIENT_SECRET
-      redirectURI: https://${AGENTGATEWAY_HOST}/oauth/callback
-      # Ask Authelia for standard scopes so the UI shows name/email.
-      scopes:
-      - openid
-      - profile
-      - email
-      - groups
-EOF
-)
-    fi
-
-    models_fragment=$(get_models_fragment)
-    providers_fragment=$(get_providers_fragment)
-    # LLM routes are always authenticated with virtual client keys, even when
-    # no models are synced. This makes the auth model consistent with MCP
-    # routes and gives harnesses a clear 401 instead of a 404 when hitting
-    # /v1 before models are available.
+    # LLM routes always require a virtual client key; enforcement is strict.
     if ! get_api_key_state; then
         fatal "No ${AGENTGATEWAY_API_KEY_NAME} in Secret '${AGENTGATEWAY_SECRET}'. Run 'ldx agentgateway api-key' (install does this automatically)."
     fi
-    # Build the models line: use the synced fragment, or an empty list.
-    local models_line
-    if [ -n "$models_fragment" ]; then
-        models_line="$models_fragment"
-    else
-        models_line="  models: []"
-    fi
-    # Build the providers line: use the synced fragment, or an empty list.
-    local providers_line
-    if [ -n "$providers_fragment" ]; then
-        providers_line="$providers_fragment"
-    else
-        providers_line="  providers: []"
-    fi
-    # Virtual client keys: inbound requests must carry one of these in
-    # 'Authorization: Bearer <key>'; the gateway swaps in the provider
-    # key ($OMLX_API_KEY) before forwarding. The raw key stays in the
-    # Secret; the config references it for env expansion.
-    llm_section=$(cat <<EOF
-llm:
-  gateways:
-  - default
-${providers_line}
-  policies:
-    apiKey:
-      mode: strict
-      keys:
-      - key: \$${AGENTGATEWAY_API_KEY_NAME}
-        metadata:
-          user: local
-          name: Local Access
-${models_line}
-EOF
-)
 
-    # MCP endpoint is always secured with the same virtual client key as LLM
-    # routes. We use the routing-based mode (not the simplified 'mcp' section)
-    # so that the apiKey policy can be attached to the /mcp route. In hybrid
-    # storage mode, file-owned routes and database-owned targets are not
-    # automatically merged, so we explicitly list registered targets in the
-    # route's backend by querying the gateway's admin API.
-    if ! get_api_key_state; then
-        fatal "No ${AGENTGATEWAY_API_KEY_NAME} in Secret '${AGENTGATEWAY_SECRET}'. Run 'ldx agentgateway api-key' (install/sync-omlx do this automatically)."
+    require_command "python3"
+
+    local oidc_json="null"
+    if get_oidc_state; then
+        oidc_json=$(jq -n --arg client_id "$OIDC_CLIENT_ID" '{client_id: $client_id}')
     fi
+
+    # Registered MCP targets come from the gateway admin API (hybrid storage
+    # does not merge DB targets into file routes); see get_mcp_targets_yaml.
     local targets_yaml
     targets_yaml=$(get_mcp_targets_yaml)
-    if [ -z "$targets_yaml" ]; then
-        targets_yaml="      targets: []"
-    else
-        targets_yaml=$'      targets:\n'"${targets_yaml}"
-    fi
 
-    local rendered
-    rendered=$(render_template "${CONFIG_DIR}/agentgateway-config.yaml.tpl" \
-        API_KEY_NAME="$AGENTGATEWAY_API_KEY_NAME")
-    rendered=$(inject_block "$rendered" "{{OIDC_SECTION}}" "$oidc_section")
-    rendered=$(inject_block "$rendered" "{{LLM_SECTION}}" "$llm_section")
-    inject_block "$rendered" "{{MCP_TARGETS}}" "$targets_yaml"
+    jq -n \
+        --arg authelia_host "$AUTHELIA_HOST" \
+        --arg gateway_host "$AGENTGATEWAY_HOST" \
+        --arg api_key_name "$AGENTGATEWAY_API_KEY_NAME" \
+        --argjson oidc "$oidc_json" \
+        --arg models "$(get_models_fragment)" \
+        --arg providers "$(get_providers_fragment)" \
+        --arg targets "$targets_yaml" \
+        '{authelia_host: $authelia_host, gateway_host: $gateway_host,
+          api_key_name: $api_key_name, oidc: $oidc,
+          models_fragment: $models, providers_fragment: $providers,
+          targets_yaml: $targets}' |
+    PYTHONPATH="${LDX_HOME}/bin/lib" python3 -m ldx.render.agentgateway config \
+        --template "${CONFIG_DIR}/agentgateway-config.yaml.tpl"
 }
 
 apply_config() {
@@ -438,65 +373,12 @@ list_mcp_tools_in_vault() {
         grep -v '^Keys$' | grep -v '^----$' | sed 's/[[:space:]]*$//' | sort || true
 }
 
-# Renders the Vault Agent config to stdout. The config authenticates via
-# Kubernetes auth (using the pod's SA JWT) and creates one template block
-# per MCP tool, each writing that tool's token to a separate file.
-render_vault_agent_config() {
-    local tools
-    tools=$(list_mcp_tools_in_vault)
-
-    cat <<EOF
-# Vault Agent auto-auth + template config
-vault {
-  address = "http://vault.${VAULT_NAMESPACE}.svc.cluster.local:8200"
-}
-
-auto_auth {
-  method "kubernetes" {
-    config {
-      role = "${VAULT_MCP_ROLE}"
-      kubernetes_host = "https://kubernetes.default.svc:443"
-    }
-  }
-  sink "file" {
-    config {
-      path = "/vault-agent/token"
-    }
-  }
-}
-EOF
-
-    if [ -n "$tools" ]; then
-        # One template block per tool.
-        while IFS= read -r tool; do
-            [ -n "$tool" ] || continue
-            cat <<EOF
-
-template {
-  source = "/etc/vault-agent/config/template-${tool}.go.tpl"
-  destination = "${MCP_CREDENTIALS_DIR}/${tool}.token"
-  perms = "0400"
-}
-EOF
-        done <<< "$tools"
-    fi
-}
-
-# Renders the Go template for a single MCP tool.
-render_mcp_tool_template() {
-    local tool="$1"
-    # Output just the token value without any trailing newline.
-    # In KV v2, the secret response has data.data.token.
-    printf '{{- with secret "secret/data/mcp/%s" }}{{ .Data.data.token }}{{- end }}\n' "$tool"
-}
-
-# Applies the Vault Agent ConfigMap (config.hcl + one Go template per tool).
-# Uses temporary files for robust handling of multi-line content.
+# Vault Agent ConfigMap (auto-auth + one Go template per registered MCP
+# tool). File rendering lives in ldx.render.agentgateway; kubectl assembly
+# stays here.
 apply_vault_agent_config() {
-    local config
-    config=$(render_vault_agent_config)
+    require_command "python3"
 
-    # Create a temporary directory for the config files.
     local tmpdir
     tmpdir=$(mktemp -d)
 
@@ -505,28 +387,23 @@ apply_vault_agent_config() {
     saved_trap=$(trap -p EXIT)
     trap "rm -rf '${tmpdir}'; ${saved_trap:-true}" EXIT
 
-    # Write the main config to a file.
-    printf '%s\n' "$config" > "${tmpdir}/config.hcl"
+    list_mcp_tools_in_vault | \
+        PYTHONPATH="${LDX_HOME}/bin/lib" python3 -m ldx.render.agentgateway vault-agent \
+            --outdir "$tmpdir" \
+            --vault-ns "$VAULT_NAMESPACE" \
+            --role "$VAULT_MCP_ROLE" \
+            --creds-dir "$MCP_CREDENTIALS_DIR"
 
-    # Build the kubectl flags for creating the ConfigMap.
+    # ConfigMap: config.hcl + template-<tool>.go.tpl per tool.
     local flags=(
         "--from-file=config.hcl=${tmpdir}/config.hcl"
     )
+    local f
+    for f in "${tmpdir}"/template-*.go.tpl; do
+        [ -e "$f" ] || continue
+        flags+=("--from-file=$(basename "$f")=$f")
+    done
 
-    # Write one template file per tool.
-    local tools
-    tools=$(list_mcp_tools_in_vault)
-    if [ -n "$tools" ]; then
-        local tool template
-        while IFS= read -r tool; do
-            [ -n "$tool" ] || continue
-            template=$(render_mcp_tool_template "$tool")
-            printf '%s\n' "$template" > "${tmpdir}/template-${tool}.go.tpl"
-            flags+=("--from-file=template-${tool}.go.tpl=${tmpdir}/template-${tool}.go.tpl")
-        done <<< "$tools"
-    fi
-
-    # Create the ConfigMap from the files.
     kubectl create configmap "$VAULT_AGENT_CONFIG_CM" -n "$NAMESPACE" \
         "${flags[@]}" \
         --dry-run=client -o yaml | kubectl apply -f -
