@@ -1,9 +1,11 @@
-# Prerequisites for ldx (dev-rig). Install: brew bundle --file Brewfile
-tap "hashicorp/tap"
-tap "anchore/tap"
+# Dev bootstrap for ldx (dev-rig): run ./bin/ldx straight from a checkout.
+# Users who install the formula (brew install roguexz/ldx/ldx) do not need
+# this file - the formula declares the same dependencies.
+# Install: brew bundle --file Brewfile
+tap "hashicorp/tap"               # vault is not in homebrew-core
 
-brew "anchore/tap/grype"          # cvescan vulnerability scanner
-brew "helm"                       # k8s chart installs
+brew "grype"                      # cvescan vulnerability scanner (homebrew-core)
+brew "helm"                       # k8s chart installs (Rancher Desktop also ships one)
 brew "jq"                         # JSON glue
 brew "mkcert"                     # local CA / TLS certificates
 brew "hashicorp/tap/vault"        # Vault CLI (ldx vault create-user)
