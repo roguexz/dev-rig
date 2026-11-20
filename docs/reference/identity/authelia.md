@@ -87,8 +87,10 @@ available as a fallback.
 ldx otel install
 ```
 
-If Authelia is already deployed, `ldx otel install` automatically detects it and adds OIDC environment variables to
-the Grafana deployment. If Authelia is not deployed, Grafana uses the default admin password (`admin/changeit`).
+Authelia must be installed before OTel. `ldx otel install` verifies that
+Authelia is running and fails with instructions if it is not. Grafana's basic
+username/password login is disabled; users can only sign in through Authelia
+OIDC.
 
 ## Accessing Authelia
 

@@ -3,9 +3,11 @@
 set -euo pipefail
 
 # --- Config directory ---------------------------------------------------------
-# The repository's config/ directory holds K8s templates (.yaml.tpl) and Helm
-# values files. Scripts locate it through LDX_HOME, the dev-rig checkout root
-# exported by the command bootstrap:
+# The repository's config/ directory holds runtime templates and Helm values
+# files that the CLI renders or applies (bifrost gateway config, vault Helm
+# values, tls resources). Most K8s manifests moved to charts/; scripts still
+# locate config/ through LDX_HOME, the dev-rig checkout root exported by the
+# command bootstrap:
 #   - Running from the repo:   LDX_HOME=repo       -> repo/config/
 #   - Symlink install:         realpath -> repo    -> repo/config/
 #   - Package install (brew):  LDX_HOME=<libexec>  -> <libexec>/config/
@@ -206,6 +208,50 @@ require_command() {
     if ! command -v "$cmd" &> /dev/null; then
         fatal "Required command '$cmd' is not installed or not in PATH."
     fi
+}
+
+# Finds the Traefik Service ClusterIP so pods can use hostAliases to reach
+# hostnames (like auth.rd.localhost) through Traefik without relying on
+# external DNS. Echoes the IP, or nothing if Traefik is not found.
+get_traefik_cluster_ip() {
+    local traefik_ns="" traefik_svc="" ip=""
+
+    # Try common namespaces where Traefik might be deployed.
+    for ns in kube-system traefik ingress; do
+        traefik_svc=$(kubectl get svc -n "$ns" -l app.kubernetes.io/name=traefik \
+            -o 'jsonpath={.items[0].metadata.name}' 2>/dev/null) || true
+        if [ -n "$traefik_svc" ]; then
+            traefik_ns="$ns"
+            break
+        fi
+    done
+
+    # If not found by label, try by name.
+    if [ -z "$traefik_svc" ]; then
+        for ns in kube-system traefik ingress; do
+            if kubectl get svc -n "$ns" traefik 2>/dev/null >/dev/null; then
+                traefik_ns="$ns"
+                traefik_svc="traefik"
+                break
+            fi
+        done
+    fi
+
+    if [ -n "$traefik_ns" ] && [ -n "$traefik_svc" ]; then
+        ip=$(kubectl get svc -n "$traefik_ns" "$traefik_svc" \
+            -o 'jsonpath={.spec.clusterIP}' 2>/dev/null) || true
+    fi
+
+    if [ -z "$ip" ] || [ "$ip" = "None" ]; then
+        # Last resort: search all namespaces for a Traefik service.
+        ip=$(kubectl get svc -A -o json 2>/dev/null \
+            | jq -r '.items[] | select(.spec.clusterIP != "None") |
+                     select(.metadata.name == "traefik" or
+                            .metadata.labels."app.kubernetes.io/name" == "traefik") |
+                     .spec.clusterIP' 2>/dev/null | head -1) || true
+    fi
+
+    printf '%s' "$ip"
 }
 
 init_dirs() {

@@ -2,8 +2,11 @@
 
 `ldx otel` is a thin alias for the declarative platform stack: it runs `ldx k8s up/down --services otel`. The LGTM
 stack is a subchart of the `ldx-local-platform` umbrella chart - see
-[the platform stack reference](../infrastructure/k8s.md). Authelia OIDC SSO for Grafana is detected at install time; the client secret
-is read from the host secret store, not from disk.
+[the platform stack reference](../infrastructure/k8s.md).
+
+**Prerequisite:** Authelia must be installed before OTel. Grafana's basic
+username/password login is disabled; users can only sign in through Authelia
+OIDC. Run `ldx authelia install` first.
 
 This command deploys a complete, push-based observability stack based on the `docker-otel-lgtm` model. It allows you to
 send logs, traces, and metrics from your applications to a single endpoint and visualize them in Grafana.
@@ -22,11 +25,27 @@ All components are deployed into the shared `commons` namespace by default; a cu
 
 ### `ldx otel install`
 
-This command installs and configures the entire stack.
+This command installs and configures the entire stack. It requires Authelia to
+be running; otherwise it fails with instructions to install Authelia first.
 
 ### `ldx otel uninstall`
 
 This command removes all components related to the OTel stack, but leaves the namespace intact.
+
+### `ldx otel status`
+
+This command shows the current deployment state: pod status, OTLP endpoints,
+Grafana URL, and OIDC configuration.
+
+### `ldx otel sso enable`
+
+This command enables Authelia OIDC SSO for Grafana without a full reinstall.
+It updates the Helm release with the current OIDC configuration and triggers a
+rollout of the LGTM pod. Use this if you reinstall Authelia or change its
+configuration.
+
+`ldx otel sso disable` is not available: Grafana's basic login is disabled, so
+removing OIDC would lock out all users.
 
 ## Sending Telemetry Data
 
@@ -59,13 +78,12 @@ Once installed, you can access the Grafana dashboard to view your logs, traces, 
 
 ### Authentication
 
-If Authelia is deployed (`ldx authelia install`), Grafana uses OIDC SSO: login redirects to `auth.rd.localhost`, which
-prompts Touch ID. The admin password (`admin/changeit`) remains available as a fallback.
+Grafana uses OIDC SSO through Authelia. Basic username/password login is
+disabled. When you open Grafana, the login page shows only the "Sign in with
+Authelia" button, which redirects to `auth.rd.localhost` and prompts Touch ID.
 
-If Authelia is not deployed, Grafana uses the default credentials:
-
-- **Username:** `admin`
-- **Password:** `changeit`
+If Authelia is unavailable, you cannot log in to Grafana. This is intentional:
+there is no password fallback.
 
 The service is exposed via a Traefik Ingress and uses the locally trusted TLS certificate, so you can access it
 directly without needing to use `kubectl port-forward`.
