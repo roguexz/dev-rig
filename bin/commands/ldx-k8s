@@ -35,16 +35,31 @@ ensure_chart_deps() {
     # charts/ resolved BEFORE the parent packages its directory, because helm
     # packages subchart directories as-is and does not recurse.
     local dep_name dep_repo dep_path
-    while read -r dep_name dep_repo; do
+    while read -r dep_name dep_version dep_repo dep_status; do
         case "$dep_repo" in
             file://*)
                 dep_path="$(cd "${chart_dir}/${dep_repo#file://}" 2>/dev/null && pwd)" || true
                 [ -n "$dep_path" ] && [ -f "${dep_path}/Chart.yaml" ] && ensure_chart_deps "$dep_path"
                 ;;
         esac
-    done < <(helm show dependencies "$chart_dir" 2>/dev/null | awk 'NR>1 && NF >= 3 { print $1, $3 }')
+    done < <(helm dependency list "$chart_dir" 2>/dev/null | awk 'NR>1 { print $1, $2, $3, $4 }')
 
-    if helm dependency list "$chart_dir" 2>/dev/null | awk 'NR>1 && $NF != "" && $NF != "ok" { found = 1 } END { exit !found }'; then
+    # For local (file://) dependencies, remove tarballs so helm always
+    # repackages the current source. Helm reuses existing tarballs that match
+    # the lock version, which skips template changes during development.
+    local dep_name dep_repo dep_version dep_status
+    local rebuilt=false
+    while read -r dep_name dep_version dep_repo dep_status; do
+        case "$dep_repo" in
+            file://*)
+                rm -f "${chart_dir}/charts/${dep_name}-${dep_version}.tgz"
+                rebuilt=true
+                ;;
+        esac
+    done < <(helm dependency list "$chart_dir" 2>/dev/null | awk 'NR>1 { print $1, $2, $3, $4 }')
+
+    # Always rebuild if we removed any tarballs (or if dependencies are missing).
+    if [ "$rebuilt" = true ] || helm dependency list "$chart_dir" 2>/dev/null | awk 'NR>1 && $NF != "" && $NF != "ok" { found = 1 } END { exit !found }'; then
         log_info "Building chart dependencies for $(basename "$chart_dir") (helm dependency build)..."
         if ! helm dependency build "$chart_dir" >/dev/null; then
             log_warn "dependency build failed (lock out of date?); falling back to helm dependency update..."
@@ -246,34 +261,46 @@ prehook_otel() {
     # the other services (created by the CLI, mounted by the chart).
     create_extra_cas_configmap "$NAMESPACE"
 
-    # Authelia OIDC: enable Grafana SSO when Authelia runs and its Grafana
-    # client secret exists in the host secret store.
+    # Authelia is a hard dependency: Grafana's basic login is disabled, so
+    # users can only sign in through OIDC. Fail early if Authelia is missing.
     local authelia_namespace grafana_secret="" values_file
     authelia_namespace="$(ldx_namespace authelia)"
     local phase
     phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || true
-    if [ "$phase" = "Running" ]; then
-        grafana_secret=$(ldx_secret_get_kv authelia/client_secrets "${CACHE_DIR}/authelia/client_secrets" GRAFANA_CLIENT_SECRET 2>/dev/null) || true
+    if [ "$phase" != "Running" ]; then
+        fatal "Authelia is required for Grafana SSO (basic login is disabled). Run 'ldx authelia install' first."
     fi
 
-    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-otel.XXXXXX.yaml")"
+    grafana_secret=$(ldx_secret_get_kv authelia/client_secrets "${CACHE_DIR}/authelia/client_secrets" GRAFANA_CLIENT_SECRET 2>/dev/null) || true
+    if [ -z "$grafana_secret" ]; then
+        fatal "GRAFANA_CLIENT_SECRET not found in the host secret store. Run 'ldx authelia install' first."
+    fi
+
+    # Traefik ClusterIP: point auth.rd.localhost at it so Grafana (inside the
+    # cluster) can reach Authelia through Traefik without external DNS.
+    local traefik_ip
+    traefik_ip="$(get_traefik_cluster_ip)" || true
+
+    values_file="$(mktemp -t ldx-k8s-otel)"
     TMP_FILES+=("$values_file")
     {
         echo "otelStack:"
         echo "  oidc:"
-        if [ -n "$grafana_secret" ]; then
-            echo "    enabled: true"
-            printf '    clientSecret: "%s"\n' "$grafana_secret"
-            printf '    autheliaNamespace: "%s"\n' "$authelia_namespace"
-        else
-            echo "    enabled: false"
+        echo "    enabled: true"
+        printf '    clientSecret: "%s"\n' "$grafana_secret"
+        printf '    autheliaNamespace: "%s"\n' "$authelia_namespace"
+        if [ -n "$traefik_ip" ]; then
+            echo "  hostAliases:"
+            echo "    - ip: \"${traefik_ip}\""
+            echo "      hostnames:"
+            echo "        - \"auth.rd.localhost\""
         fi
     } > "$values_file"
     APPLY_VALUES+=(--values "$values_file")
 
     # Adopt resources the pre-chart installer created via kubectl apply.
     adopt_resources "$RELEASE" "$NAMESPACE" \
-        deployment/lgtm service/grafana service/otel-collector ingress/grafana secret/grafana-secrets
+        deployment/lgtm service/grafana service/otel-collector ingress/grafana secret/grafana-secrets configmap/grafana-config
 }
 
 prehook_certmanager() {
@@ -354,7 +381,7 @@ prehook_vault() {
     done
 
     local values_file
-    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-vault.XXXXXX.yaml")"
+    values_file="$(mktemp -t ldx-k8s-vault)"
     TMP_FILES+=("$values_file")
     {
         echo "vaultStack:"
@@ -390,7 +417,7 @@ prehook_authelia() {
         "certificate/authelia-cert@${ans}"
 
     local values_file
-    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-authelia.XXXXXX.yaml")"
+    values_file="$(mktemp -t ldx-k8s-authelia)"
     TMP_FILES+=("$values_file")
     if ! "${LDX_HOME}/bin/ldx" authelia prepare > "$values_file"; then
         fatal "Failed to render Authelia values ('ldx authelia prepare')."
@@ -609,7 +636,7 @@ prehook_bifrost() {
         "pvc/bifrost-data" "serviceaccount/bifrost"
 
     local values_file
-    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-bifrost.XXXXXX.yaml")"
+    values_file="$(mktemp -t ldx-k8s-bifrost)"
     TMP_FILES+=("$values_file")
     if ! "${LDX_HOME}/bin/ldx" bifrost prepare-values > "$values_file"; then
         fatal "Failed to render bifrost values ('ldx bifrost prepare-values')."
@@ -804,6 +831,7 @@ k8s_down() {
 
     parse_common_options "$@"
     NAMESPACE="$(resolve_namespace "$NAMESPACE_OVERRIDE")"
+    ensure_chart_deps "$CHART_DIR"
 
     local -a current=()
     while IFS= read -r line; do

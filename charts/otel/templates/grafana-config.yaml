@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+data:
+  grafana.ini: |
+    # Disable basic authentication (users must use OIDC via Authelia).
+    # This overrides the baked-in grafana.ini in the otel-lgtm image.
+    [auth.basic]
+    enabled = false
+
+    # New users (created via any auth method) get the Editor role by default.
+    [users]
+    auto_assign_org_role = Editor

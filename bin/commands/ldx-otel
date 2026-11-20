@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ldx-help: infra Deploy and configure OpenTelemetry LGTM stack (alias for 'ldx k8s --services otel')
+# ldx-help: infra Deploy the Grafana LGTM stack; manage status and Authelia SSO (alias for 'ldx k8s --services otel')
 #
 # ldx-otel - Thin alias for the declarative platform stack.
 # The Grafana OTel LGTM stack is a subchart of ldx-local-platform; see 'ldx k8s'.
@@ -13,15 +13,172 @@ export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo "Usage: $(basename "$0") <install|uninstall|status|sso>"
     echo ""
     echo "Commands:"
     echo "  install    Install the all-in-one Grafana OTel LGTM stack."
     echo "  uninstall  Remove the OTel stack."
+    echo "  status     Show the LGTM pod status, endpoints, and OIDC configuration."
+    echo "  sso        Enable Authelia OIDC SSO for Grafana."
+    echo "               sso enable   Wire Grafana to Authelia (requires Authelia running)."
     echo ""
-    echo "Alias for 'ldx k8s up/down --services otel'. Authelia OIDC SSO is"
-    echo "detected automatically at install time. For flags, status and diffs"
-    echo "use 'ldx k8s' directly."
+    echo "Authelia is a required prerequisite (basic login is disabled in"
+    echo "Grafana). Run 'ldx authelia install' before 'ldx otel install'."
+    echo "For flags and diffs use 'ldx k8s' directly."
+}
+
+# Shows the OTel LGTM deployment status, endpoints, and OIDC configuration.
+status_otel() {
+    require_command "kubectl"
+
+    local namespace
+    namespace="$(ldx_namespace otel)"
+
+    log_info "OTel namespace: ${namespace}"
+
+    # Check if the pod exists and its phase.
+    local phase ready image
+    phase=$(kubectl get pods -n "$namespace" -l app=lgtm \
+        -o 'jsonpath={.items[0].status.phase}' 2>/dev/null) || true
+    ready=$(kubectl get pods -n "$namespace" -l app=lgtm \
+        -o 'jsonpath={.items[0].status.containerStatuses[0].ready}' 2>/dev/null) || true
+    image=$(kubectl get pods -n "$namespace" -l app=lgtm \
+        -o 'jsonpath={.items[0].spec.containers[0].image}' 2>/dev/null) || true
+
+    if [ -z "$phase" ]; then
+        echo "  Pod: not installed"
+        return 0
+    fi
+    echo "  Pod: ${phase} (ready: ${ready:-unknown})"
+    if [ -n "$image" ]; then
+        echo "  Image: ${image}"
+    fi
+
+    # Check if the deployment exists.
+    local deploy_phase
+    deploy_phase=$(kubectl get deployment lgtm -n "$namespace" \
+        -o 'jsonpath={.status.readyReplicas}' 2>/dev/null) || true
+    if [ -n "$deploy_phase" ]; then
+        echo "  Ready replicas: ${deploy_phase}"
+    fi
+
+    # Check if the OTel collector LoadBalancer service is exposed.
+    local lb_ip
+    lb_ip=$(kubectl get service otel-collector -n "$namespace" \
+        -o 'jsonpath={.status.loadBalancer.ingress[0].ip}' 2>/dev/null) || true
+    if [ -n "$lb_ip" ]; then
+        echo "  OTLP (host):  ${lb_ip}:4317 (gRPC), ${lb_ip}:4318 (HTTP)"
+    else
+        echo "  OTLP (host):  localhost:4317 (gRPC), localhost:4318 (HTTP)"
+    fi
+    echo "  OTLP (cluster): otel-collector.${namespace}.svc.cluster.local:4317 (gRPC), :4318 (HTTP)"
+
+    # Show the Grafana URL.
+    echo "  Grafana: https://otel.rd.localhost"
+
+    # Check if OIDC is enabled (Authelia SSO).
+    local oidc_enabled
+    oidc_enabled=$(kubectl get deployment lgtm -n "$namespace" \
+        -o 'jsonpath={.spec.template.spec.containers[0].env[?(@.name=="GF_AUTH_GENERIC_OAUTH_ENABLED")].value}' 2>/dev/null) || true
+    if [ "$oidc_enabled" = "true" ]; then
+        echo "  OIDC (Authelia): enabled"
+    else
+        echo "  OIDC (Authelia): disabled (admin/changeit)"
+    fi
+}
+
+# Enables Authelia OIDC SSO for Grafana without a full reinstall.
+# Basic login is disabled, so OIDC must be enabled for users to sign in.
+sso_otel() {
+    local action="${1:-}"
+    case "$action" in
+        enable) ;;
+        disable)
+            fatal "Cannot disable SSO: Grafana's basic login is disabled. Removing OIDC would lock out all users."
+            ;;
+        *)
+            echo "Usage: $(basename "$0") sso enable"
+            exit 1
+            ;;
+    esac
+
+    require_command "kubectl"
+    require_command "helm"
+
+    local namespace release chart_dir
+    namespace="$(ldx_namespace otel)"
+    release="ldx"
+    chart_dir="${LDX_HOME}/charts/ldx-local-platform"
+
+    # Check the release exists.
+    if ! helm status "$release" -n "$namespace" &>/dev/null; then
+        fatal "No Helm release '${release}' in namespace '${namespace}'. Run 'ldx otel install' first."
+    fi
+
+    # Ensure chart dependencies are installed (removes stale tarballs first).
+    ensure_chart_deps "$chart_dir"
+
+    local values_file grafana_secret="" authelia_namespace traefik_ip
+    # mktemp -t is more portable on macOS (handles the extension properly).
+    values_file="$(mktemp -t ldx-otel-sso)"
+
+    # Traefik ClusterIP: point auth.rd.localhost at it so Grafana can reach
+    # Authelia through Traefik from inside the cluster.
+    traefik_ip="$(get_traefik_cluster_ip)" || true
+
+    if [ "$action" = "enable" ]; then
+        # Check that Authelia is running.
+        authelia_namespace="$(ldx_namespace authelia)"
+        local phase
+        phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia \
+            -o 'jsonpath={..status.phase}' 2>/dev/null) || phase="NotFound"
+        if [ "$phase" != "Running" ]; then
+            rm -f "$values_file"
+            fatal "Authelia is not running (pod phase: ${phase}) in namespace '${authelia_namespace}'. Run 'ldx authelia install' first."
+        fi
+
+        # Check that the Grafana client secret exists.
+        grafana_secret=$(ldx_secret_get "authelia/client_secrets" GRAFANA_CLIENT_SECRET 2>/dev/null) || true
+        if [ -z "$grafana_secret" ]; then
+            rm -f "$values_file"
+            fatal "GRAFANA_CLIENT_SECRET not found in the host secret store. Run 'ldx authelia install' first."
+        fi
+
+        log_info "Enabling Grafana OIDC SSO (Authelia in namespace '${authelia_namespace}')..."
+        {
+            echo "otelStack:"
+            echo "  oidc:"
+            echo "    enabled: true"
+            printf '    clientSecret: "%s"\n' "$grafana_secret"
+            printf '    autheliaNamespace: "%s"\n' "$authelia_namespace"
+            if [ -n "$traefik_ip" ]; then
+                echo "  hostAliases:"
+                echo "    - ip: \"${traefik_ip}\""
+                echo "      hostnames:"
+                echo "        - \"auth.rd.localhost\""
+            fi
+        } > "$values_file"
+    fi
+
+    # Apply the values and trigger a rollout. --reuse-values keeps the existing
+    # release values (image, password, ingress, ...) and only overrides OIDC.
+    # --force-conflicts handles resources also managed by the vault-k8s release
+    # (same flag used by 'ldx k8s up').
+    if ! helm upgrade "$release" "$chart_dir" \
+        --namespace "$namespace" \
+        --reuse-values \
+        --values "$values_file" \
+        --force-conflicts \
+        --no-hooks; then
+        rm -f "$values_file"
+        fatal "Failed to update the Helm release. Run 'ldx otel status' to check the current state."
+    fi
+
+    rm -f "$values_file"
+    kubectl rollout status deployment/lgtm -n "$namespace" --timeout=120s \
+        || log_warn "Rollout did not finish in time; check 'ldx otel status'."
+    log_info "Grafana OIDC SSO is now enabled. Login redirects to Authelia."
+    log_info "Basic username/password login is disabled."
 }
 
 case "${1:-}" in
@@ -30,6 +187,13 @@ case "${1:-}" in
         ;;
     uninstall)
         exec "${LDX_HOME}/bin/ldx" k8s down --services otel "${@:2}"
+        ;;
+    status)
+        status_otel
+        ;;
+    sso)
+        shift
+        sso_otel "$@"
         ;;
     help|-h|--help)
         show_help

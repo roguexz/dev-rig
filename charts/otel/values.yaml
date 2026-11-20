@@ -1,8 +1,8 @@
 # Grafana OTel LGTM all-in-one image (Loki, Grafana, Tempo, Mimir, collector).
-# Tracks 'latest' like the pre-chart installer; pin via values to freeze.
+# Pin to a release for reproducibility; override via values to freeze.
 image:
   repository: grafana/otel-lgtm
-  tag: "latest"
+  tag: "0.41.0"
   pullPolicy: Always
 
 adminPassword: changeit
@@ -15,6 +15,12 @@ ingress:
 # (shared with other services), the deployment only mounts it.
 extraCAs:
   enabled: true
+
+# Custom hostname-to-IP mappings for the pod (PodSpec.hostAliases). Set by
+# 'ldx k8s up' or 'ldx otel sso enable' to point auth.rd.localhost at the
+# Traefik ClusterIP so Grafana can reach Authelia through Traefik from inside
+# the cluster.
+hostAliases: []
 
 # Authelia OIDC SSO for Grafana. 'ldx k8s up' enables this when Authelia is
 # running and the GRAFANA_CLIENT_SECRET exists in the host secret store.

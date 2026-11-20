@@ -14,14 +14,38 @@ spec:
       labels:
         app: lgtm
     spec:
+      {{- if .Values.hostAliases }}
+      hostAliases:
+        {{- range .Values.hostAliases }}
+        - ip: {{ .ip | quote }}
+          hostnames:
+            {{- range .hostnames }}
+            - {{ . | quote }}
+            {{- end }}
+        {{- end }}
+      {{- end }}
       containers:
       - name: lgtm
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         env:
-        # Override the default Grafana admin password
+        # Override the default Grafana admin password (account is still created
+        # for OIDC sign-up; basic login is disabled so it cannot be used).
         - name: GF_SECURITY_ADMIN_PASSWORD
           value: {{ .Values.adminPassword | quote }}
+        # Disable anonymous access (the otel-lgtm image enables it by default).
+        - name: GF_AUTH_ANONYMOUS_ENABLED
+          value: "false"
+        # Disable username/password login entirely. Users must sign in through
+        # the configured OIDC provider (Authelia).
+        - name: GF_AUTH_BASIC_ENABLED
+          value: "false"
+        # Use our custom grafana.ini (overrides the baked-in one in the image).
+        - name: GF_PATHS_CONFIG
+          value: "/etc/grafana/grafana.ini"
+        # Grafana's external URL (used for redirect URIs, links, etc.)
+        - name: GF_SERVER_ROOT_URL
+          value: "https://{{ .Values.ingress.host }}/"
         {{- if .Values.extraCAs.enabled }}
         # Extra CA certificates (mkcert CA for local services like Authelia).
         # Mounted as SSL_CERT_DIR so they're added to the system root store.
@@ -36,6 +60,9 @@ spec:
           value: "Authelia"
         - name: GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP
           value: "true"
+        # New users (created via any auth method) get the Editor role by default.
+        - name: GF_USERS_AUTO_ASSIGN_ORG_ROLE
+          value: "Editor"
         - name: GF_AUTH_GENERIC_OAUTH_CLIENT_ID
           value: {{ .Values.oidc.clientId | quote }}
         - name: GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
@@ -48,9 +75,9 @@ spec:
         - name: GF_AUTH_GENERIC_OAUTH_AUTH_URL
           value: "https://{{ .Values.oidc.issuerHost }}/api/oidc/authorization"
         - name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL
-          value: "https://authelia.{{ .Values.oidc.autheliaNamespace }}.svc.cluster.local:{{ .Values.oidc.autheliaPort }}/api/oidc/token"
+          value: "https://{{ .Values.oidc.issuerHost }}/api/oidc/token"
         - name: GF_AUTH_GENERIC_OAUTH_API_URL
-          value: "https://authelia.{{ .Values.oidc.autheliaNamespace }}.svc.cluster.local:{{ .Values.oidc.autheliaPort }}/api/oidc/userinfo"
+          value: "https://{{ .Values.oidc.issuerHost }}/api/oidc/userinfo"
         {{- end }}
         ports:
         - containerPort: 3000
@@ -59,15 +86,23 @@ spec:
           name: otlp-grpc
         - containerPort: 4318
           name: otlp-http
-        {{- if .Values.extraCAs.enabled }}
         volumeMounts:
+        # Custom Grafana config (overrides the baked-in one in the otel-lgtm image).
+        - name: grafana-config
+          mountPath: /etc/grafana/grafana.ini
+          subPath: grafana.ini
+          readOnly: true
+        {{- if .Values.extraCAs.enabled }}
         # Extra CA certificates (mkcert CA) mounted as a directory for SSL_CERT_DIR.
         - name: extra-cas
           mountPath: /etc/ssl/extra-cas
           readOnly: true
         {{- end }}
-      {{- if .Values.extraCAs.enabled }}
       volumes:
+      - name: grafana-config
+        configMap:
+          name: grafana-config
+      {{- if .Values.extraCAs.enabled }}
       - name: extra-cas
         configMap:
           name: extra-cas
