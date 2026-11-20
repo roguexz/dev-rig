@@ -1,9 +1,8 @@
 # Authelia (`ldx authelia`)
 
 This command deploys [Authelia](https://www.authelia.com) - an open-source Identity Provider - on the local Kubernetes
-cluster. It serves as a single OIDC provider for all web UIs in the dev-rig: **Vault**, **agentgateway**, and
-**Grafana**. After one-time Touch ID (WebAuthn) enrollment, every login becomes a biometric prompt - no more passwords
-to remember.
+cluster. It serves as a single OIDC provider for all web UIs in the dev-rig: **Vault** and **Grafana**. After one-time
+Touch ID (WebAuthn) enrollment, every login becomes a biometric prompt - no more passwords to remember.
 
 ## Architecture
 
@@ -14,11 +13,10 @@ Browser ──(HTTPS via Traefik)──▶ auth.rd.localhost ──▶ Authelia 
                                     │                    └── Secrets (JWT, JWKS)
                                     │
 vault.rd.localhost ────────────────▶ Vault (OIDC client)
-agentgateway.rd.localhost ─────────▶ agentgateway (OIDC client)
 otel.rd.localhost ─────────────────▶ Grafana (OIDC client)
 ```
 
-All three apps redirect unauthenticated users to `https://auth.rd.localhost`. Authelia presents Touch ID (WebAuthn)
+Both apps redirect unauthenticated users to `https://auth.rd.localhost`. Authelia presents Touch ID (WebAuthn)
 after the initial password+enrollment setup.
 
 ## Commands
@@ -29,7 +27,7 @@ Deploys Authelia via the `ldx-local-platform` chart (`ldx k8s up --services auth
 `authelia*` in the configured namespace):
 
 1. **Secrets**: Generates JWT, storage, session, and OIDC HMAC secrets. Generates an RSA 2048-bit key for OIDC token
-   signing. Generates OIDC client secrets for Vault, agentgateway, and Grafana. Host-side secrets are stored in the
+   signing. Generates OIDC client secrets for Vault and Grafana. Host-side secrets are stored in the
    macOS Keychain as `ldx/authelia/*` entries (file fallback under `~/.cache/local-dev/secrets/` elsewhere; legacy
    cache files in `~/.cache/local-dev/authelia/` are imported on first read).
 2. **Bootstrap user**: Prompts for a bootstrap password (generated in non-interactive mode) and stores only its
@@ -37,7 +35,7 @@ Deploys Authelia via the `ldx-local-platform` chart (`ldx k8s up --services auth
    credential. When migrating an imperative install, the hash is adopted from the running `authelia-users`
    ConfigMap first.
 3. **Configuration**: The chart renders `configuration.yml` (WebAuthn, session cookies for `rd.localhost`, access
-   control rules, three OIDC clients with PBKDF2-hashed secrets, JWKS key) from values; the CLI supplies the dynamic
+   control rules, two OIDC clients with PBKDF2-hashed secrets, JWKS key) from values; the CLI supplies the dynamic
    parts at apply time via `ldx authelia prepare` (an internal pre-apply hook).
 4. **Storage**: Creates a PersistentVolumeClaim (`authelia-data`, 1Gi) for the SQLite database.
 5. **Deployment**: Single replica with `Recreate` strategy (SQLite lock safety), `enableServiceLinks: false`,
@@ -83,15 +81,6 @@ ldx vault sso
 Configures Vault's OIDC auth method to point at Authelia's discovery URL. Userpass (`admin/changeit`) remains
 available as a fallback.
 
-### agentgateway
-
-```bash
-ldx agentgateway sso
-```
-
-Configures the agentgateway UI to use Authelia as its OIDC provider. The UI login flow becomes:
-`https://agentgateway.rd.localhost/ui` → `auth.rd.localhost` login → Touch ID → back to agentgateway.
-
 ### Grafana
 
 ```bash
@@ -116,13 +105,12 @@ the Grafana deployment. If Authelia is not deployed, Grafana uses the default ad
 
 ## Registered OIDC clients
 
-| Client ID      | App             | Redirect URI                                                  |
-|----------------|-----------------|---------------------------------------------------------------|
-| `vault`        | HashiCorp Vault | `https://vault.rd.localhost/ui/vault/auth/oidc/oidc/callback` |
-| `agentgateway` | agentgateway    | `https://agentgateway.rd.localhost/oauth/callback`            |
-| `grafana`      | Grafana         | `https://otel.rd.localhost/login/generic_oauth`               |
+| Client ID | App             | Redirect URI                                                  |
+|-----------|-----------------|---------------------------------------------------------------|
+| `vault`   | HashiCorp Vault | `https://vault.rd.localhost/ui/vault/auth/oidc/oidc/callback` |
+| `grafana` | Grafana         | `https://otel.rd.localhost/login/generic_oauth`               |
 
-All clients use `two_factor` authorization policy and request `openid profile email groups` scopes.
+Both clients use `two_factor` authorization policy and request `openid profile email groups` scopes.
 
 ## User management
 

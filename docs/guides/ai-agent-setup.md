@@ -12,7 +12,7 @@ Most AI setups suffer from "configuration sprawl"-where every tool requires its 
 The core of this stack is the separation of the **Agent** (the execution layer) from the **Gateway** (the inference and tool-calling layer).
 
 - **The Agent (`opencode`)**: Focuses on the "how"-exploring the codebase, executing shell commands, and managing the project state. It doesn't care which model is providing the answers; it only cares that it has a reliable API to talk to.
-- **The Gateway (`agentgateway`)**: Focuses on the "what"-handling the actual inferencing, managing the tool-calling protocol, and communicating with the LLM.
+- **The Gateway (`bifrost`)**: Focuses on the "what"-handling the actual inferencing, managing the tool-calling protocol, and communicating with the LLM.
 
 **The Benefit: Zero-Plumbing Model Swaps**
 Because the agent and the inference system are decoupled, you can swap the underlying model (e.g., moving from a cloud-based GPT to a local oMLX model) or change the tool-calling implementation entirely within the Gateway. The agent remains untouched. You change the "brain" without having to rebuild the "body."
@@ -30,8 +30,8 @@ By centralizing secrets in the Gateway (integrated with Vault and SSO), we move 
 
 ## Configuring the Stack
 
-### The Gateway (`agentgateway`)
-The Gateway is the central point of trust. Once installed and linked via SSO, you use it to manage:
+### The Gateway (`bifrost`)
+The Gateway is the central point of trust. Once installed with its admin credentials, you use it to manage:
 - **Inference**: Sync and switch between different models (e.g., via oMLX) without affecting your agents.
 - **Tool Calling**: Define how the LLM interacts with tools and MCP servers in a single, consistent location.
 - **Secrets**: Manage provider API keys securely, ensuring they never touch the local tool configurations.
@@ -55,7 +55,7 @@ These are modular extensions that leverage the existing Gateway/Agent plumbing t
 
 | Component | Role | Key Benefit |
 | :--- | :--- | :--- |
-| **AgentGateway** | Inference & Tool-Calling | Centralized secrets; zero-plumbing model swaps |
+| **Bifrost** | LLM & MCP Gateway | Centralized secrets; unified LLM and MCP routing |
 | **OpenCode** | Execution & Interface | Decoupled from provider logic; focus on codebase |
 | **Skills** | Specialized Capabilities | Modular expertise without new plumbing |
 | **OpenChamber** | Visual Management | Orchestration and monitoring |

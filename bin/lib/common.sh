@@ -140,7 +140,7 @@ ldx_validate_namespace() {
     fi
 }
 
-# Echoes the namespace the given tool (e.g. 'vault', 'agentgateway') should
+# Echoes the namespace the given tool (e.g. 'vault', 'bifrost') should
 # use. Precedence: LDX_<TOOL>_NAMESPACE env, LDX_NAMESPACE env,
 # LDX_<TOOL>_NAMESPACE config, LDX_NAMESPACE config, 'commons'.
 ldx_namespace() {

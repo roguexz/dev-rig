@@ -39,6 +39,16 @@ postgresqlStack:
       tag: "18"
       pullPolicy: IfNotPresent
     primary:
+      # The default 192Mi limit is too low for pgvector workloads and can
+      # trigger OOM kills. 1Gi gives headroom for embedding operations and
+      # concurrent queries on a local dev rig.
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
       initdb:
         scripts:
           init-pgvector.sql: |
@@ -56,11 +66,12 @@ otelStack:
   # .oidc and image settings are supplied by 'ldx k8s up' (Authelia probe,
   # host secret store); override any of them with -f.
 
-agentgatewayStack:
+bifrostStack:
   enabled: false
-  # Gateway config, Vault Agent templates (per MCP tool) and the runtime
-  # Secret are CLI-owned; the chart carries the static deployment. The
-  # prehook supplies hostAliases and pins the image from the CLI constant.
+  # Gateway config, runtime Secret and extra CAs are CLI-owned; the chart
+  # carries the static deployment. The prehook pins the image from the CLI
+  # constant.
+  image: maximhq/bifrost:v2.6.0
 
 autheliaStack:
   enabled: false
@@ -100,7 +111,7 @@ vaultStack:
           hosts:
             - vault.rd.localhost
   injector:
-    affinity: {}
+    affinity: ""
     strategy:
       rollingUpdate:
         maxSurge: 0

@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# ldx-help: infra Deploy Bifrost (LLM + MCP gateway) with oMLX sync
+
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+# Command logic lives in bin/commands/bifrost/ modules; shared helpers
+# in common.sh, subcommand flows lazy-sourced on dispatch.
+source "${LDX_HOME}/bin/commands/bifrost/common.sh"
+
+BIFROST_MODULE_DIR="${LDX_HOME}/bin/commands/bifrost"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|uninstall|upgrade|status|sync-omlx|api-key|admin-password>"
+    echo ""
+    echo "Commands:"
+    echo "  install           Deploy Bifrost (LLM + MCP gateway) into the cluster."
+    echo "  uninstall         Remove Bifrost deployment, services, ingress, config and data."
+    echo "  upgrade           Upgrade Bifrost to a version (default: pinned) with a rollout."
+    echo "  status            Show deployment state: admin auth, API key, synced models."
+    echo "  sync-omlx         Sync local oMLX models into the gateway's provider config."
+    echo "  api-key           Manage the virtual client key. Enforcement is always on."
+    echo "  admin-password    Print the admin password (from the keychain)."
+    echo ""
+    echo "Options for upgrade:"
+    echo "  <version>    Target version (e.g. 1.4.11 or v1.4.11). Omit to use the pinned version."
+    echo "  --dry-run    Show what would change; do not touch the cluster."
+    echo ""
+    echo "Options for sync-omlx:"
+    echo "  --dry-run    Show the generated provider configuration without applying it."
+    echo ""
+    echo "Options for api-key:"
+    echo "  api-key           Ensure the key exists, cache it locally, apply config and restart."
+    echo "  api-key print     Print the current virtual client key to stdout."
+    echo ""
+    echo "Note: install generates a random admin password (stored in the keychain)."
+    echo "      Run 'ldx bifrost admin-password' to print it."
+    echo "Note: MCP servers are not configured on install; add them via the Bifrost UI."
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        show_help
+        exit 1
+    fi
+
+    local subcommand="$1"
+    shift
+
+    case "$subcommand" in
+        prepare-support|prepare-values|install|uninstall|upgrade)
+            source "${BIFROST_MODULE_DIR}/lifecycle.sh"
+            case "$subcommand" in
+                prepare-support)  prepare_support ;;
+                prepare-values)   prepare_values ;;
+                install)          install_bifrost ;;
+                uninstall)        uninstall_bifrost ;;
+                upgrade)          upgrade_bifrost "$@" ;;
+            esac
+            ;;
+        status)
+            source "${BIFROST_MODULE_DIR}/status.sh"
+            status_bifrost
+            ;;
+        sync-omlx)
+            source "${BIFROST_MODULE_DIR}/sync-omlx.sh"
+            sync_omlx_models "$@"
+            ;;
+        api-key)
+            source "${BIFROST_MODULE_DIR}/api-key.sh"
+            api_key_command "$@"
+            ;;
+        admin-password)
+            source "${BIFROST_MODULE_DIR}/common.sh"
+            print_admin_password
+            ;;
+        help|-h|--help)
+            show_help
+            ;;
+        *)
+            log_error "Unknown subcommand: $subcommand"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

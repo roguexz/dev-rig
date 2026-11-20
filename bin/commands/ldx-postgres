@@ -14,15 +14,73 @@ export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo "Usage: $(basename "$0") <install|uninstall|status>"
     echo ""
     echo "Commands:"
     echo "  install    Install PostgreSQL with pgvector and expose port 5432 to the host."
     echo "  uninstall  Remove the PostgreSQL deployment and its data (PVC)."
+    echo "  status     Show the PostgreSQL pod status, port-forward, and credentials."
     echo ""
     echo "Alias for 'ldx k8s up/down --services postgres' (uninstall adds"
-    echo "--purge-data, matching the historical behavior). For flags, status"
-    echo "and diffs use 'ldx k8s' directly."
+    echo "--purge-data, matching the historical behavior). For flags and diffs"
+    echo "use 'ldx k8s' directly."
+}
+
+# Shows the PostgreSQL deployment status, port-forward, and credentials.
+status_postgres() {
+    require_command "kubectl"
+
+    local namespace
+    namespace="$(ldx_namespace postgresql)"
+
+    log_info "PostgreSQL status:"
+
+    # Check if the pod exists and its phase.
+    local phase ready
+    phase=$(kubectl get pods -n "$namespace" -l app.kubernetes.io/name=postgresql \
+        -o 'jsonpath={.items[0].status.phase}' 2>/dev/null) || true
+    ready=$(kubectl get pods -n "$namespace" -l app.kubernetes.io/name=postgresql \
+        -o 'jsonpath={.items[0].status.containerStatuses[0].ready}' 2>/dev/null) || true
+
+    if [ -z "$phase" ]; then
+        echo "  Pod: not installed"
+        return 0
+    fi
+    echo "  Pod: ${phase} (ready: ${ready:-unknown})"
+
+    # Show the password from the Secret.
+    local password
+    password=$(kubectl get secret postgresql -n "$namespace" \
+        -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    if [ -n "$password" ]; then
+        echo "  Host access: psql -h localhost -U postgres -p 5432 (password: ${password})"
+    else
+        echo "  Host access: psql -h localhost -U postgres -p 5432"
+    fi
+
+    # Check if the LoadBalancer service is exposed.
+    local lb_ip
+    lb_ip=$(kubectl get service postgres-lb -n "$namespace" \
+        -o 'jsonpath={.status.loadBalancer.ingress[0].ip}' 2>/dev/null) || true
+    if [ -n "$lb_ip" ]; then
+        echo "  LoadBalancer: ${lb_ip}:5432"
+    fi
+
+    # Check if the NodePort service is exposed.
+    local node_port
+    node_port=$(kubectl get service postgres-host-access -n "$namespace" \
+        -o 'jsonpath={.spec.ports[0].nodePort}' 2>/dev/null) || true
+    if [ -n "$node_port" ]; then
+        echo "  NodePort: localhost:${node_port}"
+    fi
+
+    # Show the cluster address.
+    local svc_ports
+    svc_ports=$(kubectl get service postgresql -n "$namespace" \
+        -o 'jsonpath={.spec.ports[0].port}' 2>/dev/null) || true
+    if [ -n "$svc_ports" ]; then
+        echo "  Cluster: postgresql.${namespace}.svc.cluster.local:${svc_ports}"
+    fi
 }
 
 case "${1:-}" in
@@ -31,6 +89,9 @@ case "${1:-}" in
         ;;
     uninstall)
         exec "${LDX_HOME}/bin/ldx" k8s down --services postgres --purge-data "${@:2}"
+        ;;
+    status)
+        status_postgres
         ;;
     help|-h|--help)
         show_help

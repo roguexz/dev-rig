@@ -1,0 +1,31 @@
+# Static deployment only. Everything dynamic is CLI-owned (ldx bifrost):
+#   - the gateway config ConfigMap (providers/MCP merged in by sync-omlx)
+#   - the runtime Secret (admin credentials, oMLX key, virtual client key)
+# The image is pinned in bin/commands/ldx-bifrost (BIFROST_IMAGE);
+# 'ldx k8s' overrides it there at apply time so the CLI stays the single
+# source of truth.
+nameOverride: bifrost
+fullnameOverride: bifrost
+
+image: maximhq/bifrost:v1.4.11
+host: bifrost.rd.localhost
+port: 8080
+
+serviceAccount: bifrost
+
+# CLI-owned resources referenced by name (created by 'ldx bifrost').
+secretName: bifrost-secrets
+configCMName: bifrost-config
+extraCasCMName: extra-cas
+
+storage:
+  size: 1Gi
+
+# Optional: resolve other .rd.localhost hosts to Traefik's ClusterIP
+# (supplied by 'ldx k8s' so the gateway reaches other services without
+# external DNS).
+hostAliases: []
+
+# Pod annotations supplied by 'ldx bifrost prepare-values' (checksums of
+# the CLI-owned ConfigMap; changing them rolls the deployment).
+podAnnotations: {}

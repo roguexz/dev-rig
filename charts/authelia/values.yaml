@@ -31,8 +31,6 @@ config:
   clients:
     vault:
       secretHash: ""
-    agentgateway:
-      secretHash: ""
     grafana:
       secretHash: ""
 

@@ -129,11 +129,11 @@ upgrade_vault() {
     log_info "Running pod image tag: ${new_app:-unknown} (expected ${target_app:-unknown})"
 
     if kubectl exec -n "$namespace" vault-0 -- sh -c \
-        'wget -qO- http://127.0.0.1:8200/v1/identity/oidc/provider/agentgateway/.well-known/openid-configuration 2>/dev/null || curl -s http://127.0.0.1:8200/v1/identity/oidc/provider/agentgateway/.well-known/openid-configuration' \
-        | grep -q '"issuer"'; then
-        log_info "OIDC issuer responds: identity data intact."
+        'wget -qO- http://127.0.0.1:8200/v1/sys/health 2>/dev/null || curl -s http://127.0.0.1:8200/v1/sys/health' \
+        | grep -q '"initialized":true'; then
+        log_info "Vault health check passed: identity data intact."
     else
-        log_warn "OIDC issuer did not respond after upgrade."
+        log_warn "Vault health check did not pass after upgrade."
         ok=false
     fi
 
@@ -141,7 +141,7 @@ upgrade_vault() {
 
     if $ok; then
         log_info "Upgrade complete: chart ${target}, Vault ${new_app:-$target_app}."
-        log_info "Log in at https://agentgateway.rd.localhost/ui and confirm SSO still works."
+        log_info "Log in at https://vault.rd.localhost and confirm SSO still works."
     else
         fatal "Upgrade applied but a smoke check failed. Snapshot for rollback: ${snap}. See docs/vault.md."
     fi

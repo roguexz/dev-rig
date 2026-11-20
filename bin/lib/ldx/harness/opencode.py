@@ -21,7 +21,7 @@ import sys
 from ldx import jsonc
 
 # Helper (non-LLM) models served by omlx but useless as coding models; same
-# exclusion list as ldx-agentgateway sync-omlx, extended with embeddings.
+# exclusion list as ldx-bifrost sync-omlx, extended with embeddings.
 _HELPER_PATTERNS = ("MarkItDown", "nomicai-modernbert", "*modernbert*",
                     "*embedding*", "*embed*")
 
@@ -31,7 +31,7 @@ def is_helper_model(model_id):
 
 
 def current_default(config_path, provider_id):
-    """Model id (no provider prefix, no #variant, no agw- prefix) of the
+    """Model id (no provider prefix, no #variant, no bifrost- prefix) of the
     configured default for provider_id, or None."""
     try:
         with open(config_path, encoding="utf-8") as fh:
@@ -46,8 +46,13 @@ def current_default(config_path, provider_id):
     if provider != provider_id:
         return None
     mid = rest.split("#", 1)[0]
-    # Config keys carry the 'agw-' prefix; manifest ids don't.
-    if mid.startswith("agw-"):
+    # Config keys carry the 'bifrost-' prefix (to distinguish from direct
+    # omlx models). Handle legacy prefixes for backward compatibility.
+    if mid.startswith("bifrost-"):
+        mid = mid[len("bifrost-"):]
+    elif mid.startswith("omlx/"):
+        mid = mid[len("omlx/"):]
+    elif mid.startswith("agw-"):
         mid = mid[len("agw-"):]
     return mid
 
@@ -134,9 +139,14 @@ def _variants_for(m):
 
 
 def _model_entry(m):
-    # Wire id must match the gateway's model name (with 'agw-' prefix); the
-    # gateway strips the prefix when forwarding to oMLX via params.model.
-    wire_id = m["id"] if m["id"].startswith("agw-") else "agw-" + m["id"]
+    # Wire id (the 'id' field OpenCode sends to Bifrost) must be in
+    # '<provider>/<model>' format for Bifrost routing: 'omlx/<model-id>'.
+    if m["id"].startswith("omlx/"):
+        wire_id = m["id"]
+    elif m["id"].startswith("agw-"):
+        wire_id = "omlx/" + m["id"][len("agw-"):]
+    else:
+        wire_id = "omlx/" + m["id"]
     entry = {
         "id": wire_id,
         "name": m["name"],
@@ -149,7 +159,21 @@ def _model_entry(m):
     return entry
 
 
-def merge_config(models, provider_id, base_url, mcp_url, client_key,
+def _config_key(m):
+    """Config key (what the user sees in 'opencode models'). Prefixed with
+    'bifrost-' to distinguish Bifrost-routed models from direct omlx models.
+    The wire id (sent to Bifrost) is 'omlx/<model-id>' regardless."""
+    if m["id"].startswith("bifrost-"):
+        return m["id"]
+    if m["id"].startswith("omlx/"):
+        return "bifrost-" + m["id"][len("omlx/"):]
+    if m["id"].startswith("agw-"):
+        return "bifrost-" + m["id"][len("agw-"):]
+    return "bifrost-" + m["id"]
+
+
+def merge_config(models, provider_id, base_url, client_key,
+                 mcp_url, mcp_key, mcp_name,
                  default_id, keep_stale, config_path):
     """Merge the gateway provider block into the existing opencode config.
 
@@ -161,18 +185,17 @@ def merge_config(models, provider_id, base_url, mcp_url, client_key,
 
     provider = {
         "npm": "@ai-sdk/openai-compatible",
-        "name": "Local Server",
+        "name": "Bifrost",
         "options": {
-            # Virtual client key validated by the gateway's apiKey policy; the
-            # gateway swaps it for the real omlx key ($OMLX_API_KEY) upstream.
+            # Virtual client key validated by Bifrost's vk policy; the
+            # gateway swaps it for the real omlx key upstream.
             # Falls back to a placeholder only when enforcement is not enabled.
             "baseURL": base_url,
-            "apiKey": client_key or "omlx",
+            "apiKey": client_key or "bifrost",
         },
-        # Config key and wire id both carry the 'agw-' prefix: the config key
-        # avoids collisions with other providers' models in opencode's catalog,
-        # and the wire id must match the gateway's model name for routing.
-        "models": {("agw-" + m["id"] if not m["id"].startswith("agw-") else m["id"]): _model_entry(m) for m in models},
+        # Config keys are prefixed with 'bifrost-' to distinguish from direct
+        # omlx models. Wire ids (sent to Bifrost) are 'omlx/<model-id>'.
+        "models": {_config_key(m): _model_entry(m) for m in models},
     }
 
     # Load the existing config (JSONC: // and /* */ comments, trailing commas).
@@ -195,9 +218,16 @@ def merge_config(models, provider_id, base_url, mcp_url, client_key,
     def is_stale(old_key):
         if old_key in new_ids:
             return False
-        # Keys gained the 'agw-' prefix at some point; don't report the rename as
-        # a stale model when the prefixed twin exists now.
-        return ("agw-" + old_key) not in new_ids
+        # Keys may have had different prefixes in older formats; strip known
+        # prefixes and check if the resulting bifrost-prefixed key exists now.
+        raw = old_key
+        if raw.startswith("bifrost-"):
+            raw = raw[len("bifrost-"):]
+        elif raw.startswith("omlx/"):
+            raw = raw[len("omlx/"):]
+        elif raw.startswith("agw-"):
+            raw = raw[len("agw-"):]
+        return ("bifrost-" + raw) not in new_ids
 
     pruned = sorted(k for k in old_models if is_stale(k)) if old_models else []
     if pruned and keep_stale:
@@ -208,19 +238,30 @@ def merge_config(models, provider_id, base_url, mcp_url, client_key,
     # Merge: update/add provider.<id> and model; leave everything else untouched.
     cfg.setdefault("$schema", "https://opencode.ai/config.json")
     cfg.setdefault("provider", {})[provider_id] = provider
-    key = default_id if default_id.startswith("agw-") else "agw-" + default_id
+    # Default id is the raw omlx model id; convert to the bifrost-prefixed
+    # config key.
+    key = default_id
+    if key.startswith("bifrost-"):
+        key = key
+    elif key.startswith("omlx/"):
+        key = "bifrost-" + key[len("omlx/"):]
+    elif key.startswith("agw-"):
+        key = "bifrost-" + key[len("agw-"):]
+    else:
+        key = "bifrost-" + key
     suffix = "#low" if "variants" in provider["models"][key] else ""
     cfg["model"] = f"{provider_id}/{key}{suffix}"
 
-    # MCP endpoint: the gateway's /mcp path, secured with the same virtual key.
+    # MCP endpoint: Bifrost gateway, secured with the same virtual client key.
     # Merging preserves any other MCP servers the user has configured.
-    cfg.setdefault("mcp", {})["agentgateway"] = {
-        "type": "remote",
-        "url": mcp_url,
-        "headers": {
-            "Authorization": f"Bearer {client_key}" if client_key else ""
-        },
-    }
+    if mcp_url and mcp_key:
+        cfg.setdefault("mcp", {})[mcp_name] = {
+            "type": "remote",
+            "url": mcp_url,
+            "headers": {
+                "Authorization": f"Bearer {mcp_key}"
+            },
+        }
 
     out = json.dumps(cfg, indent=2) + "\n"
     return {
@@ -258,8 +299,10 @@ def main(argv=None):
             models,
             provider_id=os.environ["PROVIDER_ID"],
             base_url=os.environ["GATEWAY_BASE_URL"],
-            mcp_url=os.environ["MCP_URL"],
             client_key=os.environ.get("CLIENT_KEY") or "",
+            mcp_url=os.environ.get("MCP_URL") or "",
+            mcp_key=os.environ.get("MCP_KEY") or "",
+            mcp_name=os.environ.get("MCP_NAME", "bifrost"),
             default_id=os.environ["DEFAULT_ID"],
             keep_stale=os.environ.get("KEEP_STALE") == "true",
             config_path=os.environ["OPENCODE_CONFIG"],

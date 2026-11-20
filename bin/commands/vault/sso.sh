@@ -1,18 +1,19 @@
 # ldx-vault module: sso: Authelia OIDC login for Vault.
 # Sourced by bin/commands/ldx-vault; shared helpers live in
 # bin/commands/vault/common.sh. Not executable on its own.
+AUTHELIA_HOST="auth.rd.localhost"
+
 sso_vault() {
     require_command "kubectl"
     require_command "jq"
     require_command "curl"
 
-    # Read the Vault client secret from the Authelia cache (created by 'ldx authelia install')
+    # Read the Vault client secret from the host secret store (Keychain),
+    # created by 'ldx authelia install'.
     local vault_client_secret
-    # Host secret store (Keychain); the pre-Keychain file (KEY=VALUE lines)
-    # is imported on first read.
-    vault_client_secret=$(ldx_secret_get_kv "authelia/client_secrets" "$AUTHELIA_SECRETS_FILE" VAULT_CLIENT_SECRET 2>/dev/null) || true
+    vault_client_secret=$(ldx_secret_get "authelia/client_secrets" VAULT_CLIENT_SECRET 2>/dev/null) || true
     if [ -z "$vault_client_secret" ]; then
-        fatal "VAULT_CLIENT_SECRET not found in ${AUTHELIA_SECRETS_FILE}."
+        fatal "VAULT_CLIENT_SECRET not found in the host secret store (ldx/authelia/client_secrets/*). Run 'ldx authelia install' first."
     fi
 
     # Check that Authelia is running and its OIDC discovery endpoint responds

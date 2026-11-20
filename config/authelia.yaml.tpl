@@ -84,7 +84,7 @@ data:
           policy: 'bypass'
         - domain: ['vault.rd.localhost']
           policy: 'two_factor'
-        - domain: ['agentgateway.rd.localhost']
+        - domain: ['bifrost.rd.localhost']
           policy: 'two_factor'
         - domain: ['otel.rd.localhost']
           policy: 'two_factor'
@@ -114,19 +114,6 @@ data:
             redirect_uris:
               - 'https://vault.rd.localhost/ui/vault/auth/oidc/oidc/callback'
               - 'http://localhost:8250/oidc/callback'
-            scopes:
-              - 'openid'
-              - 'profile'
-              - 'email'
-              - 'groups'
-
-          - client_id: 'agentgateway'
-            client_name: 'agentgateway'
-            client_secret: '{{AGENTGATEWAY_SECRET_HASH}}'
-            public: false
-            authorization_policy: 'one_factor'
-            redirect_uris:
-              - 'https://agentgateway.rd.localhost/oauth/callback'
             scopes:
               - 'openid'
               - 'profile'
