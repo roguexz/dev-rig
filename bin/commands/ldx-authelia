@@ -326,9 +326,9 @@ install_authelia() {
     log_info ""
     log_info "Next steps:"
     log_info "  1. Enroll Touch ID: run '$(basename "$0") enroll'"
-    log_info "  2. Wire up Vault: run 'ldx vault sso'"
+    log_info "  2. Wire up Vault: run 'ldx vault install' (SSO is configured automatically)"
     log_info "  3. Wire up Bifrost: run 'ldx bifrost install' (uses its own username/password auth)"
-    log_info "  4. Wire up Grafana: run 'ldx otel install' (re-run to add OIDC)"
+    log_info "  4. Wire up Grafana: run 'ldx otel install' (SSO is configured automatically)"
 }
 
 # --- uninstall -----------------------------------------------------------------
