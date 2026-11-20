@@ -66,30 +66,21 @@ Userpass (`admin/changeit`) remains available as a fallback.
 
 ### `ldx vault enable-secrets`
 
-Enables the secrets engine and auth method components needed for the agentgateway's Vault-backed MCP credentials:
+Enables the KV v2 secrets engine and Kubernetes auth method for applications that need to store and retrieve secrets
+from Vault:
 
-1. **KV v2 secrets engine** at path `secret` - the standard path for application secrets. MCP credentials are stored
-   under `secret/mcp/<name>` (data at `secret/data/mcp/<name>`, metadata at `secret/metadata/mcp/<name>`).
+1. **KV v2 secrets engine** at path `secret` - the standard path for application secrets.
 2. **Kubernetes auth method** - configured with `kubernetes_host=https://kubernetes.default.svc:443` (the in-cluster
    API server URL) and `skip_tls_verify=true` (Rancher Desktop's self-signed cert is not in Vault's trust store). This
    allows pods to authenticate to Vault using their service account tokens, getting short-lived Vault tokens.
-3. **Policy `mcp-secrets-read`** - a minimal policy that grants `read` and `list` on `secret/data/mcp/*` and
-   `secret/metadata/mcp/*`. This is the only access the Vault Agent sidecar needs to read MCP credentials.
 
 This command is idempotent: it is safe to re-run, and it skips steps that are already in place. It requires Vault to
 be running and unsealed (`ldx vault unseal` first if sealed).
 
-For new installs, `setup` runs this automatically. For existing installs (created before this command existed), run it
-once before using `ldx agentgateway mcp`.
+For new installs, `setup` runs this automatically.
 
-#### What the agentgateway needs from Vault
-
-The agentgateway's Vault Agent sidecar (added by `ldx agentgateway install`) needs three things from Vault:
-
-- **A role** (`agentgateway-mcp`) that binds the gateway's service account to the `mcp-secrets-read` policy. This
-  is created by `ldx agentgateway install`, not by this command.
-- **Kubernetes auth method** configured so the role can be used by pods. This command enables and configures it.
-- **KV v2 secrets engine** at `secret` so MCP credentials can be stored. This command enables it.
+> **Note:** MCP credential management is handled by [Bifrost](../ai/bifrost.md). Vault remains available for other
+> use cases.
 
 ### OIDC profile scope
 
@@ -101,7 +92,7 @@ The agentgateway's Vault Agent sidecar (added by `ldx agentgateway install`) nee
 
 OIDC providers list it via `scopes_supported=profile` (Vault adds `openid` implicitly - passing it explicitly is an
 error), and clients request it at authorize time. Users without metadata simply get empty `name`/`email` claims;
-token issuance never fails. Services such as `ldx agentgateway sso` reference this scope rather than creating it.
+token issuance never fails.
 
 ### `ldx vault upgrade [chart-version]`
 

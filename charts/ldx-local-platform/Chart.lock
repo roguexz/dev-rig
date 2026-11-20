@@ -14,8 +14,8 @@ dependencies:
 - name: authelia
   repository: file://../authelia
   version: 0.1.0
-- name: agentgateway
-  repository: file://../agentgateway
+- name: bifrost
+  repository: file://../bifrost
   version: 0.1.0
-digest: sha256:9283e5aa3820b5cd022d46716e4476dc31a1068481b72118d53269737e320890
-generated: "2026-11-13T15:06:45.949792-08:00"
+digest: sha256:aa8eab7301e9b02cc1ef780ab598fc8ee71fba25ece03f61c72ac6119daff331
+generated: "2026-11-17T23:48:12.324336-08:00"

@@ -129,7 +129,7 @@ POLICY
                 printf '{"name":"admin","metadata":{"full_name":"Administrator","email":"admin@rd.localhost"}}' | vault write identity/entity/id/\$admin_entity_id - >/dev/null
             fi
 
-            # Shared OIDC profile scope: OIDC clients (e.g. agentgateway)
+            # Shared OIDC profile scope: OIDC clients (e.g. Vault, Grafana)
             # request scope=profile and Vault renders name/email from entity
             # metadata set above (or by 'create-user'). Missing metadata
             # renders as an empty claim, never an error.
@@ -185,8 +185,6 @@ EOF
 # through the Traefik ingress instead. The certificate for it comes from
 # 'ldx tls setup', whose wildcard covers *.rd.localhost, so the Go binary
 # verifies it without -k.
-VAULT_API_URL="https://vault.rd.localhost"
-VAULT_ROOT_TOKEN=""
 
 # Address and token are passed explicitly, so an ambient VAULT_ADDR/VAULT_TOKEN
 # in the caller's shell can never point these commands at another server.
@@ -333,9 +331,9 @@ create_user_vault() {
 }
 
 # --- Secrets engine and auth method setup -----------------------------------
-# Enables the KV v2 secrets engine (path: secret), the Kubernetes auth method,
-# and the mcp-secrets-read policy. Idempotent: safe to re-run. Called by
-# 'enable-secrets' and by 'install' for new installs.
+# Enables the KV v2 secrets engine (path: secret) and the Kubernetes auth
+# method. Idempotent: safe to re-run. Called by 'enable-secrets' and by
+# 'install' for new installs.
 enable_secrets_vault() {
     require_command "kubectl"
     require_command "jq"
@@ -370,23 +368,9 @@ enable_secrets_vault() {
         log_info "Kubernetes auth method enabled (host: https://kubernetes.default.svc:443)."
     fi
 
-    # --- Create the mcp-secrets-read policy ---
-    # Grants read/list on the MCP secrets subtree. This is the minimal policy
-    # the Vault Agent sidecar needs to read MCP credentials.
-    cat <<POLICY | vault_cli policy write mcp-secrets-read - >/dev/null
-path "secret/data/mcp/*" {
-  capabilities = ["read", "list"]
-}
-path "secret/metadata/mcp/*" {
-  capabilities = ["read", "list"]
-}
-POLICY
-    log_info "Policy 'mcp-secrets-read' created."
-
     log_info "Vault secrets engine and auth method setup complete."
-    log_info "  - KV v2 at 'secret' (MCP credentials go to secret/data/mcp/<name>/token)"
-    log_info "  - Kubernetes auth (Vault Agent sidecars authenticate with their SA JWT)"
-    log_info "  - Policy 'mcp-secrets-read' (minimal read access for the Vault Agent)"
+    log_info "  - KV v2 at 'secret'"
+    log_info "  - Kubernetes auth (pods authenticate with their SA JWT)"
 }
 
 # --- Authelia SSO ---------------------------------------------------------------
@@ -394,9 +378,6 @@ POLICY
 # authelia install'). After this, Vault logins redirect to Authelia, which
 # presents Touch ID (WebAuthn) after the initial password+enrollment setup.
 # Userpass stays enabled as a fallback.
-AUTHELIA_SECRETS_DIR="${CACHE_DIR}/authelia"
-AUTHELIA_SECRETS_FILE="${AUTHELIA_SECRETS_DIR}/client_secrets"
-AUTHELIA_HOST="auth.rd.localhost"
 
 seal_vault() {
     require_command "kubectl"

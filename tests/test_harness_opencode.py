@@ -33,26 +33,34 @@ class CurrentDefault(unittest.TestCase):
             fh.write(text)
             path = fh.name
         try:
-            return opencode.current_default(path, "local")
+            return opencode.current_default(path, "bifrost")
         finally:
             os.unlink(path)
 
-    def test_jsonc_and_agw_prefix(self):
+    def test_jsonc_and_bifrost_prefix(self):
         self.assertEqual(
-            self._run('{"model": "local/agw-qwen#low"} // default\n'), "qwen")
+            self._run('{"model": "bifrost/bifrost-qwen#low"} // default\n'), "qwen")
+
+    def test_legacy_omlx_slash_prefix(self):
+        self.assertEqual(
+            self._run('{"model": "bifrost/omlx/qwen#low"} // default\n'), "qwen")
+
+    def test_legacy_agw_prefix(self):
+        self.assertEqual(
+            self._run('{"model": "bifrost/agw-qwen#low"} // default\n'), "qwen")
 
     def test_other_provider_ignored(self):
-        self.assertIsNone(self._run('{"model": "openai/gpt"}'))
+        self.assertIsNone(self._run('{"model": "omlx/qwen"}'))
 
     def test_missing_file(self):
-        self.assertIsNone(opencode.current_default("/nonexistent/opencode.jsonc", "local"))
+        self.assertIsNone(opencode.current_default("/nonexistent/opencode.jsonc", "bifrost"))
 
     def test_broken_file(self):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonc", delete=False) as fh:
             fh.write("{not json")
             path = fh.name
         try:
-            self.assertIsNone(opencode.current_default(path, "local"))
+            self.assertIsNone(opencode.current_default(path, "bifrost"))
         finally:
             os.unlink(path)
 
@@ -64,7 +72,7 @@ class HelperModels(unittest.TestCase):
             self.assertTrue(opencode.is_helper_model(mid), mid)
 
     def test_coding_models_pass(self):
-        for mid in ("qwen-3.8-moe", "llama-4", "agw-mlx-community--Qwen3"):
+        for mid in ("qwen-3.8-moe", "llama-4", "mlx-community--Qwen3"):
             self.assertFalse(opencode.is_helper_model(mid), mid)
 
 
@@ -110,47 +118,65 @@ class BuildManifest(unittest.TestCase):
 
 
 class Merge(unittest.TestCase):
-    def _merge(self, models, existing, keep_stale=False, client_key="k"):
+    def _merge(self, models, existing, keep_stale=False, client_key="k",
+               mcp_url="", mcp_key=""):
         with tempfile.NamedTemporaryFile("w", suffix=".jsonc", delete=False) as fh:
             fh.write(existing)
             path = fh.name
         try:
             return opencode.merge_config(
-                models, provider_id="local",
-                base_url="https://gw/v1", mcp_url="https://gw/mcp",
-                client_key=client_key, default_id=models[0]["id"],
-                keep_stale=keep_stale, config_path=path)
+                models, provider_id="bifrost",
+                base_url="https://bifrost.rd.localhost/openai", client_key=client_key,
+                mcp_url=mcp_url, mcp_key=mcp_key, mcp_name="bifrost",
+                default_id=models[0]["id"], keep_stale=keep_stale, config_path=path)
         finally:
             os.unlink(path)
 
     def test_provider_block_and_default(self):
         res = self._merge([manifest_entry(budget_enabled=True)], "{}")
         cfg = json.loads(res["config"])
-        self.assertEqual(cfg["model"], "local/agw-qwen-test#low")
-        models = cfg["provider"]["local"]["models"]
-        self.assertIn("agw-qwen-test", models)
-        self.assertEqual(models["agw-qwen-test"]["id"], "agw-qwen-test")
-        self.assertIn("variants", models["agw-qwen-test"])
-        self.assertEqual(cfg["provider"]["local"]["options"]["apiKey"], "k")
-        self.assertEqual(res["meta"]["model"], "local/agw-qwen-test#low")
+        # Config key has 'bifrost-' prefix; wire id has 'omlx/' prefix.
+        self.assertEqual(cfg["model"], "bifrost/bifrost-qwen-test#low")
+        models = cfg["provider"]["bifrost"]["models"]
+        self.assertIn("bifrost-qwen-test", models)
+        self.assertEqual(models["bifrost-qwen-test"]["id"], "omlx/qwen-test")
+        self.assertIn("variants", models["bifrost-qwen-test"])
+        self.assertEqual(cfg["provider"]["bifrost"]["options"]["apiKey"], "k")
+        self.assertEqual(cfg["provider"]["bifrost"]["name"], "Bifrost")
+        self.assertEqual(res["meta"]["model"], "bifrost/bifrost-qwen-test#low")
+
+    def test_configures_bifrost_mcp_when_key_present(self):
+        existing = json.dumps({})
+        res = self._merge(
+            [manifest_entry()], existing,
+            mcp_url="https://bifrost.rd.localhost/mcp", mcp_key="bifrost-key")
+        cfg = json.loads(res["config"])
+        self.assertIn("bifrost", cfg["mcp"])
+        self.assertEqual(cfg["mcp"]["bifrost"]["url"], "https://bifrost.rd.localhost/mcp")
+        self.assertEqual(cfg["mcp"]["bifrost"]["headers"]["Authorization"], "Bearer bifrost-key")
+
+    def test_skips_mcp_when_no_key(self):
+        existing = json.dumps({})
+        res = self._merge([manifest_entry()], existing)
+        cfg = json.loads(res["config"])
+        self.assertNotIn("mcp", cfg)
 
     def test_prunes_stale_and_keeps_other_mcp_servers(self):
         existing = json.dumps({
-            "provider": {"local": {"models": {"agw-gone": {}, "agw-qwen-test": {}}}},
+            "provider": {"bifrost": {"models": {"bifrost-gone": {}, "bifrost-qwen-test": {}}}},
             "mcp": {"other": {"type": "remote", "url": "http://x"}},
         })
         res = self._merge([manifest_entry()], existing)
         cfg = json.loads(res["config"])
-        self.assertEqual(res["meta"]["pruned"], ["agw-gone"])
-        self.assertNotIn("agw-gone", cfg["provider"]["local"]["models"])
+        self.assertEqual(res["meta"]["pruned"], ["bifrost-gone"])
+        self.assertNotIn("bifrost-gone", cfg["provider"]["bifrost"]["models"])
         self.assertIn("other", cfg["mcp"])
-        self.assertIn("agentgateway", cfg["mcp"])
 
     def test_keep_stale(self):
-        existing = json.dumps({"provider": {"local": {"models": {"agw-gone": {"name": "G"}}}}})
+        existing = json.dumps({"provider": {"bifrost": {"models": {"bifrost-gone": {"name": "G"}}}}})
         res = self._merge([manifest_entry()], existing, keep_stale=True)
         cfg = json.loads(res["config"])
-        self.assertIn("agw-gone", cfg["provider"]["local"]["models"])
+        self.assertIn("bifrost-gone", cfg["provider"]["bifrost"]["models"])
         self.assertEqual(res["meta"]["pruned"], [])
 
     def test_jsonc_comments_flagged(self):

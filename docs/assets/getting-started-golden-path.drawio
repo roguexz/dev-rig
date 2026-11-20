@@ -43,7 +43,7 @@
         <mxCell id="touchid" value="TouchID&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#666666;&quot;&gt;ldx touchid install&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#444444;fontSize=13;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="690" y="300" width="210" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="ag" value="AgentGateway&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#666666;&quot;&gt;ldx agentgateway install&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#444444;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="ag" value="Bifrost&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#666666;&quot;&gt;ldx bifrost install&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#444444;fontSize=13;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="1000" y="160" width="210" height="80" as="geometry" />
         </mxCell>
         <mxCell id="opencode" value="OpenCode&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#666666;&quot;&gt;ldx opencode setup&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#444444;fontSize=13;fontStyle=1;" vertex="1" parent="1">

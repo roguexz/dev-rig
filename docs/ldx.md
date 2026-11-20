@@ -20,7 +20,7 @@ You can also run individual command scripts directly from the repository, such a
 
 ### Kubernetes namespaces
 
-Infrastructure tools (`otel`, `redis`, `postgres`, `vault`, `authelia`, `agentgateway`) deploy into the `commons` namespace by
+Infrastructure tools (`otel`, `redis`, `postgres`, `vault`, `authelia`, `bifrost`) deploy into the `commons` namespace by
 default. You can deploy them into a custom namespace instead. (`tls` and `certmanager` keep their fixed namespaces -
 `kube-system` and `cert-manager` - because Rancher Desktop and upstream conventions require them.)
 
@@ -73,8 +73,8 @@ alphanumeric, at most 63 characters).
 | `ldx postgres`     | Dev Infrastructure      | PostgreSQL with `pgvector` extension                                  | [postgres.md](./reference/infrastructure/postgres.md)         |
 | `ldx vault`        | Security / Secrets      | Local HashiCorp Vault deployment                                      | [vault.md](./reference/security/vault.md)               |
 | `ldx authelia`     | Identity / SSO          | Authelia (OIDC provider with WebAuthn/Touch ID) for SSO               | [authelia.md](./reference/identity/authelia.md)             |
-| `ldx agentgateway` | AI / LLM Infrastructure | agentgateway (LLM/MCP/A2A gateway) with UI, Authelia SSO, oMLX sync   | [agentgateway.md](./reference/ai/agentgateway.md) |
-| `ldx opencode`     | AI / LLM Infrastructure | Configure the local opencode harness from agentgateway models         | [opencode.md](./reference/ai/opencode.md)               |
+| `ldx bifrost`      | AI / LLM Infrastructure | Bifrost (LLM + MCP gateway) with admin UI, oMLX provider sync          | [bifrost.md](./reference/ai/bifrost.md)               |
+| `ldx opencode`     | AI / LLM Infrastructure | Configure the local opencode harness from Bifrost                       | [opencode.md](./reference/ai/opencode.md)               |
 
 ---
 

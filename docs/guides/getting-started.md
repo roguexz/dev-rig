@@ -30,10 +30,10 @@ Secure your services and your local identity.
 
 ### Phase 4: AI & Agentic Workflows
 The final layer: bringing in the LLM infrastructure.
-1. **The Gateway**: Run `ldx agentgateway install`.
-2. **SSO Integration**: Link the gateway to your identity provider:
+1. **The Gateway**: Run `ldx bifrost install`.
+2. **oMLX Sync**: Configure the local oMLX provider:
    ```bash
-   ldx agentgateway sso
+   ldx bifrost sync-omlx
    ```
 3. **The Agent**: Configure your local harness with `ldx opencode setup`.
 
@@ -49,6 +49,6 @@ The final layer: bringing in the LLM infrastructure.
 | 4 | Postgres/Redis | `ldx postgres/redis install` | Data Persistence |
 | 5 | Authelia | `ldx authelia install` | Identity / SSO |
 | 6 | Identity Link | `ldx authelia enroll` $\rightarrow$ `vault sso` | User & Vault Registration |
-| 7 | AgentGateway | `ldx agentgateway install` | AI Orchestration |
-| 8 | Gateway SSO | `ldx agentgateway sso` | Link Gateway to SSO |
+| 7 | Bifrost | `ldx bifrost install` | AI Gateway (LLM + MCP) |
+| 8 | oMLX Sync | `ldx bifrost sync-omlx` | Configure LLM Provider |
 | 9 | OpenCode | `ldx opencode setup` | Agent Configuration |

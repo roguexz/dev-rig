@@ -124,7 +124,7 @@ This command cleanly removes all `cert-manager` components:
 
 In addition to creating the `ClusterIssuer`, `ldx certmanager install` creates a **ClusterTrustBundle**
 (named `mkcert-ca`) that distributes the mkcert root CA to pods. This allows services inside the cluster
-(Vault, Grafana, agentgateway) to verify TLS certificates signed by the mkcert CA (e.g., Authelia's cert).
+(Vault, Grafana, Bifrost) to verify TLS certificates signed by the mkcert CA (e.g., Authelia's cert).
 
 Deployment scripts reference the ClusterTrustBundle via **volume projection** in their pod specs:
 

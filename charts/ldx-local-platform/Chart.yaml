@@ -40,8 +40,8 @@ dependencies:
     version: 0.1.0
     repository: "file://../authelia"
     condition: autheliaStack.enabled
-  - name: agentgateway
-    alias: agentgatewayStack
+  - name: bifrost
+    alias: bifrostStack
     version: 0.1.0
-    repository: "file://../agentgateway"
-    condition: agentgatewayStack.enabled
+    repository: "file://../bifrost"
+    condition: bifrostStack.enabled

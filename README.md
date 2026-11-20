@@ -89,14 +89,14 @@ The scripts can also be run directly from the repository (`bin/commands/ldx-vaul
 | `ldx postgres <subcommand>`     | Deploys a PostgreSQL instance with pgvector extension.                                      | `bin/commands/ldx-postgres` |
 | `ldx vault <subcommand>`        | Manages a local HashiCorp Vault deployment for secrets management.                          | `bin/commands/ldx-vault` |
 | `ldx authelia <subcommand>`     | Deploys Authelia (OIDC provider with WebAuthn/Touch ID support) for SSO.                    | `bin/commands/ldx-authelia` |
-| `ldx agentgateway <subcommand>` | Deploys agentgateway (LLM/MCP/A2A gateway) with built-in UI, Authelia SSO and oMLX model sync. | `bin/commands/ldx-agentgateway` |
-| `ldx opencode <subcommand>`     | Configures the local opencode harness from agentgateway models.                             | `bin/commands/ldx-opencode` |
+| `ldx bifrost <subcommand>`      | Deploys Bifrost (LLM + MCP gateway) with admin UI, oMLX provider sync and virtual client key. | `bin/commands/ldx-bifrost` |
+| `ldx opencode <subcommand>`     | Configures the local opencode harness from Bifrost (LLM models and MCP endpoint).          | `bin/commands/ldx-opencode` |
 
 For detailed usage of each command, see the documentation below.
 
 ### Custom namespaces
 
-The infrastructure commands (`otel`, `redis`, `postgres`, `vault`, `agentgateway`) deploy into the `commons` namespace by
+The infrastructure commands (`otel`, `redis`, `postgres`, `vault`, `bifrost`) deploy into the `commons` namespace by
 default. Set `LDX_NAMESPACE` (or a tool-specific `LDX_<TOOL>_NAMESPACE`) in the environment or in
 `~/.config/ldx/config` to deploy elsewhere; installs record the namespace they used so later commands find it again.
 See [Configuration](./docs/ldx.md#configuration).
@@ -113,7 +113,7 @@ See [Configuration](./docs/ldx.md#configuration).
 - **Infrastructure**: [tls](./docs/reference/infrastructure/tls.md), [cert-manager](./docs/reference/infrastructure/cert-manager.md), [redis](./docs/reference/infrastructure/redis.md), [postgres](./docs/reference/infrastructure/postgres.md)
 - **Observability**: [otel](./docs/reference/observability/otel.md)
 - **Identity**: [authelia](./docs/reference/identity/authelia.md)
-- **AI**: [agentgateway](./docs/reference/ai/agentgateway.md), [opencode](./docs/reference/ai/opencode.md), [skill](./docs/reference/ai/skill.md)
+- **AI**: [bifrost](./docs/reference/ai/bifrost.md), [opencode](./docs/reference/ai/opencode.md), [skill](./docs/reference/ai/skill.md)
 
 All scripts are designed to be idempotent, meaning you can run them multiple times without causing errors. Each
 capability also includes an `uninstall` command to cleanly remove all resources.

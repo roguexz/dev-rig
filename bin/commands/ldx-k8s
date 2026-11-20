@@ -86,13 +86,13 @@ show_help() {
 }
 
 services_supported() {
-    echo "redis, postgres, otel, vault, authelia, agentgateway, certmanager"
+    echo "redis, postgres, otel, vault, authelia, bifrost, certmanager"
 }
 
 # Services owned by the main 'ldx' umbrella release (certmanager is a
 # separate release: it spans namespaces and cluster-scoped resources).
 main_services_supported() {
-    echo "redis, postgres, otel, vault, authelia, agentgateway"
+    echo "redis, postgres, otel, vault, authelia, bifrost"
 }
 
 # Release-scoped service: the cert-manager chart lives in its own release
@@ -116,7 +116,7 @@ service_key() {
         otel)     echo "otelStack" ;;
         vault)    echo "vaultStack" ;;
         authelia) echo "autheliaStack" ;;
-        agentgateway) echo "agentgatewayStack" ;;
+        bifrost)  echo "bifrostStack" ;;
         *)        return 1 ;;
     esac
 }
@@ -140,13 +140,18 @@ legacy_release() {
 # the release namespace. Missing resources are skipped silently.
 adopt_resources() {
     local rel="$1" relns="$2"; shift 2
-    local ref kind name ns
+    local ref kind name ns existing
     for ref in "$@"; do
         ns="$relns"
         [[ "$ref" == *"@"* ]] && { ns="${ref##*@}"; ref="${ref%@*}"; }
         kind="${ref%%/*}"; name="${ref#*/}"
         if kubectl get "$kind" "$name" -n "$ns" &>/dev/null 2>&1 \
            || kubectl get "$kind" "$name" &>/dev/null 2>&1; then
+            # Check if the resource already has the release-name annotation.
+            existing=$(kubectl get "$kind" "$name" -n "$ns" \
+                -o 'jsonpath={.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null) \
+                || existing=$(kubectl get "$kind" "$name" \
+                    -o 'jsonpath={.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null) || existing=""
             kubectl annotate "$ref" -n "$ns" \
                 meta.helm.sh/release-name="$rel" \
                 meta.helm.sh/release-namespace="$relns" --overwrite >/dev/null 2>&1 \
@@ -155,7 +160,7 @@ adopt_resources() {
                     meta.helm.sh/release-namespace="$relns" --overwrite >/dev/null
             kubectl label "$ref" -n "$ns" app.kubernetes.io/managed-by=Helm --overwrite >/dev/null 2>&1 \
                 || kubectl label "$ref" app.kubernetes.io/managed-by=Helm --overwrite >/dev/null
-            log_info "Adopted ${ref} (ns ${ns}) into release '${rel}'."
+            [ -z "$existing" ] && log_info "Adopted ${ref} (ns ${ns}) into release '${rel}'." || true
         fi
     done
 }
@@ -407,6 +412,15 @@ prehook_authelia() {
         --set autheliaStack.enabled=true 2>/dev/null \
         | kubectl apply --server-side --force-conflicts -f - >/dev/null \
         || log_warn "Authelia pre-apply failed; the helm apply will retry."
+
+    # The pre-apply creates resources without Helm ownership metadata, which
+    # would cause the helm upgrade to fail. Re-adopt them so the upgrade
+    # recognizes them as part of the release.
+    adopt_resources "$RELEASE" "$NAMESPACE" \
+        "deployment/authelia@${ans}" "service/authelia@${ans}" "ingress/authelia@${ans}" \
+        "configmap/authelia-config@${ans}" "configmap/authelia-users@${ans}" \
+        "secret/authelia-secrets@${ans}" "pvc/authelia-data@${ans}" \
+        "certificate/authelia-cert@${ans}"
 }
 
 # Post-apply: the cert-manager Certificate must be Ready (the pod mounts its
@@ -516,7 +530,7 @@ parse_common_options() {
             *)
                 # Bare words are service names: 'up redis postgres'.
                 case "$1" in
-                    redis|postgres|otel|vault|authelia|agentgateway|certmanager)
+                    redis|postgres|otel|vault|authelia|bifrost|certmanager)
                         SERVICES_CSV="${SERVICES_CSV:+${SERVICES_CSV},}$1"
                         shift
                         ;;
@@ -540,7 +554,7 @@ parse_services() {
         service="${service//[[:space:]]/}"
         [ -n "$service" ] || continue
         case "$service" in
-            redis|postgres|otel|vault|authelia|agentgateway|certmanager) ;;
+            redis|postgres|otel|vault|authelia|bifrost|certmanager) ;;
             *) fatal "Unknown service: ${service} (supported: $(services_supported))" ;;
         esac
         local seen
@@ -583,34 +597,32 @@ NAMESPACE=""
 TMP_FILES=()
 trap '[ "${#TMP_FILES[@]}" -gt 0 ] && rm -f "${TMP_FILES[@]}" || true' EXIT
 
-# Pre-apply: agentgateway's chart carries the static deployment; the dynamic
-# parts (config with merged models/SSO, Vault Agent per-tool templates, the
-# runtime Secret, extra CAs) are CLI-owned and (re)created idempotently by
-# 'ldx agentgateway prepare-support'. Legacy installs were kubectl-applied:
-# adopt the static resources first.
-prehook_agentgateway() {
-    "${LDX_HOME}/bin/ldx" agentgateway prepare-support \
-        || fatal "Failed to prepare agentgateway support resources."
+# Pre-apply: bifrost's chart carries the static deployment; the dynamic
+# parts (config with merged providers, the runtime Secret, extra CAs) are
+# CLI-owned and (re)created idempotently by 'ldx bifrost prepare-support'.
+prehook_bifrost() {
+    "${LDX_HOME}/bin/ldx" bifrost prepare-support \
+        || fatal "Failed to prepare bifrost support resources."
 
     adopt_resources "$RELEASE" "$NAMESPACE" \
-        "deployment/agentgateway" "service/agentgateway" "ingress/agentgateway" \
-        "pvc/agentgateway-data" "serviceaccount/agentgateway"
+        "deployment/bifrost" "service/bifrost" "ingress/bifrost" \
+        "pvc/bifrost-data" "serviceaccount/bifrost"
 
     local values_file
-    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-agentgateway.XXXXXX.yaml")"
+    values_file="$(mktemp "${TMPDIR:-/tmp}/ldx-k8s-bifrost.XXXXXX.yaml")"
     TMP_FILES+=("$values_file")
-    if ! "${LDX_HOME}/bin/ldx" agentgateway prepare-values > "$values_file"; then
-        fatal "Failed to render agentgateway values ('ldx agentgateway prepare-values')."
+    if ! "${LDX_HOME}/bin/ldx" bifrost prepare-values > "$values_file"; then
+        fatal "Failed to render bifrost values ('ldx bifrost prepare-values')."
     fi
     chmod 600 "$values_file"
     APPLY_VALUES+=(--values "$values_file")
-    record_service_values agentgateway "$values_file"
+    record_service_values bifrost "$values_file"
 }
 
-# Post-apply: the gateway (plus Vault Agent sidecar) must become Available.
-posthook_agentgateway() {
-    kubectl rollout status deployment/agentgateway -n "$NAMESPACE" --timeout=120s \
-        || log_warn "agentgateway rollout did not finish in time; check 'kubectl rollout status deployment/agentgateway -n $NAMESPACE'."
+# Post-apply: the gateway must become Available.
+posthook_bifrost() {
+    kubectl rollout status deployment/bifrost -n "$NAMESPACE" --timeout=120s \
+        || log_warn "bifrost rollout did not finish in time; check 'kubectl rollout status deployment/bifrost -n $NAMESPACE'."
 }
 
 # Persist a service's generated values next to the state file so every later
@@ -630,10 +642,10 @@ service_prehooks() {
     local s
     for s in "$@"; do
         case "$s" in
-            otel)         prehook_otel ;;
-            vault)        prehook_vault ;;
-            authelia)     prehook_authelia ;;
-            agentgateway) prehook_agentgateway ;;
+            otel)    prehook_otel ;;
+            vault)   prehook_vault ;;
+            authelia) prehook_authelia ;;
+            bifrost)  prehook_bifrost ;;
         esac
     done
 }
@@ -735,6 +747,14 @@ k8s_up() {
 
     record_values_files "$NAMESPACE"
 
+    # Prehooks only run for the services being requested (not the full
+    # desired set), so already-installed services are not re-prepared.
+    local -a requested_main=()
+    local svc
+    for svc in "${requested[@]+"${requested[@]}"}"; do
+        [ "$(service_scope "$svc")" = "main" ] && requested_main+=("$svc")
+    done
+
     if [ "${#main_desired[@]}" -gt 0 ]; then
         log_info "Namespace: ${NAMESPACE}"
         kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
@@ -743,7 +763,7 @@ k8s_up() {
             [ "$service" = "postgres" ] && ensure_postgres_image
             adopt_legacy "$service" "$NAMESPACE"
         done
-        service_prehooks "${main_desired[@]}"
+        service_prehooks "${requested_main[@]+"${requested_main[@]}"}"
 
         log_info "Applying ${RELEASE} (${main_desired[*]}) ..."
         apply_release "${main_desired[@]}"
@@ -754,11 +774,11 @@ k8s_up() {
         apply_certmanager
     fi
 
-    for service in "${main_desired[@]}"; do
+    for service in "${requested_main[@]+"${requested_main[@]}"}"; do
         case "$service" in
-            vault)        posthook_vault ;;
-            authelia)     posthook_authelia ;;
-            agentgateway) posthook_agentgateway ;;
+            vault)    posthook_vault ;;
+            authelia) posthook_authelia ;;
+            bifrost)  posthook_bifrost ;;
         esac
     done
 
@@ -772,7 +792,7 @@ k8s_up() {
             otel)        log_info "Grafana/LGTM  -> https://otel.rd.localhost (OTLP: localhost:4317/4318)" ;;
             vault)       log_info "Vault         -> https://vault.rd.localhost (UI + API)" ;;
             authelia)    log_info "Authelia      -> https://auth.rd.localhost (OIDC + WebAuthn)" ;;
-            agentgateway) log_info "agentgateway  -> https://agentgateway.rd.localhost (UI /ui, LLM /v1, MCP /mcp)" ;;
+            bifrost)     log_info "bifrost       -> https://bifrost.rd.localhost (UI, LLM /openai, MCP /mcp)" ;;
             certmanager) log_info "cert-manager  -> release '${CM_RELEASE}' in namespace '${CM_NAMESPACE}', ClusterIssuer 'mkcert-issuer'" ;;
         esac
     done
@@ -814,7 +834,7 @@ k8s_down() {
     teardown_certmanager() {
         if helm status "$CM_RELEASE" -n "$CM_NAMESPACE" &>/dev/null; then
             log_info "Removing the '${CM_RELEASE}' release and the '${CM_NAMESPACE}' namespace..."
-            helm uninstall "$CM_RELEASE" -n "$CM_NAMESPACE"
+            helm uninstall "$CM_RELEASE" -n "$CM_NAMESPACE" || true
             # Hook-managed resources are not part of the release: remove
             # them explicitly (mirrors the pre-chart uninstaller).
             kubectl delete clusterissuer mkcert-issuer --ignore-not-found
@@ -825,17 +845,20 @@ k8s_down() {
     }
 
     if [ "${#requested[@]}" -eq 0 ] || [ "${#remaining[@]}" -eq 0 ]; then
+        # Clear the state file first so that even if the teardown fails,
+        # the next 'up' starts from a clean slate.
+        state_set "$NAMESPACE"
+        rm -f "${VALUES_DIR}/${NAMESPACE}-"*.values
+
         if [ "$release_exists" = true ]; then
             log_info "Removing the '${RELEASE}' release from '${NAMESPACE}'..."
-            helm uninstall "$RELEASE" -n "$NAMESPACE"
+            helm uninstall "$RELEASE" -n "$NAMESPACE" || true
             if [ "$PURGE_DATA" = true ]; then
                 log_info "Removing persistent volumes..."
-                kubectl delete pvc -n "$NAMESPACE" --all --ignore-not-found
+                kubectl delete pvc -n "$NAMESPACE" --all --ignore-not-found || true
             fi
         fi
         teardown_certmanager
-        state_set "$NAMESPACE"
-        rm -f "${VALUES_DIR}/${NAMESPACE}-"*.values
         log_info "Platform removed. The '${NAMESPACE}' namespace was not deleted."
         return 0
     fi
@@ -857,9 +880,20 @@ k8s_down() {
     done
 
     if [ "${#remaining_main[@]}" -gt 0 ]; then
-        # Kept services (authelia, vault) supply dynamic values through
-        # prehooks; without them the chart renders with empty defaults.
-        service_prehooks "${remaining_main[@]}"
+        # Services with dynamic values (authelia, vault, bifrost) need
+        # their prehooks re-run so the chart renders with up-to-date values.
+        # Simple services (redis, postgres, otel) don't need prehooks.
+        local -a dynamic_remaining=()
+        local svc
+        for svc in "${remaining_main[@]}"; do
+            case "$svc" in
+                authelia|vault|bifrost) dynamic_remaining+=("$svc") ;;
+            esac
+        done
+        if [ "${#dynamic_remaining[@]}" -gt 0 ]; then
+            log_info "Re-applying config for: ${dynamic_remaining[*]}"
+            service_prehooks "${dynamic_remaining[@]}"
+        fi
         apply_release "${remaining_main[@]}"
     elif [ "$release_exists" = true ]; then
         helm uninstall "$RELEASE" -n "$NAMESPACE"
@@ -882,8 +916,8 @@ k8s_down() {
                 authelia)
                     kubectl delete pvc -n "$(ldx_namespace authelia)" authelia-data --ignore-not-found
                     ;;
-                agentgateway)
-                    kubectl delete pvc -n "$NAMESPACE" agentgateway-data --ignore-not-found
+                bifrost)
+                    kubectl delete pvc -n "$NAMESPACE" bifrost-data --ignore-not-found
                     ;;
             esac
         done

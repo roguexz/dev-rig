@@ -13,7 +13,7 @@ Security failures often happen because of what we forget. A package that was saf
 The most common security failure is the plain-text `.env` file. If a project directory is accidentally exposed, every single secret is compromised.
 - **Setup**: Run `ldx vault install`.
 - **The Guardrail**: Moving secrets into Vault is about hygiene. It separates the *configuration* (which can be shared) from the *secrets* (which are gated). This ensures that a leak of the codebase does not automatically lead to a leak of the credentials.
-- **Example Pattern**: We store sensitive credentials-such as MCP server and LLM gateway keys-in Vault, while the local harness uses a throwaway credential for gateway access. This pattern of isolating high-value secrets from daily-use tokens should be replicated across other services wherever possible.
+- **Example Pattern**: We store sensitive credentials-such as LLM provider keys-in Vault or the host secret store, while the local harness uses a throwaway credential for gateway access. MCP server credentials are managed by [Bifrost](../reference/ai/bifrost.md), which handles OAuth brokering and stores tokens encrypted in its own database. This pattern of isolating high-value secrets from daily-use tokens should be replicated across other services wherever possible.
 
 ### 3. Intentionality: The Human Circuit Breaker (`touchid`)
 Automated agents and muscle memory can lead to "blind pushes"-sending code to a remote without a final, conscious review.

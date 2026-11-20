@@ -32,14 +32,15 @@ AUTHELIA_CORE_SECRETS_NS="authelia/core_secrets"
 # --- Commands ------------------------------------------------------------------
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|status|enroll>"
+    echo "Usage: $(basename "$0") <install|uninstall|status|enroll|client-secret>"
     echo ""
     echo "Commands:"
-    echo "  install    Deploy Authelia via the ldx platform chart (the admin password is"
-    echo "             prompted once; everything lives in the host secret store)."
-    echo "  uninstall  Remove Authelia and its resources."
-    echo "  status     Show Authelia deployment status."
-    echo "  enroll     Guide one-time Touch ID / WebAuthn enrollment."
+    echo "  install        Deploy Authelia via the ldx platform chart (the admin password is"
+    echo "                 prompted once; everything lives in the host secret store)."
+    echo "  uninstall      Remove Authelia and its resources."
+    echo "  status         Show Authelia deployment status."
+    echo "  enroll         Guide one-time Touch ID / WebAuthn enrollment."
+    echo "  client-secret  Print an OIDC client secret (vault, grafana)."
 }
 
 # --- Helpers -------------------------------------------------------------------
@@ -81,29 +82,36 @@ generate_jwks_key() {
     fi
 }
 
-# Ensure client secrets exist (generated once, cached)
+# Ensure client secrets exist (generated once, cached). Generates any
+# missing secrets individually so new clients can be added without
+# rotating existing ones.
 ensure_client_secrets() {
     mkdir -p "$AUTHELIA_DIR"
 
-    if ldx_secret_has "$AUTHELIA_SECRETS_NS" VAULT_CLIENT_SECRET; then
-        log_info "Reusing existing OIDC client secrets (ldx/${AUTHELIA_SECRETS_NS}/*)"
-        return
-    fi
+    # Migration path: import from the legacy file if it exists.
     if [ -f "$AUTHELIA_SECRETS_FILE" ]; then
-        ldx_secret_get_kv "$AUTHELIA_SECRETS_NS" "$AUTHELIA_SECRETS_FILE" VAULT_CLIENT_SECRET >/dev/null
-        log_info "Reusing existing OIDC client secrets (migrated from ${AUTHELIA_SECRETS_FILE})"
-        return
+        local key
+        while IFS='=' read -r key value; do
+            [ -n "$key" ] && ldx_secret_get_kv "$AUTHELIA_SECRETS_NS" "$AUTHELIA_SECRETS_FILE" "$key" >/dev/null 2>&1
+        done < "$AUTHELIA_SECRETS_FILE"
     fi
 
-    log_info "Generating OIDC client secrets..."
-    local vault_secret=$(generate_secret 32)
-    local agentgateway_secret=$(generate_secret 32)
-    local grafana_secret=$(generate_secret 32)
+    local generated=false
+    local pair
+    for pair in "VAULT_CLIENT_SECRET:vault" "GRAFANA_CLIENT_SECRET:grafana"; do
+        local name="${pair%%:*}"
+        if ! ldx_secret_has "$AUTHELIA_SECRETS_NS" "$name"; then
+            log_info "Generating missing OIDC client secret ${name}..."
+            ldx_secret_put "$AUTHELIA_SECRETS_NS" "$name" "$(generate_secret 32)"
+            generated=true
+        fi
+    done
 
-    ldx_secret_put "$AUTHELIA_SECRETS_NS" VAULT_CLIENT_SECRET "$vault_secret"
-    ldx_secret_put "$AUTHELIA_SECRETS_NS" AGENTGATEWAY_CLIENT_SECRET "$agentgateway_secret"
-    ldx_secret_put "$AUTHELIA_SECRETS_NS" GRAFANA_CLIENT_SECRET "$grafana_secret"
-    log_info "OIDC client secrets stored in $(ldx_secret_backend) storage (ldx/${AUTHELIA_SECRETS_NS}/*)"
+    if [ "$generated" = true ]; then
+        log_info "OIDC client secrets stored in $(ldx_secret_backend) storage (ldx/${AUTHELIA_SECRETS_NS}/*)"
+    else
+        log_info "Reusing existing OIDC client secrets (ldx/${AUTHELIA_SECRETS_NS}/*)"
+    fi
 }
 
 # Read a client secret from the secret store
@@ -202,8 +210,8 @@ prepare_values() {
 
     # PBKDF2 hashes of the OIDC client secrets, cached next to the secrets.
     local name key secret hash
-    local hash_vault="" hash_agw="" hash_grafana=""
-    for pair in "VAULT_CLIENT_SECRET:vault" "AGENTGATEWAY_CLIENT_SECRET:agentgateway" "GRAFANA_CLIENT_SECRET:grafana"; do
+    local hash_vault="" hash_grafana=""
+    for pair in "VAULT_CLIENT_SECRET:vault" "GRAFANA_CLIENT_SECRET:grafana"; do
         name="${pair%%:*}"; key="${pair##*:}"
         secret=$(get_client_secret "$name")
         hash=$(ldx_secret_get "$AUTHELIA_SECRETS_NS" "${name}_HASH" 2>/dev/null) || true
@@ -214,7 +222,6 @@ prepare_values() {
         fi
         case "$key" in
             vault) hash_vault="$hash" ;;
-            agentgateway) hash_agw="$hash" ;;
             grafana) hash_grafana="$hash" ;;
         esac
     done
@@ -247,8 +254,6 @@ $(printf '%s\n' "$jwks_key" | sed 's/^/      /')
     clients:
       vault:
         secretHash: $(yaml_squote "${hash_vault}")
-      agentgateway:
-        secretHash: $(yaml_squote "${hash_agw}")
       grafana:
         secretHash: $(yaml_squote "${hash_grafana}")
   serviceAnnotations:
@@ -322,7 +327,7 @@ install_authelia() {
     log_info "Next steps:"
     log_info "  1. Enroll Touch ID: run '$(basename "$0") enroll'"
     log_info "  2. Wire up Vault: run 'ldx vault sso'"
-    log_info "  3. Wire up agentgateway: run 'ldx agentgateway sso'"
+    log_info "  3. Wire up Bifrost: run 'ldx bifrost install' (uses its own username/password auth)"
     log_info "  4. Wire up Grafana: run 'ldx otel install' (re-run to add OIDC)"
 }
 
@@ -347,8 +352,8 @@ uninstall_authelia() {
         if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
             rm -rf "$AUTHELIA_DIR"
             local key
-            for key in VAULT_CLIENT_SECRET AGENTGATEWAY_CLIENT_SECRET GRAFANA_CLIENT_SECRET \
-                       VAULT_CLIENT_SECRET_HASH AGENTGATEWAY_CLIENT_SECRET_HASH GRAFANA_CLIENT_SECRET_HASH; do
+            for key in VAULT_CLIENT_SECRET GRAFANA_CLIENT_SECRET \
+                       VAULT_CLIENT_SECRET_HASH GRAFANA_CLIENT_SECRET_HASH; do
                 ldx_secret_delete "$AUTHELIA_SECRETS_NS" "$key"
             done
             for key in JWT_SECRET STORAGE_KEY SESSION_SECRET OIDC_HMAC_SECRET "$BOOTSTRAP_HASH_KEY"; do
@@ -545,12 +550,12 @@ enroll_authelia() {
     echo "============================================================"
     echo ""
     echo "Touch ID is now your primary login method for Authelia"
-    echo "and all connected apps (Vault, agentgateway, Grafana)."
+    echo "and all connected apps (Vault, Grafana)."
     echo ""
     echo "You can now wire up your apps:"
     echo "  ldx vault sso"
-    echo "  ldx agentgateway sso"
     echo "  ldx otel install"
+    echo "  (Bifrost uses its own username/password auth: 'ldx bifrost admin-password')"
     echo ""
 }
 
@@ -579,6 +584,19 @@ main() {
             ;;
         enroll)
             enroll_authelia "$@"
+            ;;
+        client-secret)
+            local client="${1:-}"
+            if [ -z "$client" ]; then
+                fatal "Usage: ldx authelia client-secret <vault|grafana>"
+            fi
+            local secret_name
+            case "$client" in
+                vault) secret_name="VAULT_CLIENT_SECRET" ;;
+                grafana) secret_name="GRAFANA_CLIENT_SECRET" ;;
+                *) fatal "Unknown client: $client (supported: vault, grafana)" ;;
+            esac
+            get_client_secret "$secret_name"
             ;;
         help|-h|--help)
             show_help

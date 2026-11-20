@@ -7,6 +7,11 @@ VAULT_CHART_VERSION="0.34.1"
 
 source "${LDX_HOME}/bin/lib/common.sh"
 
+# Vault API URL (through Traefik ingress) and root token (set by
+# require_unsealed_vault). Defined here so all subcommands can access them.
+VAULT_API_URL="https://vault.rd.localhost"
+VAULT_ROOT_TOKEN=""
+
 # Vault operator init JSON (unseal keys + root token) lives in the host
 # secret store as ldx/vault/init_json. Legacy installs kept it in
 # ${VAULT_DIR}/keys.json; the whole file is imported on first read (blob,

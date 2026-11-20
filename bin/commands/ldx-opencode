@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ldx-help: infra Configure the local opencode harness from agentgateway models
+# ldx-help: infra Configure the local opencode harness from Bifrost models
 
 set -euo pipefail
 
@@ -9,13 +9,15 @@ SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
 export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
-# Hostname (Traefik Ingress) the agentgateway LLM endpoint is served on.
-# Keep in sync with bin/ldx-agentgateway.
-AGENTGATEWAY_HOST="agentgateway.rd.localhost"
-# ConfigMap holding the synced oMLX model list (fragment of the gateway config).
-AGENTGATEWAY_MODELS_CM="agentgateway-llm-models"
-# Provider id written into the opencode config.
-PROVIDER_ID="local"
+# Hostname (Traefik Ingress) the Bifrost LLM endpoint is served on.
+# Keep in sync with bin/ldx-bifrost.
+BIFROST_HOST="bifrost.rd.localhost"
+# ConfigMap holding the synced oMLX provider config (fragment of the gateway config).
+BIFROST_PROVIDERS_CM="bifrost-providers"
+# Provider id written into the opencode config for the Bifrost gateway.
+# Models are prefixed with 'bifrost-' so they're distinguishable from direct
+# omlx models ('omlx/<model-id>') in the model list.
+PROVIDER_ID="bifrost"
 
 # oMLX local files.
 OMLX_DIR="${HOME}/.omlx"
@@ -25,8 +27,8 @@ OMLX_MODEL_SETTINGS="${OMLX_DIR}/model_settings.json"
 # Target harness config.
 OPENCODE_CONFIG="${HOME}/.config/opencode/opencode.jsonc"
 
-# Virtual client key cached by 'ldx agentgateway api-key'.
-AGENTGATEWAY_KEY_CACHE="${CACHE_DIR}/agentgateway/api_key"
+# Virtual client key cached by 'ldx bifrost api-key'.
+BIFROST_KEY_CACHE="${CACHE_DIR}/bifrost/api_key"
 
 # Helper-model filtering lives in ldx.harness.opencode (single source:
 # build_manifest applies it).
@@ -35,9 +37,8 @@ show_help() {
     echo "Usage: $(basename "$0") <sync>"
     echo ""
     echo "Commands:"
-    echo "  sync        Sync agentgateway model routes + omlx settings + MCP"
-    echo "              endpoint into the local opencode config"
-    echo "              (~/.config/opencode/opencode.jsonc)."
+    echo "  sync        Sync Bifrost provider config + omlx settings into the"
+    echo "              local opencode config (~/.config/opencode/opencode.jsonc)."
     echo ""
     echo "Options for sync:"
     echo "  --dry-run             Show the merged config without writing it."
@@ -47,12 +48,12 @@ show_help() {
     echo "                        instead of pruning them."
     echo ""
     echo "Notes:"
-    echo "  - The gateway list comes from the ConfigMap written by"
-    echo "    'ldx agentgateway sync-omlx'; run that first (or re-run it to refresh)."
+    echo "  - The gateway config comes from the ConfigMap written by"
+    echo "    'ldx bifrost sync-omlx'; run that first (or re-run it to refresh)."
     echo "  - The gateway injects the omlx API key upstream, so the opencode"
-    echo "    config uses a virtual client key for both LLM and MCP routes."
-    echo "  - The MCP endpoint (https://${AGENTGATEWAY_HOST}/mcp) is configured"
-    echo "    with the same virtual key; add tools with 'ldx agentgateway mcp add'."
+    echo "    config uses a virtual client key for LLM routes."
+    echo "  - Bifrost models are 'bifrost/bifrost-<model-id>' (distinguishable"
+    echo "    from direct omlx models 'omlx/<model-id>')."
     echo "  - JSONC comments in the existing config are not preserved; a backup is"
     echo "    written to opencode.jsonc.bak before overwriting."
 }
@@ -62,16 +63,60 @@ show_help() {
 # ---------------------------------------------------------------------------
 
 # Reads the synced oMLX model route names from the gateway's ConfigMap,
-# one per line, helpers excluded. Strips the 'agw-' prefix (gateway-facing
-# names carry it to avoid collisions; omlx ids don't).
+# one per line, helpers excluded. Bifrost serves models as 'omlx/<model-id>'
+# (provider/model format), so we just return the raw model ids from omlx.
 get_gateway_models() {
-    local fragment
-    fragment=$(kubectl get configmap "$AGENTGATEWAY_MODELS_CM" -n "$(ldx_namespace agentgateway)" \
-        -o jsonpath='{.data.models\.yaml}' 2>/dev/null) || true
-    if [ -z "$fragment" ]; then
-        return 1
+    local namespace providers_fragment
+    namespace=$(ldx_namespace bifrost)
+    providers_fragment=$(kubectl get configmap "$BIFROST_PROVIDERS_CM" -n "$namespace" \
+        -o jsonpath='{.data.providers\.json}' 2>/dev/null) || true
+    if [ -z "$providers_fragment" ]; then
+        # No providers synced yet; fall back to querying omlx directly.
+        local settings_file="${HOME}/.omlx/settings.json"
+        if [ ! -f "$settings_file" ]; then
+            return 1
+        fi
+        local omlx_port omlx_api_key omlx_skip_verify
+        omlx_port=$(jq -r '.server.port // 5033' "$settings_file")
+        omlx_api_key=$(jq -r '.auth.api_key // ""' "$settings_file")
+        omlx_skip_verify=$(jq -r '.auth.skip_api_key_verification // false' "$settings_file")
+        local omlx_base="http://localhost:${omlx_port}"
+        local models_raw
+        if [ "$omlx_skip_verify" = "true" ]; then
+            models_raw=$(curl -sS "${omlx_base}/v1/models" 2>/dev/null) || return 1
+        else
+            models_raw=$(curl -sS -H "Authorization: Bearer ${omlx_api_key}" "${omlx_base}/v1/models" 2>/dev/null) || return 1
+        fi
+        if [ -z "$models_raw" ]; then
+            return 1
+        fi
+        echo "$models_raw" | jq -r '.data[].id' | grep -v 'MarkItDown\|nomicai-modernbert'
+        return 0
     fi
-    printf '%s\n' "$fragment" | sed -n 's/^[[:space:]]*- name:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' | sed 's/^agw-//'
+    # Providers are synced; check if omlx is configured. If so, query omlx
+    # directly for the current model list (the ConfigMap just confirms the
+    # provider is configured, it doesn't list individual models).
+    if printf '%s' "$providers_fragment" | jq -e '.omlx' >/dev/null 2>&1; then
+        local settings_file="${HOME}/.omlx/settings.json"
+        if [ ! -f "$settings_file" ]; then
+            return 1
+        fi
+        local omlx_port omlx_api_key omlx_skip_verify
+        omlx_port=$(jq -r '.server.port // 5033' "$settings_file")
+        omlx_api_key=$(jq -r '.auth.api_key // ""' "$settings_file")
+        omlx_skip_verify=$(jq -r '.auth.skip_api_key_verification // false' "$settings_file")
+        local omlx_base="http://localhost:${omlx_port}"
+        local models_raw
+        if [ "$omlx_skip_verify" = "true" ]; then
+            models_raw=$(curl -sS "${omlx_base}/v1/models" 2>/dev/null) || return 1
+        else
+            models_raw=$(curl -sS -H "Authorization: Bearer ${omlx_api_key}" "${omlx_base}/v1/models" 2>/dev/null) || return 1
+        fi
+        if [ -z "$models_raw" ]; then
+            return 1
+        fi
+        echo "$models_raw" | jq -r '.data[].id' | grep -v 'MarkItDown\|nomicai-modernbert'
+    fi
 }
 
 # Reads the current default model id (without provider prefix or #variant)
@@ -136,7 +181,7 @@ select_default_model() {
     fi
     # stdout is captured by the caller's $(...); the menu must go to stderr
     # or the user is prompted to pick a number without ever seeing the list.
-    echo "Models served by agentgateway:" >&2
+    echo "Models available through Bifrost:" >&2
     local i=0
     while IFS= read -r line; do
         i=$((i + 1))
@@ -175,8 +220,7 @@ merge_config() {
     CLIENT_KEY="$client_key" \
     OPENCODE_CONFIG="$OPENCODE_CONFIG" \
     PROVIDER_ID="$PROVIDER_ID" \
-    GATEWAY_BASE_URL="https://${AGENTGATEWAY_HOST}/v1" \
-    MCP_URL="https://${AGENTGATEWAY_HOST}/mcp" \
+    GATEWAY_BASE_URL="https://${BIFROST_HOST}/openai" \
     PYTHONPATH="${LDX_HOME}/bin/lib" python3 -m ldx.harness.opencode merge
 }
 
@@ -203,9 +247,9 @@ sync_opencode() {
     [ -f "$OMLX_MODEL_SETTINGS" ] || fatal "omlx model settings not found at: $OMLX_MODEL_SETTINGS"
     [ -f "$OMLX_SETTINGS" ] || fatal "omlx settings not found at: $OMLX_SETTINGS"
 
-    log_info "Reading model routes from ConfigMap ${AGENTGATEWAY_MODELS_CM}..."
+    log_info "Reading model routes from Bifrost..."
     local gateway_models
-    gateway_models=$(get_gateway_models) || fatal "Could not read ${AGENTGATEWAY_MODELS_CM} from the cluster. Run 'ldx agentgateway sync-omlx' first (is agentgateway installed?)."
+    gateway_models=$(get_gateway_models) || fatal "Could not read models from Bifrost. Run 'ldx bifrost sync-omlx' first (is bifrost installed?)."
     local gw_count
     gw_count=$(printf '%s\n' "$gateway_models" | grep -c . || true)
     log_info "Gateway serves ${gw_count} models."
@@ -240,9 +284,9 @@ sync_opencode() {
 
     local client_key=""
     client_key=$(
-        ldx_secret_get_blob agentgateway "$AGENTGATEWAY_KEY_CACHE" api_key 2>/dev/null
+        ldx_secret_get_blob bifrost "$BIFROST_KEY_CACHE" api_key 2>/dev/null
     ) || true
-    [ -n "$client_key" ] || fatal "No cached gateway API key (ldx/agentgateway/api_key). The gateway enforces API keys; run 'ldx agentgateway api-key' (or 'ldx agentgateway sync-omlx') first."
+    [ -n "$client_key" ] || fatal "No cached gateway API key (ldx/bifrost/api_key). The gateway enforces API keys; run 'ldx bifrost api-key' (or 'ldx bifrost sync-omlx') first."
 
     local result pruned had_comments model_ref
     result=$(merge_config "$manifest" "$default_id" "$keep_stale" "$client_key") || fatal "Failed to merge opencode config."
@@ -271,7 +315,8 @@ sync_opencode() {
 
     log_info "Wrote provider '${PROVIDER_ID}' with ${count} models to ${OPENCODE_CONFIG}."
     log_info "Default model: ${model_ref}"
-    log_info "Configured MCP endpoint: https://${AGENTGATEWAY_HOST}/mcp"
+    log_info "Models are referenced as '${PROVIDER_ID}/bifrost-<model-id>' (distinguishable from direct omlx)."
+    log_info "MCP is available at https://${BIFROST_HOST}/mcp (configure tools via the Bifrost UI)."
     [ -n "$pruned" ] && log_warn "Pruned stale models (no longer served by the gateway): ${pruned}"
     log_info "Done. Verify with: opencode models | grep ${PROVIDER_ID}/"
 }

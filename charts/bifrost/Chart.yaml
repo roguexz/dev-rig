@@ -1,0 +1,6 @@
+apiVersion: v2
+name: bifrost
+description: Bifrost AI gateway (LLM + MCP) wrapped for ldx local platform
+type: application
+version: 0.1.0
+appVersion: "2.6.0"
