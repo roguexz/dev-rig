@@ -12,6 +12,24 @@ setup_vault() {
     # Cache the version before installing so it survives even if init is interrupted.
     record_vault_version "$VAULT_CHART_VERSION" "$(vault_app_version_for_chart "$VAULT_CHART_VERSION")"
 
+    # Authelia is a hard dependency: userpass login is disabled, so users can
+    # only sign in through OIDC. Fail early if Authelia is missing.
+    local authelia_namespace
+    authelia_namespace="$(ldx_namespace authelia)"
+    local phase
+    phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    if [ "$phase" != "Running" ]; then
+        fatal "Authelia is required for Vault SSO (userpass login is disabled). Run 'ldx authelia install' first."
+    fi
+
+    # Read the Vault client secret from the host secret store (Keychain),
+    # created by 'ldx authelia install'.
+    local vault_client_secret
+    vault_client_secret=$(ldx_secret_get "authelia/client_secrets" VAULT_CLIENT_SECRET 2>/dev/null) || true
+    if [ -z "$vault_client_secret" ]; then
+        fatal "VAULT_CLIENT_SECRET not found in the host secret store (ldx/authelia/client_secrets/*). Run 'ldx authelia install' first."
+    fi
+
     # Deployment lives in the ldx-local-platform chart (release 'ldx', service
     # 'vault'): the chart is pinned there, values and the Traefik hostAlias are
     # supplied by 'ldx k8s', and a sealed vault is auto-unsealed afterwards.
@@ -46,12 +64,7 @@ setup_vault() {
     enable_secrets_vault
 
     log_info "Vault UI and API are accessible at: https://vault.rd.localhost"
-    if [ "${DISABLE_USERPASS:-false}" != "true" ]; then
-        log_info "You can login with Username: admin, Password: changeit"
-    fi
-    if [ -n "${OIDC_CLIENT_ID:-}" ] && [ -n "${OIDC_CLIENT_SECRET:-}" ]; then
-        log_info "OIDC authentication is enabled. You can log in via your Identity Provider (e.g. Google)."
-    fi
+    log_info "Login via Authelia SSO (userpass login is disabled)."
 }
 
 unseal_vault() {
@@ -84,10 +97,11 @@ unseal_vault() {
 configure_default_user() {
     require_command "kubectl"
     require_command "jq"
+    require_command "curl"
 
     local namespace
     namespace="$(ldx_namespace vault)"
-    log_info "Configuring admin user and authentication methods..."
+    log_info "Configuring Vault authentication (Authelia SSO only, userpass disabled)..."
 
     local keys_json root_token
     keys_json=$(vault_keys_json 2>/dev/null) || {
@@ -95,6 +109,42 @@ configure_default_user() {
         return
     }
     root_token=$(jq -r .root_token <<<"$keys_json")
+
+    # Read the Vault client secret from the host secret store (Keychain),
+    # created by 'ldx authelia install'.
+    local vault_client_secret
+    vault_client_secret=$(ldx_secret_get "authelia/client_secrets" VAULT_CLIENT_SECRET 2>/dev/null) || true
+    if [ -z "$vault_client_secret" ]; then
+        fatal "VAULT_CLIENT_SECRET not found in the host secret store (ldx/authelia/client_secrets/*). Run 'ldx authelia install' first."
+    fi
+
+    local authelia_host="auth.rd.localhost"
+    local authelia_external_url="https://${authelia_host}"
+
+    # Check that Authelia is running and its OIDC discovery endpoint responds
+    local authelia_namespace
+    authelia_namespace="$(ldx_namespace authelia)"
+    local phase
+    phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || phase="NotFound"
+    if [ "$phase" != "Running" ]; then
+        fatal "Authelia is not running (pod phase: ${phase}). Run 'ldx authelia install' first."
+    fi
+
+    local discovery_url="https://${authelia_host}/.well-known/openid-configuration"
+    if ! curl -sf "${discovery_url}" > /dev/null 2>&1; then
+        fatal "Cannot reach Authelia OIDC discovery at ${discovery_url}. Is Traefik configured with TLS?"
+    fi
+
+    # Read the CA from the ClusterTrustBundle (created by 'ldx certmanager install').
+    # The PEM content is safe to embed in the heredoc (only base64 chars and newlines).
+    local ca_pem=""
+    ca_pem=$(kubectl get clustertrustbundle mkcert-ca -o jsonpath='{.spec.trustBundle}' 2>/dev/null || true)
+    if [ -n "$ca_pem" ]; then
+        log_info "Using mkcert root CA from ClusterTrustBundle for TLS verification."
+    else
+        log_warn "ClusterTrustBundle 'mkcert-ca' not found or empty. Vault may fail to verify Authelia's TLS certificate."
+        log_warn "Run 'ldx certmanager install' first."
+    fi
 
     # We use a temporary shell script executed inside the pod to keep things clean
     cat <<EOF | kubectl exec -i -n "$namespace" vault-0 -- sh
@@ -107,77 +157,73 @@ path "*" {
 }
 POLICY
 
-        # Always configure userpass unless DISABLE_USERPASS is true
-        if [ "${DISABLE_USERPASS:-false}" != "true" ]; then
-            if ! vault auth list | grep -q "userpass/"; then
-                vault auth enable userpass
-            fi
-            # Create or update the admin user with the password 'changeit' and assign the admin policy
-            vault write auth/userpass/users/admin password=changeit policies=admin
-
-            # Give the admin entity profile metadata (full_name/email) so OIDC
-            # providers that request the profile scope can render claims for
-            # it. The login materializes the entity and its userpass alias;
-            # VAULT_TOKEN must be unset for the login response to carry the
-            # auth block, and the image has no jq, so parse with sed.
-            unset VAULT_TOKEN
-            admin_entity_id=\$(vault login -format=json -method=userpass username=admin password=changeit 2>/dev/null | sed -n 's/.*"entity_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-            export VAULT_TOKEN="${root_token}"
-            # No "id" in the body: the path already carries it, and Vault warns when a
-            # body repeats a parameter it takes from the URL.
-            if [ -n "\$admin_entity_id" ]; then
-                printf '{"name":"admin","metadata":{"full_name":"Administrator","email":"admin@rd.localhost"}}' | vault write identity/entity/id/\$admin_entity_id - >/dev/null
-            fi
-
-            # Shared OIDC profile scope: OIDC clients (e.g. Vault, Grafana)
-            # request scope=profile and Vault renders name/email from entity
-            # metadata set above (or by 'create-user'). Missing metadata
-            # renders as an empty claim, never an error.
-            vault write identity/oidc/scope/profile \
-                description="Profile information (name, email)" \
-                template='{"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}' >/dev/null
-        else
-            # If someone explicitly disables it later, we could optionally disable the auth path,
-            # but for a dev script, it's safer to just skip creating/updating it.
-            if vault auth list | grep -q "userpass/"; then
-                vault auth disable userpass || true
-            fi
+        # Disable userpass authentication. Users must sign in through OIDC
+        # (Authelia), so a local password login is not offered.
+        if vault auth list | grep -q "userpass/"; then
+            vault auth disable userpass || true
         fi
 
-        # Configure OIDC if credentials are provided
-        if [ -n "${OIDC_CLIENT_ID:-}" ] && [ -n "${OIDC_CLIENT_SECRET:-}" ]; then
-            if ! vault auth list | grep -q "oidc/"; then
-                vault auth enable oidc
-            fi
+        # Enable OIDC auth method pointing at Authelia
+        if ! vault auth list | grep -q "oidc/"; then
+            vault auth enable oidc
+        fi
 
+        # Use the external URL (base URL, without the discovery path) for the discovery
+        # endpoint. Vault appends /.well-known/openid-configuration automatically.
+        # All other endpoints use the full URL.
+        #
+        # The Vault pod resolves auth.rd.localhost to Traefik's ClusterIP via
+        # hostAliases (set by 'ldx k8s'). This ensures the Host header matches
+        # the OIDC issuer (Authelia validates it), and the request goes through
+        # Traefik for proper TLS termination.
+        #
+        # CA certificates are passed as PEM content using the correct parameter names:
+        # oidc_discovery_ca_pem for the discovery URL and jwks_ca_pem for the JWKS URL.
+        if [ -n "${ca_pem}" ]; then
             vault write auth/oidc/config \\
-                oidc_discovery_url="https://accounts.google.com" \\
-                oidc_client_id="${OIDC_CLIENT_ID:-}" \\
-                oidc_client_secret="${OIDC_CLIENT_SECRET:-}" \\
+                oidc_discovery_url="${authelia_external_url}" \\
+                oidc_discovery_ca_pem="${ca_pem}" \\
+                oidc_authorization_url="${authelia_external_url}/api/oidc/authorization" \\
+                oidc_token_url="${authelia_external_url}/api/oidc/token" \\
+                oidc_jwks_url="${authelia_external_url}/.well-known/jwks.json" \\
+                jwks_ca_pem="${ca_pem}" \\
+                oidc_client_id="vault" \\
+                oidc_client_secret="${vault_client_secret}" \\
                 default_role="admin"
-
-            vault write auth/oidc/role/admin \\
-                bound_audiences="${OIDC_CLIENT_ID:-}" \\
-                allowed_redirect_uris="https://vault.rd.localhost/ui/vault/auth/oidc/oidc/callback" \\
-                allowed_redirect_uris="http://localhost:8250/oidc/callback" \\
-                user_claim="sub" \\
-                policies="admin"
+        else
+            vault write auth/oidc/config \\
+                oidc_discovery_url="${authelia_external_url}" \\
+                oidc_authorization_url="${authelia_external_url}/api/oidc/authorization" \\
+                oidc_token_url="${authelia_external_url}/api/oidc/token" \\
+                oidc_jwks_url="${authelia_external_url}/.well-known/jwks.json" \\
+                oidc_client_id="vault" \\
+                oidc_client_secret="${vault_client_secret}" \\
+                default_role="admin"
         fi
+
+        # Create role for Authelia logins. The email claim from Authelia maps to
+        # the Vault entity. The admin entity has email admin@rd.localhost (set by
+        # 'ldx authelia install'), which matches the Authelia admin user's email.
+        #
+        # oidc_scopes requests the email and profile scopes so Authelia includes
+        # the email claim in the token (required by user_claim="email").
+        vault write auth/oidc/role/admin \\
+            bound_audiences="vault" \\
+            allowed_redirect_uris="https://vault.rd.localhost/ui/vault/auth/oidc/oidc/callback" \\
+            allowed_redirect_uris="http://localhost:8250/oidc/callback" \\
+            user_claim="email" \\
+            oidc_scopes="openid,email,profile" \\
+            policies="admin"
+
+        # Shared OIDC profile scope: OIDC clients (e.g. Vault, Grafana)
+        # request scope=profile and Vault renders name/email from entity
+        # metadata. Missing metadata renders as an empty claim, never an error.
+        vault write identity/oidc/scope/profile \\
+            description="Profile information (name, email)" \\
+            template='{"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}' >/dev/null
 EOF
 
-    local auth_methods=""
-    if [ "${DISABLE_USERPASS:-false}" != "true" ]; then
-        auth_methods="Username/Password"
-    fi
-    if [ -n "${OIDC_CLIENT_ID:-}" ] && [ -n "${OIDC_CLIENT_SECRET:-}" ]; then
-        if [ -n "$auth_methods" ]; then
-            auth_methods="$auth_methods and OIDC"
-        else
-            auth_methods="OIDC"
-        fi
-    fi
-
-    log_info "Vault configured successfully with ${auth_methods:-No} authentication."
+    log_info "Vault configured successfully with Authelia SSO (userpass login disabled)."
 }
 
 # --- Vault API access ---------------------------------------------------------

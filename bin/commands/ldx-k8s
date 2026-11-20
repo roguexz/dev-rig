@@ -369,8 +369,19 @@ apply_certmanager() {
 
 # Pre-apply: vault's pod must resolve auth.rd.localhost to Traefik's
 # ClusterIP (so Vault reaches Authelia through Traefik and the OIDC issuer
-# Host header matches, without external DNS). Moved from 'ldx vault setup'.
+# Host header matches, without external DNS). Authelia is a hard dependency:
+# userpass login is disabled, so users can only sign in through OIDC.
 prehook_vault() {
+    # Authelia is a hard dependency: Vault's userpass login is disabled, so
+    # users can only sign in through OIDC. Fail early if Authelia is missing.
+    local authelia_namespace
+    authelia_namespace="$(ldx_namespace authelia)"
+    local phase
+    phase=$(kubectl get pods -n "$authelia_namespace" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.phase}' 2>/dev/null) || true
+    if [ "$phase" != "Running" ]; then
+        fatal "Authelia is required for Vault SSO (userpass login is disabled). Run 'ldx authelia install' first."
+    fi
+
     local traefik_ip="" ns svc ip
     for ns in kube-system traefik ingress; do
         svc=$(kubectl get svc -n "$ns" -l app.kubernetes.io/name=traefik -o 'jsonpath={.items[0].metadata.name}' 2>/dev/null) || true

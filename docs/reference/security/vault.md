@@ -8,9 +8,13 @@ unseal process.
 
 ### `ldx vault install`
 
-This command installs Vault, creates a default admin user, enables the KV v2 secrets engine and Kubernetes auth method,
-and exposes the UI via a Traefik Ingress. The secrets engine and auth method are also enabled by `enable-secrets`,
-which can be run separately on existing installs.
+This command installs Vault, configures Authelia SSO (userpass login is disabled), enables the KV v2 secrets engine and
+Kubernetes auth method, and exposes the UI via a Traefik Ingress. The secrets engine and auth method are also enabled
+by `enable-secrets`, which can be run separately on existing installs.
+
+Requires:
+- Authelia deployed (`ldx authelia install`)
+- Vault's pod resolves `auth.rd.localhost` to Traefik's ClusterIP (configured automatically by `ldx k8s`)
 
 ### `ldx vault status`
 
@@ -29,7 +33,7 @@ This command manually seals the Vault.
 ### `ldx vault create-user <username>`
 
 Creates (or updates) a userpass user with identity metadata, so OIDC clients can show a real name/email instead of a
-raw entity UUID.
+raw entity UUID. This command re-enables userpass if it was disabled by the default SSO configuration.
 
 ```bash
 ldx vault create-user alice --full-name "Alice Example" --email alice@example.com
@@ -43,7 +47,9 @@ ldx vault create-user alice --email alice-new@example.com   # update email only
 
 The command materializes the user's Vault identity entity and writes the metadata onto it. The shared OIDC
 `profile` scope (see below) renders these values into `name`/`email` claims for any client that requests it.
-`setup` does the same for the built-in `admin` user (`Administrator` / `admin@rd.localhost`).
+
+> **Note:** Userpass login is disabled by default (SSO is the only login method). Creating a userpass user re-enables
+> the userpass auth method. For most users, Authelia SSO is the preferred login path.
 
 It drives Vault with the `vault` CLI over the ingress (`https://vault.rd.localhost`), authenticating with the root token
 stored in the host secret store as `ldx/vault/init_json` (macOS Keychain; legacy
@@ -54,7 +60,10 @@ metadata keys and the entity name Vault assigned are preserved.
 
 ### `ldx vault sso`
 
-Configures Vault's OIDC auth method to use Authelia (deployed by `ldx authelia install`) as its identity provider.
+Re-configures Vault's OIDC auth method to use Authelia (deployed by `ldx authelia install`) as its identity provider.
+SSO is configured automatically by `install`; this command re-applies the wiring without a full reinstall, for example
+after changing the Authelia client secret.
+
 After this, Vault logins redirect to Authelia, which presents Touch ID (WebAuthn) after the initial
 password+enrollment setup.
 
@@ -62,7 +71,7 @@ Requires:
 - Authelia deployed (`ldx authelia install`)
 - Vault running and unsealed (`ldx vault install`, `ldx vault unseal`)
 
-Userpass (`admin/changeit`) remains available as a fallback.
+Userpass login is disabled (SSO is the only login method).
 
 ### `ldx vault enable-secrets`
 
@@ -84,7 +93,7 @@ For new installs, `setup` runs this automatically.
 
 ### OIDC profile scope
 
-`setup` and `create-user` ensure a shared OIDC scope exists at `identity/oidc/scope/profile`:
+`install` and `create-user` ensure a shared OIDC scope exists at `identity/oidc/scope/profile`:
 
 ```
 {"name": {{identity.entity.metadata.full_name}}, "email": {{identity.entity.metadata.email}}}
@@ -93,6 +102,9 @@ For new installs, `setup` runs this automatically.
 OIDC providers list it via `scopes_supported=profile` (Vault adds `openid` implicitly - passing it explicitly is an
 error), and clients request it at authorize time. Users without metadata simply get empty `name`/`email` claims;
 token issuance never fails.
+
+The Authelia admin user (configured by `ldx authelia install`) has entity metadata `Administrator` /
+`admin@rd.localhost`, so it renders correctly in the profile scope.
 
 ### `ldx vault upgrade [chart-version]`
 
@@ -147,22 +159,23 @@ The Vault UI and API are exposed via a Traefik Ingress. For applications running
 accessing the UI in your browser, use the following address:
 
 - **Vault Address:** `https://vault.rd.localhost`
-- **UI Username:** `admin`
-- **UI Password:** `changeit`
+
+Login is through Authelia SSO (userpass login is disabled). Open the UI and choose 'Authelia' (or 'OIDC') as the
+login method; after the first login, Touch ID (WebAuthn) is used.
 
 `vault.rd.localhost` resolves to loopback on its own and is covered by the certificate `ldx tls` issues, so the UI and the
 CLI work without an `/etc/hosts` entry or `-k`. An install made before this host was used still publishes
 `vault.rogue.io` on the ingress; `ldx vault install` moves it.
 
-With the `vault` CLI (see Prerequisites in the README):
+With the `vault` CLI (see Prerequisites in the README), you can log in through the OIDC flow:
 
 ```bash
 export VAULT_ADDR=https://vault.rd.localhost
-vault login -method=userpass username=admin        # writes ~/.vault-token
-vault login -no-store -method=userpass username=admin   # ...without touching it
+vault login -method=oidc   # opens a browser for the Authelia login
 ```
 
-`ldx vault create-user` uses this same address, with the cached root token instead of a login.
+`ldx vault create-user` uses this same address, with the cached root token instead of a login. It re-enables userpass
+for that user if it was disabled.
 
 ### From Inside the Kubernetes Cluster
 

@@ -1,6 +1,8 @@
 # ldx-vault module: sso: Authelia OIDC login for Vault.
 # Sourced by bin/commands/ldx-vault; shared helpers live in
 # bin/commands/vault/common.sh. Not executable on its own.
+# SSO is the default (configured by 'install'); this command re-applies the
+# wiring without a full reinstall. Userpass login is disabled.
 AUTHELIA_HOST="auth.rd.localhost"
 
 sso_vault() {
@@ -111,7 +113,7 @@ EOF
     log_info "Vault OIDC login is now wired to Authelia."
     log_info "Open https://vault.rd.localhost and choose 'Authelia' (or 'OIDC') as the login method."
     log_info "After the first login, you will be prompted by Touch ID."
-    log_info "Userpass (admin/changeit) remains available as a fallback."
+    log_info "Userpass login is disabled (SSO is the only login method)."
 }
 
 # --- Version tracking ---------------------------------------------------------

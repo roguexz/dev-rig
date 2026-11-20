@@ -75,11 +75,11 @@ After Authelia is deployed and Touch ID is enrolled, wire up each app:
 ### Vault
 
 ```bash
-ldx vault sso
+ldx vault install
 ```
 
-Configures Vault's OIDC auth method to point at Authelia's discovery URL. Userpass (`admin/changeit`) remains
-available as a fallback.
+Configures Vault's OIDC auth method to point at Authelia's discovery URL. Userpass login is disabled; users can
+only sign in through Authelia OIDC. Authelia must be installed before Vault.
 
 ### Grafana
 
