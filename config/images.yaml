@@ -1,0 +1,30 @@
+# Image versions for ldx-managed services.
+#
+# This is the single source of truth for all container images deployed by
+# the ldx CLI. The CLI reads this file at deploy time and passes the images
+# to Helm via --set flags. Edit this file to change versions, then run
+# 'ldx upgrade' to propagate the changes to the cluster.
+#
+# Format: service: full-image-reference:tag
+# Comments (#) and blank lines are ignored.
+
+# Redis (Bitnami chart, pinned to a specific version for reproducibility)
+redis: docker.io/bitnami/redis:8.10.3-debian-12-r1
+
+# PostgreSQL with pgvector (locally built image, see ensure_postgres_image)
+postgres: local/bitnami-postgresql-pgvector:18
+
+# Grafana OTel LGTM all-in-one stack
+otel: grafana/otel-lgtm:0.41.0
+
+# HashiCorp Vault (app version pinned to match chart 0.34.1)
+vault: hashicorp/vault:2.0.4
+
+# Authelia OIDC provider
+authelia: docker.io/authelia/authelia:latest
+
+# Bifrost LLM + MCP gateway
+bifrost: maximhq/bifrost:v2.6.0
+
+# Jetstack cert-manager controller (pinned to match chart 1.21.3)
+certmanager: quay.io/jetstack/cert-manager-controller:v1.21.3

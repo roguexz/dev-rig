@@ -33,6 +33,8 @@ postgresqlStack:
         allowInsecureImages: true
     auth:
       postgresPassword: changeit
+    # The image is built locally by the CLI (ensure_postgres_image); the
+    # reference is also in config/images.yaml.
     image:
       registry: ""
       repository: local/bitnami-postgresql-pgvector
@@ -69,8 +71,8 @@ otelStack:
 bifrostStack:
   enabled: false
   # Gateway config, runtime Secret and extra CAs are CLI-owned; the chart
-  # carries the static deployment. The prehook pins the image from the CLI
-  # constant.
+  # carries the static deployment. The image is provided by the CLI from
+  # config/images.yaml; this is a fallback for standalone chart deployment.
   image: maximhq/bifrost:v2.6.0
 
 autheliaStack:

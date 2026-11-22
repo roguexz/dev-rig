@@ -6,10 +6,14 @@
 # LDX_NAMESPACE env vars and the local config; see lib/common.sh.
 NAMESPACE="$(ldx_namespace bifrost)"
 
-# Pinned bifrost image.
-BIFROST_IMAGE="maximhq/bifrost:v2.6.0"
+# Pinned bifrost image, from the central images file (config/images.yaml).
+# Fails if the entry is missing: the central file is the single source of
+# truth, so a missing entry is a configuration error, not something to paper
+# over with a hardcoded default.
+BIFROST_IMAGE="$(ldx_image bifrost)" \
+    || fatal "Image 'bifrost' not found in config/images.yaml. Add it or check the file path (CONFIG_DIR=${CONFIG_DIR})."
 # Image reference without the tag (used by 'upgrade' to build target images).
-BIFROST_IMAGE_BASE="maximhq/bifrost"
+BIFROST_IMAGE_BASE="${BIFROST_IMAGE%:*}"
 # Hostname (Traefik Ingress) the gateway and its UI are served on.
 BIFROST_HOST="bifrost.rd.localhost"
 # Secret holding runtime credentials (admin username/password, oMLX key,

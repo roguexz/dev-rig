@@ -58,6 +58,26 @@ alphanumeric, at most 63 characters).
 
 ---
 
+## Image versions
+
+All container image versions are defined in a single file: `config/images.yaml`. This is the source of truth for the images deployed by the CLI. The file uses a simple `service: image` format:
+
+```yaml
+redis: docker.io/bitnami/redis:8.10.3-debian-12-r1
+postgres: local/bitnami-postgresql-pgvector:18
+otel: grafana/otel-lgtm:0.41.0
+vault: hashicorp/vault:2.0.4
+authelia: docker.io/authelia/authelia:latest
+bifrost: maximhq/bifrost:v2.6.0
+certmanager: quay.io/jetstack/cert-manager-controller:v1.21.3
+```
+
+The CLI reads this file at deploy time (`ldx k8s up`, `ldx upgrade`) and passes the images to Helm via `--set` flags. Chart values.yaml files carry the same values as fallbacks for standalone chart deployment, but the CLI always overrides them with the central file.
+
+To change an image version, edit `config/images.yaml` and run `ldx upgrade`.
+
+---
+
 ## Commands Overview
 
 | Command            | Category                | Description                                                           | Documentation                        |
@@ -75,6 +95,48 @@ alphanumeric, at most 63 characters).
 | `ldx authelia`     | Identity / SSO          | Authelia (OIDC provider with WebAuthn/Touch ID) for SSO               | [authelia.md](./reference/identity/authelia.md)             |
 | `ldx bifrost`      | AI / LLM Infrastructure | Bifrost (LLM + MCP gateway) with admin UI, oMLX provider sync          | [bifrost.md](./reference/ai/bifrost.md)               |
 | `ldx opencode`     | AI / LLM Infrastructure | Configure the local opencode harness from Bifrost                       | [opencode.md](./reference/ai/opencode.md)               |
+| `ldx upgrade`      | Dev Infrastructure      | Upgrade installed services to match the repository state                | (built-in --help)                                     |
+
+---
+
+## `ldx upgrade`
+
+Upgrades all currently-installed shipped components to match the repository state. This is the primary way to keep
+local cluster images current after pinned versions are updated in the repository.
+
+Services are grouped by their upgrade mechanism:
+
+| Mechanism              | Services                                          | How it works                                         |
+|:-----------------------|:--------------------------------------------------|:-----------------------------------------------------|
+| Umbrella Helm chart    | redis, postgres, otel, vault, authelia, certmanager | One `helm upgrade --install` of `ldx-local-platform` |
+| Dedicated (kubectl)    | bifrost                                            | `kubectl set image` + rollout                        |
+| Local image rebuild    | postgres (pgvector)                                | Force-rebuilds the locally-built pgvector image      |
+
+The command upgrades to the versions pinned in `config/images.yaml`, the single source of truth for all container images. This file is read by the CLI at deploy time and passed to Helm, so editing it and running `ldx upgrade` propagates the changes to the cluster.
+
+### Usage
+
+```bash
+ldx upgrade                    # Upgrade all installed services
+ldx upgrade --check            # Dry-run: report what would change without upgrading
+ldx upgrade --services a,b     # Limit the upgrade to specific services
+```
+
+### Options
+
+| Flag                  | Description                                                     |
+|:----------------------|:----------------------------------------------------------------|
+| `--check`             | Dry-run mode. Compares deployed image tags with the repo-pinned tags and reports what would change, without making any changes. |
+| `--services <a,b>`    | Comma-separated list of services to upgrade. Without this flag, all installed services are upgraded. |
+| `--namespace <ns>`    | Namespace of the release. Defaults to the namespace recorded by `ldx k8s`. |
+
+### Behavior
+
+- Detects installed services from the state file (`~/.config/ldx/k8s-services`).
+- For umbrella-managed services, runs `ldx k8s up --services <list> --force-rebuild` once.
+- For bifrost, runs `ldx bifrost upgrade`.
+- Continues processing remaining services if one fails.
+- Exit code 0 if all services were upgraded or were already up-to-date; 1 if any service failed.
 
 ---
 
