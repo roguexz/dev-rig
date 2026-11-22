@@ -55,16 +55,16 @@
         <mxCell id="m_tool" value="Tools&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#666666;&quot;&gt;MCP Servers&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="960" y="420" width="280" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="a1" value="Standardized API Call" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=4;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="opencode" target="gw">
+        <mxCell id="a1" value="Virtual Client Key (Bearer)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=4;fontSize=11;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="opencode" target="gw">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="a2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;startArrow=block;startFill=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="f1" target="m_llm">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="a3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;startArrow=block;startFill=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="f2" target="m_sec">
+        <mxCell id="a3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;startArrow=block;startFill=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="f2" target="m_tool">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="a4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;startArrow=block;startFill=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="f3" target="m_tool">
+        <mxCell id="a4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;startArrow=block;startFill=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="f3" target="m_sec">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
       </root>
