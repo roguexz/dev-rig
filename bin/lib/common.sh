@@ -411,6 +411,56 @@ helm() {
     command helm --kube-context="$RD_KUBE_CONTEXT" "$@"
 }
 
+# --- Image version registry ---------------------------------------------------
+# The central images.yaml file (config/images.yaml) is the single source of
+# truth for all container images. The CLI reads it at deploy time and passes
+# the images to Helm. This keeps versions in one place instead of scattered
+# across chart values and command constants.
+
+IMAGES_FILE="${CONFIG_DIR}/images.yaml"
+
+# Echoes the image reference for a service from the central images file.
+# Returns empty (and rc 1) if the service is not listed.
+# Usage: img=$(ldx_image otel)
+ldx_image() {
+    local service="$1"
+    [ -f "$IMAGES_FILE" ] || return 1
+    local line value
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip comments and blank lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        # Parse 'service: image' (first ': ' separates key from value)
+        [[ "$line" != *": "* ]] && continue
+        local key="${line%%: *}"
+        value="${line#*: }"
+        # Trim whitespace
+        key="${key//[[:space:]]/}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        if [ "$key" = "$service" ]; then
+            printf '%s' "$value"
+            return 0
+        fi
+    done < "$IMAGES_FILE"
+    return 1
+}
+
+# Splits a full image reference into its repository and tag components.
+# Echoes 'repository tag' (two words separated by a space). If the image has
+# no tag, the tag is empty.
+# Usage: read -r repo tag <<< "$(ldx_image_parts grafana/otel-lgtm:0.41.0)"
+ldx_image_parts() {
+    local image="$1"
+    [ -n "$image" ] || return 1
+    local repo="${image%:*}"
+    local tag=""
+    if [[ "$image" == *":"* ]]; then
+        tag="${image##*:}"
+    fi
+    printf '%s %s' "$repo" "$tag"
+}
+
 # Creates (or updates) the 'extra-cas' ConfigMap in the given namespace with
 # hash-named CA certificate files (for SSL_CERT_DIR). This adds local CAs
 # (like mkcert) to the system root store without replacing it, so public CAs

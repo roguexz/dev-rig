@@ -1,5 +1,6 @@
 # Grafana OTel LGTM all-in-one image (Loki, Grafana, Tempo, Mimir, collector).
-# Pin to a release for reproducibility; override via values to freeze.
+# The actual image is provided by the ldx CLI from config/images.yaml; these
+# are fallback values for standalone chart deployment.
 image:
   repository: grafana/otel-lgtm
   tag: "0.41.0"

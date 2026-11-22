@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+# ldx-help: infra Upgrade installed services to match the repo state
+#
+# ldx-upgrade - Upgrade all currently-installed shipped components to match
+# the repository state. This ensures local cluster images stay current when
+# pinned versions are updated in the repo.
+#
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+# Pinned images come from the central images file (config/images.yaml).
+# The ldx_image() helper (in common.sh) reads it.
+
+# Services managed by the umbrella Helm chart (upgrade via 'ldx k8s up').
+UMBRELLA_SERVICES="redis postgres otel vault authelia certmanager"
+
+# State file that records the enabled service set per namespace (same as ldx-k8s).
+STATE_FILE="${LDX_CONFIG_DIR}/k8s-services"
+
+show_help() {
+    echo "Usage: $(basename "$0") [options]"
+    echo ""
+    echo "Upgrade all currently-installed shipped components to match the"
+    echo "repository state. Services are grouped by their upgrade mechanism:"
+    echo "  - Umbrella chart: redis, postgres, otel, vault, authelia, certmanager"
+    echo "  - Dedicated: bifrost (kubectl set image)"
+    echo ""
+    echo "Options:"
+    echo "  --check           Dry-run: report what would change without upgrading."
+    echo "  --services <a,b>  Limit the upgrade to specific services."
+    echo "  --namespace <ns>  Namespace of the release (default: see ldx k8s)."
+    echo "  -h, --help        Show this help."
+    echo ""
+    echo "Without --services, all installed services are upgraded."
+    echo "The command upgrades to the versions pinned in this repository,"
+    echo "not to the latest upstream releases."
+}
+
+# --- Flag parsing ---------------------------------------------------------------
+
+DRY_RUN=false
+SERVICES_CSV=""
+NAMESPACE_OVERRIDE=""
+
+parse_options() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --check)
+                DRY_RUN=true
+                shift
+                ;;
+            --services)
+                SERVICES_CSV="${2:?--services requires a value}"
+                shift 2
+                ;;
+            --services=*)
+                SERVICES_CSV="${1#*=}"
+                shift
+                ;;
+            --namespace)
+                NAMESPACE_OVERRIDE="${2:?--namespace requires a value}"
+                shift 2
+                ;;
+            --namespace=*)
+                NAMESPACE_OVERRIDE="${1#*=}"
+                shift
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                fatal "Unknown option: $1 (try --help)"
+                ;;
+        esac
+    done
+}
+
+# Echoes validated, de-duplicated service names (one per line) from SERVICES_CSV.
+parse_services() {
+    [ -n "${SERVICES_CSV:-}" ] || return 0
+
+    local out=() service seen
+    local IFS=','
+    for service in $SERVICES_CSV; do
+        service="${service//[[:space:]]/}"
+        [ -n "$service" ] || continue
+        case "$service" in
+            redis|postgres|otel|vault|authelia|bifrost|certmanager) ;;
+            *) fatal "Unknown service: ${service} (supported: redis, postgres, otel, vault, authelia, bifrost, certmanager)" ;;
+        esac
+        for seen in "${out[@]+"${out[@]}"}"; do
+            [ "$seen" = "$service" ] && service="" && break
+        done
+        [ -n "$service" ] && out+=("$service")
+    done
+    unset IFS
+    printf '%s\n' "${out[@]}"
+}
+
+# Reads the recorded service set for a namespace (same format as ldx-k8s).
+state_get() {
+    local ns="$1"
+    [ -f "$STATE_FILE" ] || return 0
+    grep "^[[:space:]]*${ns}=" "$STATE_FILE" 2>/dev/null \
+        | tail -n1 | cut -d= -f2- | tr ' ' '\n' | grep -v '^$' || true
+}
+
+# --- Image tag extraction -------------------------------------------------------
+
+# Echoes the deployed image tag for a service, or empty if not deployed.
+get_deployed_image() {
+    local service="$1" namespace="$2"
+    local image=""
+
+    case "$service" in
+        redis)
+            image=$(kubectl get pods -n "$namespace" -l app.kubernetes.io/name=redis \
+                -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null) || true
+            ;;
+        postgres)
+            image=$(kubectl get pods -n "$namespace" -l app.kubernetes.io/name=postgresql \
+                -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null) || true
+            ;;
+        otel)
+            image=$(kubectl get pods -n "$namespace" -l app=lgtm \
+                -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null) || true
+            ;;
+        vault)
+            image=$(kubectl get pods -n "$namespace" -l app.kubernetes.io/name=vaultStack \
+                -o jsonpath='{.items[0].spec.containers[?(@.name=="vault")].image}' 2>/dev/null) || true
+            ;;
+        authelia)
+            local ans
+            ans="$(ldx_namespace authelia)"
+            image=$(kubectl get pods -n "$ans" -l app.kubernetes.io/name=authelia \
+                -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null) || true
+            ;;
+        bifrost)
+            image=$(kubectl get deployment bifrost -n "$namespace" \
+                -o jsonpath='{.spec.template.spec.containers[?(@.name=="bifrost")].image}' 2>/dev/null) || true
+            ;;
+        certmanager)
+            image=$(kubectl get pods -n cert-manager -l app.kubernetes.io/name=cert-manager \
+                -o jsonpath='{.items[0].spec.containers[?(@.name=="controller")].image}' 2>/dev/null) || true
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    printf '%s' "$image"
+}
+
+# Extracts the tag from a full image reference (e.g. 'grafana/otel-lgtm:0.41.0' -> '0.41.0').
+image_tag() {
+    local image="$1"
+    [ -n "$image" ] || return 1
+    printf '%s' "$image" | sed -n 's/.*:\(.*\)$/\1/p'
+}
+
+# --- Check logic ----------------------------------------------------------------
+
+# Checks whether a service needs upgrading. Echoes 'current', 'upgrade', or 'unknown'.
+# Checks whether a service needs upgrading. Echoes 'current', 'upgrade', or
+# 'not-installed' to stdout. Prints errors to stderr and returns non-zero on
+# configuration errors (e.g. missing image entry). The caller must check the
+# return code separately from the output, because 'fatal' inside a command
+# substitution only exits the subshell.
+check_service() {
+    local service="$1" namespace="$2"
+    local deployed="" pinned=""
+
+    if ! pinned="$(ldx_image "$service")"; then
+        echo "Image '${service}' not found in config/images.yaml. Add it or check the file (CONFIG_DIR=${CONFIG_DIR})." >&2
+        return 1
+    fi
+
+    deployed=$(get_deployed_image "$service" "$namespace")
+    if [ -z "$deployed" ]; then echo "not-installed"; return 0; fi
+
+    local deployed_tag pinned_tag
+    deployed_tag=$(image_tag "$deployed")
+    pinned_tag=$(image_tag "$pinned")
+
+    if [ -z "$deployed_tag" ] || [ -z "$pinned_tag" ]; then
+        echo "unknown"
+        return 0
+    fi
+
+    # For ':latest' tags, we can't do a meaningful version comparison.
+    # Assume the image is current unless it was explicitly changed.
+    if [ "$pinned_tag" = "latest" ]; then
+        echo "current"
+        return 0
+    fi
+
+    if [ "$deployed_tag" = "$pinned_tag" ]; then
+        echo "current"
+    else
+        echo "upgrade"
+    fi
+    return 0
+}
+
+# --- Upgrade logic --------------------------------------------------------------
+
+upgrade_umbrella() {
+    local -a services=("$@")
+    local service_csv
+    service_csv=$(printf '%s,' "${services[@]}" | sed 's/,$//')
+
+    if $DRY_RUN; then
+        log_info "Would run: ldx k8s up --services ${service_csv} --force-rebuild"
+        return 0
+    fi
+
+    log_info "Upgrading umbrella chart services: ${service_csv}"
+    "${LDX_HOME}/bin/ldx" k8s up --services "$service_csv" --force-rebuild
+}
+
+upgrade_bifrost() {
+    local target
+    target="$(ldx_image bifrost)" \
+        || fatal "Image 'bifrost' not found in config/images.yaml. Add it or check the file (CONFIG_DIR=${CONFIG_DIR})."
+
+    if $DRY_RUN; then
+        log_info "Would run: ldx bifrost upgrade (target ${target})"
+        return 0
+    fi
+
+    log_info "Upgrading bifrost to ${target}"
+    "${LDX_HOME}/bin/ldx" bifrost upgrade
+}
+
+# --- Main -----------------------------------------------------------------------
+
+main() {
+    parse_options "$@"
+
+    require_command "kubectl"
+    require_command "jq"
+
+    local namespace
+    namespace="$(ldx_namespace k8s)"
+    if [ -n "$NAMESPACE_OVERRIDE" ]; then
+        ldx_validate_namespace "$NAMESPACE_OVERRIDE"
+        namespace="$NAMESPACE_OVERRIDE"
+    fi
+
+    # Determine which services to consider: recorded set, filtered by --services.
+    local -a installed=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && installed+=("$line")
+    done < <(state_get "$namespace")
+
+    if [ "${#installed[@]}" -eq 0 ]; then
+        log_warn "No services recorded for namespace '${namespace}'. Run 'ldx k8s up --services <name>' first."
+        exit 1
+    fi
+
+    # Filter by --services if provided.
+    local -a target=("${installed[@]}")
+    if [ -n "$SERVICES_CSV" ]; then
+        local -a requested=()
+        while IFS= read -r line; do
+            [ -n "$line" ] && requested+=("$line")
+        done < <(parse_services)
+
+        local -a filtered=()
+        local svc want
+        for svc in "${installed[@]}"; do
+            for want in "${requested[@]}"; do
+                [ "$svc" = "$want" ] && filtered+=("$svc") && break
+            done
+        done
+        target=("${filtered[@]+"${filtered[@]}"}")
+    fi
+
+    if [ "${#target[@]}" -eq 0 ]; then
+        log_warn "None of the requested services are installed in namespace '${namespace}'."
+        exit 1
+    fi
+
+    # Categorize into umbrella vs bifrost.
+    local -a umbrella=()
+    local -a bifrost_only=()
+    local svc
+    for svc in "${target[@]}"; do
+        if [ "$svc" = "bifrost" ]; then
+            bifrost_only+=("$svc")
+        else
+            umbrella+=("$svc")
+        fi
+    done
+
+    # Check phase: report what would change.
+    local -a to_upgrade=()
+    local -a up_to_date=()
+    local -a failed=()
+    local -a skipped=()
+
+    for svc in "${target[@]}"; do
+        local status rc=0
+        status=$(check_service "$svc" "$namespace") || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            fatal "Cannot determine upgrade status for '${svc}'. Check config/images.yaml."
+        fi
+        case "$status" in
+            upgrade)
+                to_upgrade+=("$svc")
+                ;;
+            current)
+                up_to_date+=("$svc")
+                ;;
+            unknown)
+                # Unknown services are included in the upgrade (safe no-op).
+                to_upgrade+=("$svc")
+                ;;
+            not-installed)
+                skipped+=("$svc")
+                ;;
+        esac
+    done
+
+    if $DRY_RUN; then
+        echo ""
+        echo "=== Upgrade check (${namespace}) ==="
+        echo ""
+        if [ "${#to_upgrade[@]}" -gt 0 ]; then
+            echo "Would upgrade:"
+            for svc in "${to_upgrade[@]}"; do
+                local deployed pinned
+                deployed=$(get_deployed_image "$svc" "$namespace")
+                pinned="$(ldx_image "$svc")" \
+                    || fatal "Image '${svc}' not found in config/images.yaml. Add it or check the file (CONFIG_DIR=${CONFIG_DIR})."
+                if [ -n "$deployed" ]; then
+                    echo "  ${svc}: $(image_tag "$deployed") -> $(image_tag "$pinned")"
+                else
+                    echo "  ${svc}: not deployed -> ${pinned}"
+                fi
+            done
+        else
+            echo "No upgrades needed."
+        fi
+        echo ""
+        if [ "${#up_to_date[@]}" -gt 0 ]; then
+            echo "Up to date: ${up_to_date[*]}"
+        fi
+        if [ "${#skipped[@]}" -gt 0 ]; then
+            echo "Skipped (not installed): ${skipped[*]}"
+        fi
+        echo ""
+        echo "Run without --check to apply the upgrades."
+        exit 0
+    fi
+
+    # Upgrade phase.
+    echo ""
+    echo "=== Upgrading services in namespace '${namespace}' ==="
+    echo ""
+
+    # Umbrella chart services (redis, postgres, otel, vault, authelia, certmanager).
+    if [ "${#umbrella[@]}" -gt 0 ]; then
+        upgrade_umbrella "${umbrella[@]}" || failed+=("umbrella:${umbrella[*]}")
+    fi
+
+    # Bifrost (dedicated upgrade command).
+    if [ "${#bifrost_only[@]}" -gt 0 ]; then
+        upgrade_bifrost || failed+=("bifrost")
+    fi
+
+    # Summary.
+    echo ""
+    echo "=== Summary ==="
+    if [ "${#failed[@]}" -gt 0 ]; then
+        log_error "Failed: ${failed[*]}"
+    fi
+    if [ "${#up_to_date[@]}" -gt 0 ]; then
+        log_info "Up to date: ${up_to_date[*]}"
+    fi
+    if [ "${#skipped[@]}" -gt 0 ]; then
+        log_info "Skipped (not installed): ${skipped[*]}"
+    fi
+
+    if [ "${#failed[@]}" -gt 0 ]; then
+        exit 1
+    fi
+
+    log_info "All upgrades complete."
+}
+
+main "$@"

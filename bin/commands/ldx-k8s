@@ -88,6 +88,7 @@ show_help() {
     echo "  --services <a,b>    Comma-separated services (default: all the chart supports)."
     echo "  --namespace <ns>    Namespace of the release (default: see below)."
     echo "  --purge-data        With 'down': also delete the services' PVCs."
+    echo "  --force-rebuild     With 'up': force-rebuild the local pgvector image."
     echo "  -f, --values <file> Extra Helm values file, kept as the release's"
     echo "                      user config and reused on every 'up' (repeatable)."
     echo ""
@@ -218,20 +219,28 @@ state_set() {
 # --- Builds -------------------------------------------------------------------
 
 # Builds the local pgvector image the postgresql subchart expects. The chart
-# pins its image by design, so the build stays in the CLI.
+# pins its image by design, so the build stays in the CLI. With --force,
+# rebuilds even if the image already exists (used by 'ldx upgrade').
 ensure_postgres_image() {
+    local force="${1:-}"
     local local_image="local/bitnami-postgresql-pgvector:18"
 
     if ! command -v docker &>/dev/null; then
         fatal "Required command 'docker' is not installed or not in PATH. Docker is needed to build the local pgvector image."
     fi
 
-    if DOCKER_HOST="" docker --context rancher-desktop image inspect "$local_image" &>/dev/null; then
+    if [ "$force" != "--force" ] && DOCKER_HOST="" docker --context rancher-desktop image inspect "$local_image" &>/dev/null; then
         log_info "Found local pgvector image '$local_image'."
         return
     fi
 
-    log_info "Local pgvector image '$local_image' not found. Building it now..."
+    if [ "$force" = "--force" ]; then
+        log_info "Rebuilding local pgvector image '$local_image' (forced by 'ldx upgrade')..."
+        DOCKER_HOST="" docker --context rancher-desktop rmi "$local_image" &>/dev/null || true
+    else
+        log_info "Local pgvector image '$local_image' not found. Building it now..."
+    fi
+
     local tmp_dir
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ldx-pgvector-build.XXXXXX")"
 
@@ -528,6 +537,7 @@ adopt_legacy() {
 SERVICES_CSV=""
 NAMESPACE_OVERRIDE=""
 PURGE_DATA=false
+FORCE_REBUILD=false
 declare -a VALUES_ARGS=()
 
 parse_common_options() {
@@ -551,6 +561,10 @@ parse_common_options() {
                 ;;
             --purge-data)
                 PURGE_DATA=true
+                shift
+                ;;
+            --force-rebuild)
+                FORCE_REBUILD=true
                 shift
                 ;;
             -f|--values)
@@ -709,9 +723,84 @@ set_flags_for() {
     done
 }
 
+# Services whose chart image values the CLI overrides from the central file.
+# Vault and certmanager are not listed: their images are pinned by their chart
+# versions and are not overridden.
+IMAGE_OVERRIDE_SERVICES="redis postgres otel authelia bifrost"
+
+# Validates that all services needing image overrides have entries in the
+# central images file. Must be called in the main shell (not a subshell),
+# because it uses 'fatal' which exits the process.
+validate_images() {
+    local -a services=("$@")
+    local service needs_override
+    for service in "${services[@]}"; do
+        [ "$(service_scope "$service")" = "main" ] || continue
+        needs_override=false
+        local s
+        for s in $IMAGE_OVERRIDE_SERVICES; do
+            [ "$s" = "$service" ] && needs_override=true && break
+        done
+        if $needs_override; then
+            ldx_image "$service" >/dev/null \
+                || fatal "Image '${service}' not found in config/images.yaml. Add it or check the file (CONFIG_DIR=${CONFIG_DIR})."
+        fi
+    done
+}
+
+# Generates helm --set flags for image overrides from the central images file.
+# Call validate_images() first (in the main shell) to catch missing entries;
+# this function assumes all required images are present.
+# Echoes one arg per line (--set, key=value, --set, key=value, ...).
+image_set_flags() {
+    local -a services=("$@")
+    local service img repo tag
+
+    for service in "${services[@]}"; do
+        [ "$(service_scope "$service")" = "main" ] || continue
+
+        # Only generate overrides for services that need them.
+        local needs_override=false
+        local s
+        for s in $IMAGE_OVERRIDE_SERVICES; do
+            [ "$s" = "$service" ] && needs_override=true && break
+        done
+        $needs_override || continue
+
+        img="$(ldx_image "$service")" || continue
+        read -r repo tag <<< "$(ldx_image_parts "$img")"
+        [ -n "$repo" ] || continue
+
+        case "$service" in
+            redis)
+                printf -- '--set\n%s\n--set\n%s\n' \
+                    "redisStack.redis.image.repository=${repo}" \
+                    "redisStack.redis.image.tag=${tag}"
+                ;;
+            postgres)
+                printf -- '--set\n%s\n--set\n%s\n--set\n%s\n' \
+                    "postgresqlStack.postgresql.image.repository=${repo}" \
+                    "postgresqlStack.postgresql.image.tag=${tag}" \
+                    "postgresqlStack.postgresql.image.pullPolicy=IfNotPresent"
+                ;;
+            otel)
+                printf -- '--set\n%s\n--set\n%s\n' \
+                    "otelStack.image.repository=${repo}" \
+                    "otelStack.image.tag=${tag}"
+                ;;
+            authelia)
+                printf -- '--set\n%s\n' "autheliaStack.image=${img}"
+                ;;
+            bifrost)
+                printf -- '--set\n%s\n' "bifrostStack.image=${img}"
+                ;;
+        esac
+    done
+}
+
 apply_release() {
     local -a services=("$@")
-    local -a set_args=() recorded=()
+    local -a set_args=() recorded=() image_args=()
 
     while IFS= read -r line; do
         set_args+=("$line")
@@ -720,6 +809,10 @@ apply_release() {
     while IFS= read -r line; do
         recorded+=("$line")
     done < <(recorded_values_args)
+
+    while IFS= read -r line; do
+        image_args+=("$line")
+    done < <(image_set_flags "${services[@]}")
 
     local -a main_only=()
     local s
@@ -733,6 +826,7 @@ apply_release() {
         ${recorded[@]+"${recorded[@]}"} \
         ${APPLY_VALUES[@]+"${APPLY_VALUES[@]}"} \
         "${set_args[@]}" \
+        "${image_args[@]}" \
         --force-conflicts \
         --wait
 }
@@ -797,8 +891,19 @@ k8s_up() {
         log_info "Namespace: ${NAMESPACE}"
         kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
+        # Validate that all required images are in the central file before
+        # doing any work. This must run in the main shell (fatal exits the
+        # process), not inside a subshell or process substitution.
+        validate_images "${main_desired[@]}"
+
         for service in "${main_desired[@]}"; do
-            [ "$service" = "postgres" ] && ensure_postgres_image
+            if [ "$service" = "postgres" ]; then
+                if [ "$FORCE_REBUILD" = true ]; then
+                    ensure_postgres_image --force
+                else
+                    ensure_postgres_image
+                fi
+            fi
             adopt_legacy "$service" "$NAMESPACE"
         done
         service_prehooks "${requested_main[@]+"${requested_main[@]}"}"

@@ -6,6 +6,8 @@ nameOverride: authelia
 # The umbrella release lives in 'commons'; Authelia keeps its own namespace.
 namespaceOverride: authelia
 
+# The actual image is provided by the ldx CLI from config/images.yaml; this
+# is a fallback for standalone chart deployment.
 image: docker.io/authelia/authelia:latest
 host: auth.rd.localhost
 port: 9091
