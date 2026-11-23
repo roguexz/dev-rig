@@ -36,21 +36,20 @@ status_bifrost() {
     fi
 
     echo ""
-    echo "Credentials:"
     # Admin auth
     local admin_user
-    admin_user=$(ldx_secret_get bifrost admin_username 2>/dev/null) || true
+    admin_user=$(bifrost_credential_get USERNAME 2>/dev/null) || true
     if [ -n "$admin_user" ]; then
-        echo "  Admin:       ${admin_user} (password in keychain; run 'ldx bifrost admin-password')"
+        echo "Credentials:   ${admin_user} : 'ldx bifrost admin-password'"
     else
-        echo "  Admin:       not configured"
+        echo "Credentials:   not configured"
     fi
 
     # API key
     if get_api_key_state; then
-        echo "  API key:     configured (run 'ldx bifrost api-key print' to see it)"
+        echo "API key:       configured (run 'ldx bifrost api-key print' to see it)"
     else
-        echo "  API key:     not configured"
+        echo "API key:       not configured"
     fi
 
     echo ""

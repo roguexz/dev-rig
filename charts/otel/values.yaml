@@ -6,7 +6,15 @@ image:
   tag: "0.41.0"
   pullPolicy: Always
 
+# Grafana admin account password. Standalone-chart fallback: 'ldx k8s up
+# --services otel' generates a random per-install password, stores it in the
+# host secret store, and sets adminPasswordSecret so the value never enters
+# values. (Basic login is disabled when OIDC is on; the account exists for
+# OIDC sign-up.)
 adminPassword: changeit
+# Name of an existing Secret holding the admin password (key admin-password);
+# takes precedence over adminPassword when set.
+adminPasswordSecret: ""
 
 ingress:
   className: traefik

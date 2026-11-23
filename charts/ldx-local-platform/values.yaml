@@ -18,6 +18,13 @@ redisStack:
     # clusters keep their names and PVCs on upgrade.
     fullnameOverride: redis
     architecture: standalone
+    # The repository carries the registry prefix (config/images.yaml); the
+    # chart default would double it (see charts/redis/values.yaml).
+    image:
+      registry: ""
+    # Standalone-chart fallback: 'ldx k8s up --services redis' generates a
+    # random per-install password, stores it in the host secret store, and
+    # overrides this with auth.enabled=true + auth.existingSecret=redis.
     auth:
       enabled: false
   hostAccess:
@@ -31,6 +38,9 @@ postgresqlStack:
     global:
       security:
         allowInsecureImages: true
+    # Standalone-chart fallback: 'ldx k8s up --services postgres' generates a
+    # random per-install password for the postgres user, stores it in the host
+    # secret store, and overrides this with auth.existingSecret=postgresql.
     auth:
       postgresPassword: changeit
     # The image is built locally by the CLI (ensure_postgres_image); the

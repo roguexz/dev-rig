@@ -13,14 +13,93 @@ export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall>"
+    echo "Usage: $(basename "$0") <install|uninstall|status|print-password>"
     echo ""
     echo "Commands:"
-    echo "  install    Install Redis and expose port 6379 to the host."
-    echo "  uninstall  Remove the Redis deployment."
+    echo "  install          Install Redis and expose port 6379 to the host."
+    echo "  uninstall        Remove the Redis deployment."
+    echo "  status           Show the Redis pod status, port-forward, and endpoints."
+    echo "  print-password   Print the Redis password (raw value, stdout)."
     echo ""
-    echo "Alias for 'ldx k8s up/down --services redis'. For flags, status and"
-    echo "diffs use 'ldx k8s' directly."
+    echo "Alias for 'ldx k8s up/down --services redis'. For flags and diffs"
+    echo "use 'ldx k8s' directly."
+}
+
+# Prints the Redis password to stdout (raw, for composition:
+# REDISCLI_AUTH="$(ldx redis print-password)" redis-cli ...). The host secret
+# store is the source of truth; the cluster Secret is the fallback.
+print_password_redis() {
+    local password
+    password=$(ldx_secret_get redis/credentials PASSWORD 2>/dev/null) || true
+
+    if [ -z "$password" ]; then
+        require_command "kubectl"
+        local namespace
+        namespace="$(ldx_namespace redis)"
+        password=$(kubectl get secret redis -n "$namespace" \
+            -o jsonpath='{.data.redis-password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    fi
+
+    [ -n "$password" ] \
+        || fatal "No Redis password found (host secret store ldx/redis/credentials/PASSWORD, Secret 'redis'). Legacy unauthenticated installs have none: 'ldx k8s down --services redis' and install again."
+    echo "$password"
+}
+
+# Shows the Redis deployment status, host access, and credentials.
+status_redis() {
+    require_command "kubectl"
+
+    local namespace
+    namespace="$(ldx_namespace redis)"
+
+    log_info "Redis status:"
+
+    # Check if the pod exists and its phase.
+    local phase ready
+    phase=$(kubectl get pods -n "$namespace" -l app.kubernetes.io/name=redis \
+        -o 'jsonpath={.items[0].status.phase}' 2>/dev/null) || true
+    ready=$(kubectl get pods -n "$namespace" -l app.kubernetes.io/name=redis \
+        -o 'jsonpath={.items[0].status.containerStatuses[0].ready}' 2>/dev/null) || true
+
+    if [ -z "$phase" ]; then
+        echo "  Pod: not installed"
+        return 0
+    fi
+    echo "  Pod: ${phase} (ready: ${ready:-unknown})"
+
+    # Show how to reach it; print-password reveals the credential. Detect
+    # auth mode from the Secret's presence: legacy installs have none and run
+    # unauthenticated.
+    echo "  Host access: redis-cli -h localhost -p 6379"
+    if kubectl get secret redis -n "$namespace" &>/dev/null; then
+        echo "  Credentials: default : 'ldx redis print-password'"
+    else
+        echo "  Credentials: default : none (unauthenticated legacy install)"
+    fi
+
+    # Check if the LoadBalancer service is exposed.
+    local lb_ip
+    lb_ip=$(kubectl get service redis-lb -n "$namespace" \
+        -o 'jsonpath={.status.loadBalancer.ingress[0].ip}' 2>/dev/null) || true
+    if [ -n "$lb_ip" ]; then
+        echo "  LoadBalancer: ${lb_ip}:6379"
+    fi
+
+    # Check if the NodePort service is exposed.
+    local node_port
+    node_port=$(kubectl get service redis-host-access -n "$namespace" \
+        -o 'jsonpath={.spec.ports[0].nodePort}' 2>/dev/null) || true
+    if [ -n "$node_port" ]; then
+        echo "  NodePort: localhost:${node_port}"
+    fi
+
+    # Show the cluster address.
+    local svc_ports
+    svc_ports=$(kubectl get service redis-master -n "$namespace" \
+        -o 'jsonpath={.spec.ports[0].port}' 2>/dev/null) || true
+    if [ -n "$svc_ports" ]; then
+        echo "  Cluster: redis-master.${namespace}.svc.cluster.local:${svc_ports}"
+    fi
 }
 
 case "${1:-}" in
@@ -29,6 +108,12 @@ case "${1:-}" in
         ;;
     uninstall)
         exec "${LDX_HOME}/bin/ldx" k8s down --services redis "${@:2}"
+        ;;
+    status)
+        status_redis
+        ;;
+    print-password)
+        print_password_redis
         ;;
     help|-h|--help)
         show_help

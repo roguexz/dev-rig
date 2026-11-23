@@ -310,7 +310,152 @@ prehook_otel() {
     # Adopt resources the pre-chart installer created via kubectl apply.
     adopt_resources "$RELEASE" "$NAMESPACE" \
         deployment/lgtm service/grafana service/otel-collector ingress/grafana secret/grafana-secrets configmap/grafana-config
+
+    # Random per-install Grafana admin password (fresh installs only; see the
+    # credentials section).
+    prehook_service_credentials otel
 }
+
+# --- Service credentials (redis, postgres, otel) ------------------------------
+# Fresh installs get a random per-installation password: generated once, kept
+# in the host secret store (ldx/<service>/credentials/PASSWORD), and mirrored
+# into a Kubernetes Secret that the chart consumes (Redis/PostgreSQL through
+# auth.existingSecret, Grafana through adminPasswordSecret). A leaked password
+# is then valid only for that machine's cluster, never repo-wide. The password
+# itself never enters a values file.
+#
+# Existing installs (their resources predate this feature) keep the chart
+# defaults - PostgreSQL 'changeit', Redis unauthenticated, Grafana 'changeit' -
+# and nothing is rotated in place: 'ldx k8s down --services <s> --purge-data'
+# (plus the PVC-less Redis/Grafana: plain down/up) moves an old install to a
+# random password. If the host secret store entry is lost for a CLI-managed
+# install, the cluster Secret is the source of truth and is adopted back on
+# the next 'up'.
+
+# True when the service's resources exist in the namespace from a previous,
+# pre-credentials install (statefulset, deployment, leftover PVCs, chart Secret).
+credentials_legacy_install() {
+    local service="$1"
+    case "$service" in
+        redis)
+            kubectl get statefulset redis-master -n "$NAMESPACE" &>/dev/null
+            ;;
+        postgres)
+            kubectl get statefulset postgresql -n "$NAMESPACE" &>/dev/null \
+                || kubectl get pvc -n "$NAMESPACE" -l app.kubernetes.io/name=postgresql \
+                    --no-headers 2>/dev/null | grep -q . \
+                || kubectl get secret postgresql -n "$NAMESPACE" &>/dev/null
+            ;;
+        otel)
+            kubectl get deployment lgtm -n "$NAMESPACE" &>/dev/null
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Pre-apply for redis/postgres/otel: ensure the credentials exist (host secret
+# store + Kubernetes Secret) and render the values that point the subchart at
+# the Secret. Idempotent; the recorded values file keeps every later
+# reconcile (plain 'up', 'down') rendering the same chart.
+prehook_service_credentials() {
+    local service="$1"
+    local ns_key secret_name secret_key label
+    case "$service" in
+        redis)
+            ns_key="redis/credentials"; secret_name="redis"
+            secret_key="redis-password"; label="Redis"
+            ;;
+        postgres)
+            ns_key="postgresql/credentials"; secret_name="postgresql"
+            secret_key="postgres-password"; label="PostgreSQL"
+            ;;
+        otel)
+            ns_key="otel/credentials"; secret_name="grafana-admin"
+            secret_key="admin-password"; label="Grafana admin"
+            ;;
+        *) fatal "prehook_service_credentials: unknown service ${service}" ;;
+    esac
+
+    local password=""
+    password=$(ldx_secret_get "$ns_key" PASSWORD 2>/dev/null) || true
+
+    if [ -z "$password" ]; then
+        # Adopt the cluster's password when the host copy is lost, so a
+        # keychain wipe cannot silently replace a live password.
+        local adopted
+        adopted=$(kubectl get secret "$secret_name" -n "$NAMESPACE" \
+            -o "jsonpath={.data.${secret_key}}" 2>/dev/null | base64 -d 2>/dev/null) || true
+        if [ -n "$adopted" ]; then
+            password="$adopted"
+            ldx_secret_put "$ns_key" PASSWORD "$password"
+            log_info "Adopted the existing ${label} password from the cluster Secret into the host secret store (ldx/${ns_key}/PASSWORD)."
+        elif credentials_legacy_install "$service"; then
+            log_info "Existing ${label} install found: keeping its current credentials (chart defaults: PostgreSQL/Grafana 'changeit', Redis unauthenticated)."
+            log_info "For a random per-install password: 'ldx k8s down --services ${service} --purge-data', then 'ldx k8s up'."
+            return 0
+        else
+            password="$(openssl rand -hex 24)"
+            ldx_secret_put "$ns_key" PASSWORD "$password"
+            log_info "Generated a random ${label} password (host secret store: ldx/${ns_key}/PASSWORD)."
+        fi
+    fi
+
+    # The Kubernetes Secret the chart reads. The key names are the chart
+    # conventions for existing secrets: Redis expects 'redis-password';
+    # PostgreSQL reads the admin password from 'postgres-password' and the
+    # user password from 'password' (kept equal here, there is no custom
+    # user); the otel chart's adminPasswordSecret expects 'admin-password'.
+    local b64
+    b64=$(printf '%s' "$password" | base64 | tr -d '\n')
+    {
+        echo "apiVersion: v1"
+        echo "kind: Secret"
+        echo "metadata:"
+        echo "  name: ${secret_name}"
+        echo "  namespace: ${NAMESPACE}"
+        echo "type: Opaque"
+        echo "data:"
+        printf '  %s: %s\n' "$secret_key" "$b64"
+        if [ "$service" = postgres ]; then
+            printf '  password: %s\n' "$b64"
+        fi
+    } | kubectl apply -f - >/dev/null
+
+    local values_file
+    values_file="$(mktemp -t "ldx-k8s-${service}")"
+    TMP_FILES+=("$values_file")
+    chmod 600 "$values_file"
+    case "$service" in
+        redis)
+            cat > "$values_file" <<'EOF'
+redisStack:
+  redis:
+    auth:
+      enabled: true
+      existingSecret: redis
+EOF
+            ;;
+        postgres)
+            cat > "$values_file" <<'EOF'
+postgresqlStack:
+  postgresql:
+    auth:
+      existingSecret: postgresql
+EOF
+            ;;
+        otel)
+            cat > "$values_file" <<'EOF'
+otelStack:
+  adminPasswordSecret: grafana-admin
+EOF
+            ;;
+    esac
+    APPLY_VALUES+=(--values "$values_file")
+    record_service_values "$service" "$values_file"
+}
+
+prehook_redis()    { prehook_service_credentials redis; }
+prehook_postgres() { prehook_service_credentials postgres; }
 
 prehook_certmanager() {
     require_command "mkcert"
@@ -694,6 +839,8 @@ service_prehooks() {
     local s
     for s in "$@"; do
         case "$s" in
+            redis)   prehook_redis ;;
+            postgres) prehook_postgres ;;
             otel)    prehook_otel ;;
             vault)   prehook_vault ;;
             authelia) prehook_authelia ;;
@@ -930,12 +1077,12 @@ k8s_up() {
     log_info "Platform is up."
     for service in "${desired[@]}"; do
         case "$service" in
-            redis)       log_info "Redis         -> localhost:6379" ;;
-            postgres)    log_info "PostgreSQL    -> localhost:5432 (postgres/changeit)" ;;
-            otel)        log_info "Grafana/LGTM  -> https://otel.rd.localhost (OTLP: localhost:4317/4318)" ;;
+            redis)       log_info "Redis         -> localhost:6379 (credentials: default : 'ldx redis print-password')" ;;
+            postgres)    log_info "PostgreSQL    -> localhost:5432 (credentials: postgres : 'ldx postgres print-password')" ;;
+            otel)        log_info "Grafana/LGTM  -> https://otel.rd.localhost (OTLP: localhost:4317/4318; credentials: admin : 'ldx otel print-password')" ;;
             vault)       log_info "Vault         -> https://vault.rd.localhost (UI + API)" ;;
             authelia)    log_info "Authelia      -> https://auth.rd.localhost (OIDC + WebAuthn)" ;;
-            bifrost)     log_info "bifrost       -> https://bifrost.rd.localhost (UI, LLM /openai, MCP /mcp)" ;;
+            bifrost)     log_info "bifrost       -> https://bifrost.rd.localhost (UI, LLM /openai, MCP /mcp; credentials: admin : 'ldx bifrost admin-password')" ;;
             certmanager) log_info "cert-manager  -> release '${CM_RELEASE}' in namespace '${CM_NAMESPACE}', ClusterIssuer 'mkcert-issuer'" ;;
         esac
     done
@@ -1026,7 +1173,8 @@ k8s_down() {
     if [ "${#remaining_main[@]}" -gt 0 ]; then
         # Services with dynamic values (authelia, vault, bifrost) need
         # their prehooks re-run so the chart renders with up-to-date values.
-        # Simple services (redis, postgres, otel) don't need prehooks.
+        # redis, postgres and otel keep their credentials in recorded values
+        # files that every apply reuses: no prehooks needed.
         local -a dynamic_remaining=()
         local svc
         for svc in "${remaining_main[@]}"; do

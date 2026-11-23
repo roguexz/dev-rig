@@ -31,8 +31,17 @@ spec:
         env:
         # Override the default Grafana admin password (account is still created
         # for OIDC sign-up; basic login is disabled so it cannot be used).
+        # From a CLI-managed Secret when adminPasswordSecret is set, so the
+        # random per-install password never appears in values.
         - name: GF_SECURITY_ADMIN_PASSWORD
+          {{- if .Values.adminPasswordSecret }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.adminPasswordSecret | quote }}
+              key: admin-password
+          {{- else }}
           value: {{ .Values.adminPassword | quote }}
+          {{- end }}
         # Disable anonymous access (the otel-lgtm image enables it by default).
         - name: GF_AUTH_ANONYMOUS_ENABLED
           value: "false"

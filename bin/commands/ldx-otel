@@ -13,18 +13,39 @@ export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|status|sso>"
+    echo "Usage: $(basename "$0") <install|uninstall|status|sso|print-password>"
     echo ""
     echo "Commands:"
-    echo "  install    Install the all-in-one Grafana OTel LGTM stack."
-    echo "  uninstall  Remove the OTel stack."
-    echo "  status     Show the LGTM pod status, endpoints, and OIDC configuration."
-    echo "  sso        Enable Authelia OIDC SSO for Grafana."
-    echo "               sso enable   Wire Grafana to Authelia (requires Authelia running)."
+    echo "  install          Install the all-in-one Grafana OTel LGTM stack."
+    echo "  uninstall        Remove the OTel stack."
+    echo "  status           Show the LGTM pod status, endpoints, and OIDC configuration."
+    echo "  sso              Enable Authelia OIDC SSO for Grafana."
+    echo "                     sso enable   Wire Grafana to Authelia (requires Authelia running)."
+    echo "  print-password   Print the Grafana admin password (raw value, stdout)."
     echo ""
     echo "Authelia is a required prerequisite (basic login is disabled in"
     echo "Grafana). Run 'ldx authelia install' before 'ldx otel install'."
     echo "For flags and diffs use 'ldx k8s' directly."
+}
+
+# Prints the Grafana admin password to stdout (raw). The host secret store is
+# the source of truth; the cluster Secret is the fallback. The admin account
+# only matters when OIDC is disabled (basic login is off under SSO).
+print_password_otel() {
+    local password
+    password=$(ldx_secret_get otel/credentials PASSWORD 2>/dev/null) || true
+
+    if [ -z "$password" ]; then
+        require_command "kubectl"
+        local namespace
+        namespace="$(ldx_namespace otel)"
+        password=$(kubectl get secret grafana-admin -n "$namespace" \
+            -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    fi
+
+    [ -n "$password" ] \
+        || fatal "No Grafana admin password found (host secret store ldx/otel/credentials/PASSWORD, Secret 'grafana-admin'). Legacy installs use the chart default 'changeit'."
+    echo "$password"
 }
 
 # Shows the OTel LGTM deployment status, endpoints, and OIDC configuration.
@@ -83,7 +104,15 @@ status_otel() {
     if [ "$oidc_enabled" = "true" ]; then
         echo "  OIDC (Authelia): enabled"
     else
-        echo "  OIDC (Authelia): disabled (admin/changeit)"
+        echo "  OIDC (Authelia): disabled"
+    fi
+
+    # Admin account credentials (relevant when OIDC is off; basic login is
+    # disabled under SSO). print-password reveals the credential.
+    if kubectl get secret grafana-admin -n "$namespace" &>/dev/null; then
+        echo "  Credentials:   admin : 'ldx otel print-password'"
+    else
+        echo "  Credentials:   admin : chart default (legacy install)"
     fi
 }
 
@@ -194,6 +223,9 @@ case "${1:-}" in
     sso)
         shift
         sso_otel "$@"
+        ;;
+    print-password)
+        print_password_otel
         ;;
     help|-h|--help)
         show_help

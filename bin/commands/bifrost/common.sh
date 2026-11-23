@@ -47,6 +47,44 @@ get_api_key_state() {
     [ -n "$BIFROST_API_KEY" ]
 }
 
+# --- Credential storage -------------------------------------------------------
+# Credentials live in the host secret store under bifrost/credentials/*
+# (USERNAME, PASSWORD, ENCRYPTION_KEY, API_KEY), the layout shared with
+# redis/postgres. The older flat keys (bifrost/admin_username,
+# bifrost/admin_password, bifrost/encryption_key, bifrost/api_key) are
+# migrated on first read.
+
+# Usage: bifrost_credential_get <KEY>   (echoes value; rc 1 if absent)
+bifrost_credential_get() {
+    local key="$1" legacy="" v
+    v=$(ldx_secret_get bifrost/credentials "$key" 2>/dev/null) || true
+    [ -n "$v" ] && { printf '%s\n' "$v"; return 0; }
+    case "$key" in
+        PASSWORD) legacy=admin_password ;;
+        USERNAME) legacy=admin_username ;;
+        ENCRYPTION_KEY) legacy=encryption_key ;;
+        API_KEY) legacy=api_key ;;
+    esac
+    [ -n "$legacy" ] || return 1
+    v=$(ldx_secret_get bifrost "$legacy" 2>/dev/null) || true
+    [ -n "$v" ] || return 1
+    ldx_secret_put bifrost/credentials "$key" "$v"
+    ldx_secret_delete bifrost "$legacy"
+    printf '%s\n' "$v"
+}
+
+# Usage: bifrost_credential_put <KEY> <value>   (also clears the legacy key)
+bifrost_credential_put() {
+    local key="$1"
+    ldx_secret_put bifrost/credentials "$key" "$2"
+    case "$key" in
+        PASSWORD) ldx_secret_delete bifrost admin_password ;;
+        USERNAME) ldx_secret_delete bifrost admin_username ;;
+        ENCRYPTION_KEY) ldx_secret_delete bifrost encryption_key ;;
+        API_KEY) ldx_secret_delete bifrost api_key ;;
+    esac
+}
+
 # Assembles the gateway config. Raw materials are collected here with
 # kubectl; the text assembly (sections, template markers) is done with jq.
 render_config() {
@@ -120,11 +158,11 @@ put_secret() {
 # callers decide when that happens.
 ensure_encryption_key() {
     local key
-    key=$(ldx_secret_get bifrost encryption_key 2>/dev/null) || true
+    key=$(bifrost_credential_get ENCRYPTION_KEY 2>/dev/null) || true
     if [ -z "$key" ]; then
         key=$(openssl rand -base64 32)
-        ldx_secret_put bifrost encryption_key "$key"
-        log_info "Generated a new encryption key (stored in keychain: ldx/bifrost/encryption_key)."
+        bifrost_credential_put ENCRYPTION_KEY "$key"
+        log_info "Generated a new encryption key (stored in keychain: ldx/bifrost/credentials/ENCRYPTION_KEY)."
     fi
     put_secret "BIFROST_ENCRYPTION_KEY=${key}"
 }
@@ -133,15 +171,15 @@ ensure_encryption_key() {
 # first install, stores them in the keychain and the runtime Secret.
 ensure_admin_credentials() {
     local username password
-    username=$(ldx_secret_get bifrost admin_username 2>/dev/null) || true
-    password=$(ldx_secret_get bifrost admin_password 2>/dev/null) || true
+    username=$(bifrost_credential_get USERNAME 2>/dev/null) || true
+    password=$(bifrost_credential_get PASSWORD 2>/dev/null) || true
 
     if [ -z "$username" ] || [ -z "$password" ]; then
         username="admin"
         password=$(openssl rand -base64 24)
-        ldx_secret_put bifrost admin_username "$username"
-        ldx_secret_put bifrost admin_password "$password"
-        log_info "Generated admin credentials (stored in keychain: ldx/bifrost/admin_*)."
+        bifrost_credential_put USERNAME "$username"
+        bifrost_credential_put PASSWORD "$password"
+        log_info "Generated admin credentials (stored in keychain: ldx/bifrost/credentials/*)."
         log_info "Run 'ldx bifrost admin-password' to print the password."
     fi
 
@@ -164,7 +202,7 @@ ensure_api_key() {
 
     # Cache for local harnesses (opencode) in the host secret store. The
     # legacy cache file is removed on migration; it's a bearer token.
-    ldx_secret_put bifrost api_key "$key"
+    bifrost_credential_put API_KEY "$key"
     rm -f "$BIFROST_KEY_CACHE"
 
     BIFROST_API_KEY="$key"
@@ -179,9 +217,9 @@ print_api_key() {
 # Prints the admin password to stdout (read from the keychain).
 print_admin_password() {
     local password
-    password=$(ldx_secret_get bifrost admin_password 2>/dev/null) || true
+    password=$(bifrost_credential_get PASSWORD 2>/dev/null) || true
     if [ -z "$password" ]; then
-        fatal "No admin password in keychain (ldx/bifrost/admin_password). Run 'ldx bifrost install' first."
+        fatal "No admin password in keychain (ldx/bifrost/credentials/PASSWORD). Run 'ldx bifrost install' first."
     fi
     echo "$password"
 }

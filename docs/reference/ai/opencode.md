@@ -90,8 +90,8 @@ opencode ──(Bearer $BIFROST_VK_OPENCODE)──▶ https://bifrost.rd.localho
 One key is used for both LLM and MCP:
 
 **Bifrost virtual client key**:
-- Generated once as `sk-bf-<48 hex>` and cached in the host secret store as `ldx/bifrost/api_key` (macOS
-  Keychain; `security find-generic-password -s ldx/bifrost/api_key -w` or `ldx bifrost api-key print`).
+- Generated once as `sk-bf-<48 hex>` and cached in the host secret store as `ldx/bifrost/credentials/API_KEY` (macOS
+  Keychain; `security find-generic-password -s ldx/bifrost/credentials/API_KEY -w` or `ldx bifrost api-key print`).
 - Stored in the cluster Secret `bifrost-secrets` under `BIFROST_VK_OPENCODE` and referenced from the gateway config
   as `env.BIFROST_VK_OPENCODE`, so the Secret is the canonical copy and reconciles survive.
 - Rotate or repair with `ldx bifrost api-key`; `ldx opencode sync` picks the new value up on the next run (delete the
