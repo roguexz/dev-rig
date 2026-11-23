@@ -193,9 +193,12 @@ log_warn() {
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
+# Exit with an error on stderr. Commands that print a value on stdout (e.g.
+# print-password) stay composable as $(...) because failures add nothing to
+# stdout and only set the exit code.
 fatal() {
     log_error "$1"
     exit 1

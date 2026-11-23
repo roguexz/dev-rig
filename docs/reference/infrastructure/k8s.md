@@ -54,6 +54,13 @@ recorded names (one per line, for scripting). `diff` previews the next `up` (nee
 `certmanager` runs as its own release (`ldx-cert-manager`, namespace `cert-manager`, chart
 `charts/ldx-cert-manager`) because it spans namespaces and owns cluster-scoped resources.
 
+Fresh `redis`, `postgres` and `otel` installs get a random per-installation password: it is generated once, kept in
+the host secret store (`ldx/redis/credentials`, `ldx/postgresql/credentials`, `ldx/otel/credentials`) and in a
+Kubernetes Secret (`redis`, `postgresql`, `grafana-admin`) that the subcharts read through `auth.existingSecret` /
+`adminPasswordSecret`. `ldx redis print-password`, `ldx postgres print-password` and `ldx otel print-password` print
+the raw password on stdout. Installs that predate this keep the chart defaults (`changeit`, Redis unauthenticated) until
+redeployed with `--purge-data`; see [redis](./redis.md) and [postgres](./postgres.md).
+
 ## Configuration
 
 - **Namespace**: `--namespace`, then `LDX_K8S_NAMESPACE`, `LDX_NAMESPACE`, then the value recorded by the previous run

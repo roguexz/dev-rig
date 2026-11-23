@@ -16,13 +16,28 @@ the chart pins an image built on the host rather than pulling one.
 ### `ldx postgres install`
 
 This command installs a standalone PostgreSQL instance into the configured namespace (default `commons`, see
-[Configuration](../../ldx.md#configuration)), sets the default password to
-`changeit`, and runs initialization SQL scripts to enable the `vector` extension.
+[Configuration](../../ldx.md#configuration)), and runs initialization SQL scripts to enable the `vector` extension.
+
+Fresh installs get a random per-installation password for the `postgres` superuser. It is generated once and stored in
+two places: the host secret store (macOS Keychain item `ldx/postgresql/credentials/PASSWORD`, or a file under the
+cache directory on other hosts) and the Kubernetes Secret `postgresql`, which the chart consumes via
+`auth.existingSecret`. A leaked password is therefore valid only for that machine's cluster. Run `ldx postgres
+print-password` to print it (raw value on stdout, composable as `$(ldx postgres print-password)`); to force a new one,
+delete the keychain item and redeploy with `--purge-data`.
+
+Installs that predate this feature keep the chart default password `changeit`; nothing is rotated in place. To move an
+old install to a random password, run `ldx k8s down --services postgres --purge-data` and install again.
 
 ### `ldx postgres uninstall`
 
 This command removes PostgreSQL from the platform release, including its persistent storage PVC, leaving the namespace
 and the other services intact.
+
+### `ldx postgres print-password`
+
+This command prints the PostgreSQL password as a raw value on stdout, for composition:
+`PGPASSWORD="$(ldx postgres print-password)" psql -h localhost -U postgres`. On a legacy install without a host secret
+store entry it prints the password from the chart's Kubernetes Secret.
 
 ## Connecting to PostgreSQL
 
@@ -36,9 +51,9 @@ directly on your host OS, use the following connection details:
 - **Host:** `localhost`
 - **Port:** `5432` (or via NodePort `30432`)
 - **Username:** `postgres`
-- **Password:** `changeit`
+- **Password:** printed by `ldx postgres print-password` (fresh installs); `changeit` on pre-random-password installs
 - **Database:** `postgres`
-- **Connection URI:** `postgresql://postgres:changeit@localhost:5432/postgres`
+- **Connection URI:** `postgresql://postgres:<password>@localhost:5432/postgres`
 
 ### From Inside the Kubernetes Cluster
 
@@ -48,8 +63,11 @@ to connect:
 - **Host:** `postgresql.commons.svc.cluster.local`
 - **Port:** `5432`
 - **Username:** `postgres`
-- **Password:** `changeit`
+- **Password:** printed by `ldx postgres print-password` (fresh installs); `changeit` on pre-random-password installs
 - **Database:** `postgres`
-- **Connection URI:** `postgresql://postgres:changeit@postgresql.commons.svc.cluster.local:5432/postgres`
+- **Connection URI:** `postgresql://postgres:<password>@postgresql.commons.svc.cluster.local:5432/postgres`
+
+In-cluster apps can read the password from the Kubernetes Secret `postgresql` in the deployment namespace (key
+`postgres-password`) instead of embedding it.
 
 *Note: `commons` in the DNS name is the deployment namespace; substitute your custom namespace if one is configured.*

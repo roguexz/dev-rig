@@ -7,6 +7,8 @@ postgresql:
   global:
     security:
       allowInsecureImages: true
+  # Standalone-chart fallback: 'ldx k8s' supplies a random per-install
+  # password via auth.existingSecret (see the ldx-k8s credentials prehook).
   auth:
     postgresPassword: changeit
   image:

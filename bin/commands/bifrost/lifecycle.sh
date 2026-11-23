@@ -80,11 +80,15 @@ uninstall_bifrost() {
     kubectl delete configmap "$BIFROST_PROVIDERS_CM" -n "$namespace" --ignore-not-found
     kubectl delete secret "$BIFROST_SECRET" -n "$namespace" --ignore-not-found
 
-    # The virtual client key died with the Secret; drop the local cache entry.
+    # The virtual client key died with the Secret; drop the local cache entries.
+    ldx_secret_delete bifrost/credentials API_KEY
     ldx_secret_delete bifrost api_key
     rm -f "$BIFROST_KEY_CACHE"
 
     # Admin credentials and encryption key are in the keychain; remove them.
+    ldx_secret_delete bifrost/credentials USERNAME
+    ldx_secret_delete bifrost/credentials PASSWORD
+    ldx_secret_delete bifrost/credentials ENCRYPTION_KEY
     ldx_secret_delete bifrost admin_username
     ldx_secret_delete bifrost admin_password
     ldx_secret_delete bifrost encryption_key

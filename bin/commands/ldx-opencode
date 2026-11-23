@@ -27,9 +27,6 @@ OMLX_MODEL_SETTINGS="${OMLX_DIR}/model_settings.json"
 # Target harness config.
 OPENCODE_CONFIG="${HOME}/.config/opencode/opencode.jsonc"
 
-# Virtual client key cached by 'ldx bifrost api-key'.
-BIFROST_KEY_CACHE="${CACHE_DIR}/bifrost/api_key"
-
 # Helper-model filtering lives in ldx.harness.opencode (single source:
 # build_manifest applies it).
 
@@ -284,9 +281,10 @@ sync_opencode() {
 
     local client_key=""
     client_key=$(
-        ldx_secret_get_blob bifrost "$BIFROST_KEY_CACHE" api_key 2>/dev/null
+        ldx_secret_get bifrost/credentials API_KEY 2>/dev/null \
+            || ldx_secret_get bifrost api_key 2>/dev/null
     ) || true
-    [ -n "$client_key" ] || fatal "No cached gateway API key (ldx/bifrost/api_key). The gateway enforces API keys; run 'ldx bifrost api-key' (or 'ldx bifrost sync-omlx') first."
+    [ -n "$client_key" ] || fatal "No cached gateway API key (ldx/bifrost/credentials/API_KEY). The gateway enforces API keys; run 'ldx bifrost api-key' (or 'ldx bifrost sync-omlx') first."
 
     local result pruned had_comments model_ref
     result=$(merge_config "$manifest" "$default_id" "$keep_stale" "$client_key") || fatal "Failed to merge opencode config."

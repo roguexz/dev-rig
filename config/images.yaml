@@ -8,8 +8,10 @@
 # Format: service: full-image-reference:tag
 # Comments (#) and blank lines are ignored.
 
-# Redis (Bitnami chart, pinned to a specific version for reproducibility)
-redis: docker.io/bitnami/redis:8.10.3-debian-12-r1
+# Redis (Bitnami chart). Bitnami's free Docker Hub images ship 'latest' only;
+# point-version tags (e.g. 8.10.3-debian-12-r1) were removed and no longer
+# resolve, so :latest is the supported reference (same as the Postgres base).
+redis: docker.io/bitnami/redis:latest
 
 # PostgreSQL with pgvector (locally built image, see ensure_postgres_image)
 postgres: local/bitnami-postgresql-pgvector:18

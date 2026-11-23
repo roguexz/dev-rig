@@ -14,16 +14,41 @@ export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|status>"
+    echo "Usage: $(basename "$0") <install|uninstall|status|print-password>"
     echo ""
     echo "Commands:"
-    echo "  install    Install PostgreSQL with pgvector and expose port 5432 to the host."
-    echo "  uninstall  Remove the PostgreSQL deployment and its data (PVC)."
-    echo "  status     Show the PostgreSQL pod status, port-forward, and credentials."
+    echo "  install          Install PostgreSQL with pgvector and expose port 5432 to the host."
+    echo "  uninstall        Remove the PostgreSQL deployment and its data (PVC)."
+    echo "  status           Show the PostgreSQL pod status, port-forward, and endpoints."
+    echo "  print-password   Print the PostgreSQL password (raw value, stdout)."
     echo ""
     echo "Alias for 'ldx k8s up/down --services postgres' (uninstall adds"
     echo "--purge-data, matching the historical behavior). For flags and diffs"
     echo "use 'ldx k8s' directly."
+}
+
+# Prints the PostgreSQL password to stdout (raw, for composition:
+# PGPASSWORD="$(ldx postgres print-password)" psql ...). The host secret store
+# is the source of truth; legacy installs without one fall back to the chart's
+# Kubernetes Secret.
+print_password_postgres() {
+    local password
+    password=$(ldx_secret_get postgresql/credentials PASSWORD 2>/dev/null) || true
+
+    if [ -z "$password" ]; then
+        require_command "kubectl"
+        local namespace key
+        namespace="$(ldx_namespace postgresql)"
+        for key in postgres-password postgresql-postgres-password; do
+            password=$(kubectl get secret postgresql -n "$namespace" \
+                -o "jsonpath={.data.${key}}" 2>/dev/null | base64 -d 2>/dev/null) || true
+            [ -n "$password" ] && break
+        done
+    fi
+
+    [ -n "$password" ] \
+        || fatal "No PostgreSQL password found (host secret store ldx/postgresql/credentials/PASSWORD, Secret 'postgresql'). Run 'ldx postgres install' first."
+    echo "$password"
 }
 
 # Shows the PostgreSQL deployment status, port-forward, and credentials.
@@ -48,15 +73,9 @@ status_postgres() {
     fi
     echo "  Pod: ${phase} (ready: ${ready:-unknown})"
 
-    # Show the password from the Secret.
-    local password
-    password=$(kubectl get secret postgresql -n "$namespace" \
-        -o jsonpath='{.data.postgres-password}' 2>/dev/null | base64 -d 2>/dev/null) || true
-    if [ -n "$password" ]; then
-        echo "  Host access: psql -h localhost -U postgres -p 5432 (password: ${password})"
-    else
-        echo "  Host access: psql -h localhost -U postgres -p 5432"
-    fi
+    # Show how to reach it; print-password reveals the credential.
+    echo "  Host access: psql -h localhost -U postgres -p 5432"
+    echo "  Credentials: postgres : 'ldx postgres print-password'"
 
     # Check if the LoadBalancer service is exposed.
     local lb_ip
@@ -92,6 +111,9 @@ case "${1:-}" in
         ;;
     status)
         status_postgres
+        ;;
+    print-password)
+        print_password_postgres
         ;;
     help|-h|--help)
         show_help

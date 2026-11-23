@@ -30,12 +30,12 @@ Installs Bifrost into the configured namespace (default `commons`) and wires it 
 1. **Helm release**: Deploys the `bifrost` subchart via `ldx k8s up --services bifrost` (Deployment, PVC, Service,
    Ingress). The chart carries the static deployment; dynamic config stays CLI-owned.
 2. **Admin credentials**: Generates a random admin password (username is `admin`) stored in the keychain at
-   `ldx/bifrost/admin_password`. The admin UI uses these credentials for login.
-3. **Encryption key**: Generates an AES encryption key (stored in the keychain at `ldx/bifrost/encryption_key`) for
-   encrypting data at rest in the SQLite databases.
+   `ldx/bifrost/credentials/PASSWORD`. The admin UI uses these credentials for login.
+3. **Encryption key**: Generates an AES encryption key (stored in the keychain at
+   `ldx/bifrost/credentials/ENCRYPTION_KEY`) for encrypting data at rest in the SQLite databases.
 4. **Virtual client key**: Generates a virtual client key (`sk-bf-<48 hex>`) stored in the keychain at
-   `ldx/bifrost/api_key` and in the K8s Secret `bifrost-secrets` under `BIFROST_VK_OPENCODE`. This key secures both
-   the LLM and MCP endpoints.
+   `ldx/bifrost/credentials/API_KEY` and in the K8s Secret `bifrost-secrets` under `BIFROST_VK_OPENCODE`. This key
+   secures both the LLM and MCP endpoints.
 5. **Configuration**: Creates the `bifrost-config` ConfigMap with SQLite storage (config and logs databases on the
    1Gi PVC), admin auth, virtual key policy, and the oMLX provider section (injected from the `bifrost-providers`
    ConfigMap, if synced).
@@ -73,17 +73,17 @@ Manages the gateway's virtual client key - the single credential clients present
 - **Enforcement**: The virtual key policy (`is_vk_mandatory: true`) is always on. Requests to `/openai` and `/mcp`
   without a valid key get `401`.
 - **Generation**: On first use, a key `sk-bf-<48 hex>` is generated, cached in the host secret store as
-  `ldx/bifrost/api_key`, and stored in the `bifrost-secrets` Secret under `BIFROST_VK_OPENCODE`.
+  `ldx/bifrost/credentials/API_KEY`, and stored in the `bifrost-secrets` Secret under `BIFROST_VK_OPENCODE`.
 - **Reuse and rotation**: Re-running the command is idempotent (reuses the cached key, repairs the Secret/config if
-  they drifted). Delete the `ldx/bifrost/api_key` secret first to generate a fresh key.
+  they drifted). Delete the `ldx/bifrost/credentials/API_KEY` secret first to generate a fresh key.
 - **Print**: `ldx bifrost api-key print` prints the current key to stdout.
 
 Clients such as `ldx opencode sync` pick the key up from the keychain automatically.
 
 ### `ldx bifrost admin-password`
 
-Prints the admin password (stored in the keychain at `ldx/bifrost/admin_password`) to stdout. Use this to log in to
-the Bifrost UI at `https://bifrost.rd.localhost`. The username is `admin`.
+Prints the admin password (stored in the keychain at `ldx/bifrost/credentials/PASSWORD`) to stdout. Use this to log
+in to the Bifrost UI at `https://bifrost.rd.localhost`. The username is `admin`.
 
 ### `ldx bifrost status`
 

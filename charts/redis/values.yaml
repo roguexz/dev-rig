@@ -2,6 +2,13 @@
 redis:
   fullnameOverride: redis
   architecture: standalone
+  # The registry prefix lives in the repository (config/images.yaml pins
+  # 'docker.io/bitnami/redis'), so clear the chart's default registry to
+  # avoid a doubled path (registry-1.docker.io/docker.io/...).
+  image:
+    registry: ""
+  # Standalone-chart fallback: 'ldx k8s' supplies a random per-install
+  # password via auth.existingSecret (see the ldx-k8s credentials prehook).
   auth:
     enabled: false
 
