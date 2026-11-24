@@ -76,6 +76,11 @@ This allows Java applications configured to use this keystore to trust the local
 > **See:** [`examples/java-keystore.md`](../examples/java-keystore.md) for instructions on how to use this keystore in
 > your application.
 
+### `ldx tls status`
+
+Shows the state of the local TLS setup: the certificate files in `~/.cache/local-dev/certs/`, the mkcert root CA,
+and the `default-tls-secret` Secret and `default` TLSStore in `kube-system`.
+
 ### `ldx tls uninstall`
 
 This command cleans up all resources created by `install`:

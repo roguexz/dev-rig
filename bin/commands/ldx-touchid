@@ -16,7 +16,7 @@ source "${LDX_HOME}/bin/lib/common.sh"
 HOOKS_DIR="${HOME}/.config/git/hooks"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall> [options]"
+    echo "Usage: $(basename "$0") <install|uninstall|status> [options]"
     echo ""
     echo "Commands:"
     echo "  install [options]   Compile touchid_auth and install the git pre-push hook."
@@ -24,6 +24,7 @@ show_help() {
     echo "                        --dir <path>   Bin directory for touchid_auth"
     echo "                                     (default: \$HOME/.local/bin or \$HOME/bin)"
     echo "  uninstall           Remove the git-push helper and the pre-push hook."
+    echo "  status              Show touchid_auth binary and git hook state."
     echo ""
     echo "The hook is installed into \$HOME/.config/git/hooks and core.hookspath is"
     echo "pointed there globally. Pushes are gated by Touch ID only (no password fallback)."
@@ -143,6 +144,50 @@ uninstall_touchid() {
     log_info "Uninstall complete. core.hookspath was left untouched (${HOOKS_DIR})."
 }
 
+status_touchid() {
+    echo "Touch ID status"
+    echo "--------------"
+
+    local binary=""
+    local candidate_dir
+    for candidate_dir in "$(default_bin_dir)" "${HOME}/.local/bin" "${HOME}/bin"; do
+        if [ -f "${candidate_dir}/touchid_auth" ]; then
+            binary="${candidate_dir}/touchid_auth"
+            break
+        fi
+    done
+
+    if [ -n "$binary" ]; then
+        echo "Helper:      ${binary} (present)"
+    else
+        echo "Helper:      not installed"
+    fi
+
+    if [ -f "${HOOKS_DIR}/pre-push" ]; then
+        echo "Hook:        ${HOOKS_DIR}/pre-push (present)"
+    else
+        echo "Hook:        ${HOOKS_DIR}/pre-push (not found)"
+    fi
+
+    if [ -f "${HOOKS_DIR}/git-push" ]; then
+        echo "git-push:    ${HOOKS_DIR}/git-push (present)"
+    else
+        echo "git-push:    ${HOOKS_DIR}/git-push (not found)"
+    fi
+
+    local hookspath
+    hookspath=$(git config --global core.hookspath 2>/dev/null) || true
+    if [ -n "$hookspath" ]; then
+        if [ "$hookspath" = "$HOOKS_DIR" ]; then
+            echo "core.hookspath: ${hookspath} (points at hooks dir)"
+        else
+            echo "core.hookspath: ${hookspath} (differs from ${HOOKS_DIR})"
+        fi
+    else
+        echo "core.hookspath: not set"
+    fi
+}
+
 if [ $# -lt 1 ]; then
     show_help
     exit 0
@@ -157,6 +202,9 @@ case "$COMMAND" in
         ;;
     uninstall)
         uninstall_touchid "$@"
+        ;;
+    status)
+        status_touchid "$@"
         ;;
     help|-h|--help)
         show_help

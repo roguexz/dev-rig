@@ -510,13 +510,17 @@ apply_certmanager() {
     ca_root=$(mkcert -CAROOT)
     log_info "Applying ${CM_RELEASE} (cert-manager + mkcert CA) ..."
     ensure_chart_deps "${LDX_HOME}/charts/ldx-cert-manager"
-    helm upgrade --install "$CM_RELEASE" "${LDX_HOME}/charts/ldx-cert-manager" \
+    if ! helm upgrade --install "$CM_RELEASE" "${LDX_HOME}/charts/ldx-cert-manager" \
         --namespace "$CM_NAMESPACE" \
         --create-namespace \
         --set-file ca.cert="${ca_root}/rootCA.pem" \
         --set-file ca.key="${ca_root}/rootCA-key.pem" \
         ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
-        --wait
+        --wait; then
+        log_error "Helm upgrade failed. Pods that are not ready:"
+        report_unready_pods "$CM_NAMESPACE"
+        fatal "Check 'helm history ${CM_RELEASE} -n ${CM_NAMESPACE}' for the failed release."
+    fi
     kubectl rollout status deployment -n "$CM_NAMESPACE" \
         -l app.kubernetes.io/instance="$CM_RELEASE" --timeout=120s || true
 }
@@ -967,7 +971,7 @@ apply_release() {
         [ "$(service_scope "$s")" = "main" ] && main_only+=("$s")
     done
 
-    helm upgrade --install "$RELEASE" "$CHART_DIR" \
+    if ! helm upgrade --install "$RELEASE" "$CHART_DIR" \
         --namespace "$NAMESPACE" \
         ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
         ${recorded[@]+"${recorded[@]}"} \
@@ -975,7 +979,11 @@ apply_release() {
         "${set_args[@]}" \
         "${image_args[@]}" \
         --force-conflicts \
-        --wait
+        --wait; then
+        log_error "Helm upgrade failed. Pods that are not ready:"
+        report_unready_pods "$NAMESPACE"
+        fatal "Check 'helm history ${RELEASE} -n ${NAMESPACE}' for the failed release, or 'ldx k8s status' for the current state."
+    fi
 }
 
 k8s_up() {
@@ -1043,7 +1051,10 @@ k8s_up() {
         # process), not inside a subshell or process substitution.
         validate_images "${main_desired[@]}"
 
-        for service in "${main_desired[@]}"; do
+        # Only build the local pgvector image and adopt legacy releases for
+        # the services actually being requested; already-installed services
+        # are left alone.
+        for service in "${requested_main[@]+"${requested_main[@]}"}"; do
             if [ "$service" = "postgres" ]; then
                 if [ "$FORCE_REBUILD" = true ]; then
                     ensure_postgres_image --force
@@ -1072,10 +1083,10 @@ k8s_up() {
         esac
     done
 
-    state_set "$NAMESPACE" "${main_desired[@]}"
+    state_set "$NAMESPACE" ${main_desired[@]+"${main_desired[@]}"}
 
     log_info "Platform is up."
-    for service in "${desired[@]}"; do
+    for service in "${requested[@]+"${requested[@]}"}"; do
         case "$service" in
             redis)       log_info "Redis         -> localhost:6379 (credentials: default : 'ldx redis print-password')" ;;
             postgres)    log_info "PostgreSQL    -> localhost:5432 (credentials: postgres : 'ldx postgres print-password')" ;;

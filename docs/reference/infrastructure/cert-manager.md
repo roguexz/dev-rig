@@ -36,6 +36,11 @@ This command performs the following actions:
 After installation, you can request certificates by referencing `mkcert-issuer` in your `Ingress` or `Certificate`
 resources.
 
+### `ldx certmanager status`
+
+Shows the state of cert-manager: the Helm release, the `mkcert-issuer` ClusterIssuer, the `mkcert-ca`
+ClusterTrustBundle, and the `extra-cas` ConfigMap in the app namespace.
+
 ## Traefik ServersTransport (backend TLS transport)
 
 For services that terminate their own TLS (like Authelia), Traefik connects to the pod via HTTPS (TLS
