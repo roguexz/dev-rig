@@ -35,6 +35,7 @@ $HOME/.config/git/hooks/git-push   <-- invoked by -->   pre-push hook
 |:-------------------------|:-----------------------------------------------------------------------------------------------------|
 | `ldx touchid install`    | Compile the helper, install `git-push` + `pre-push` into `$HOME/.config/git/hooks`, set `core.hookspath`. |
 | `ldx touchid uninstall`  | Remove `git-push` (and `touchid_auth` from your bin dir); restore the previous hook from `pre-push.bak`. |
+| `ldx touchid status`     | Show the `touchid_auth` helper, the `pre-push` hook and `core.hookspath` state. |
 
 ### Install options
 

@@ -83,6 +83,7 @@ The scripts can also be run directly from the repository (`bin/commands/ldx-vaul
 | `ldx touchid <subcommand>`      | Touch ID (biometric) authentication for `git push` via a global pre-push hook.              | `bin/commands/ldx-touchid` |
 | `ldx tls <subcommand>`          | Manages local TLS certificates and Java keystores.                                          | `bin/commands/ldx-tls` |
 | `ldx certmanager <subcommand>`  | Installs and configures `cert-manager` for in-cluster certificates.                         | `bin/commands/ldx-certmanager` |
+| `ldx ca <subcommand>`           | Installs and manages user-supplied CA certificates (`extra-cas` ConfigMap).              | `bin/commands/ldx-ca` |
 | `ldx otel <subcommand>`         | Deploys the Grafana LGTM stack (Loki, Grafana, Tempo, Mimir).                               | `bin/commands/ldx-otel` |
 | `ldx k8s <subcommand>`          | Declarative lifecycle for the platform stack (Helm umbrella chart).                   | `bin/commands/ldx-k8s` |
 | `ldx redis <subcommand>`        | Deploys a Redis instance accessible from the host.                                    | `bin/commands/ldx-redis` |

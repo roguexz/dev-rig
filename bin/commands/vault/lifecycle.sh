@@ -4,6 +4,7 @@
 setup_vault() {
     require_command "helm"
     require_command "kubectl"
+    require_command "jq"
 
     local namespace
     namespace="$(ldx_namespace k8s)"
@@ -46,15 +47,33 @@ setup_vault() {
     sleep 5
 
     log_info "Initializing Vault..."
-    if ldx_secret_has vault init_json || [ -f "${VAULT_DIR}/keys.json" ]; then
-        log_warn "Vault keys already exist (ldx/vault/init_json). Skipping initialization."
-        log_info "If you need to re-initialize, delete the stored secret first (backend: $(ldx_secret_backend))."
-    else
+
+    # Check the server's initialization state before deciding to skip init.
+    # Stored keys can go stale when the cluster is recreated (PVCs wiped): the
+    # keys on disk no longer match the fresh server, and skipping init would
+    # leave unseal_vault failing with a bare 400 "Vault is not initialized".
+    local initialized
+    initialized=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .initialized 2>/dev/null) || true
+    if [ "$initialized" != "true" ]; then
+        if ldx_secret_has vault init_json || [ -f "${VAULT_DIR}/keys.json" ]; then
+            log_warn "Stored Vault keys exist but the server is not initialized (.initialized=false)."
+            log_warn "The stored keys are stale (from a previous, destroyed cluster). Re-initializing now."
+        fi
         init_dirs
         local init_json
         init_json=$(kubectl exec -n "$namespace" vault-0 -- vault operator init -format=json)
         ldx_secret_put vault init_json "$init_json"
+        # The legacy file holds the stale keys from the destroyed cluster;
+        # remove it so it cannot be migrated back over the new keys.
+        rm -f "${VAULT_DIR}/keys.json"
         log_info "Vault initialized. Unseal keys and root token stored in $(ldx_secret_backend) storage (ldx/vault/init_json)"
+    else
+        if ldx_secret_has vault init_json || [ -f "${VAULT_DIR}/keys.json" ]; then
+            log_warn "Vault keys already exist (ldx/vault/init_json). Skipping initialization."
+            log_info "If you need to re-initialize, delete the stored secret first (backend: $(ldx_secret_backend))."
+        else
+            fatal "Vault is initialized but no keys are stored (ldx/vault/init_json). Cannot unseal without the unseal keys."
+        fi
     fi
 
     unseal_vault
@@ -78,8 +97,18 @@ unseal_vault() {
     keys_json=$(vault_keys_json 2>/dev/null) \
         || fatal "Vault keys not found (ldx/vault/init_json). Run 'install' first."
 
+    local status_json
+    status_json=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null) || true
+
+    local initialized
+    initialized=$(jq -r .initialized <<<"$status_json" 2>/dev/null) || true
+    if [ "$initialized" != "true" ]; then
+        fatal "Vault is not initialized (.initialized=${initialized:-unknown}) but keys exist in the host secret store (ldx/vault/init_json).
+The stored keys are stale (from a previous, destroyed cluster). Run 'ldx vault install' to re-initialize, or delete the stored keys first (backend: $(ldx_secret_backend))."
+    fi
+
     local sealed
-    sealed=$(kubectl exec -n "$namespace" vault-0 -- vault status -format=json 2>/dev/null | jq -r .sealed 2>/dev/null) || true
+    sealed=$(jq -r .sealed <<<"$status_json" 2>/dev/null) || true
     if [ "$sealed" = "false" ]; then
         log_info "Vault is already unsealed."
         return
@@ -131,7 +160,7 @@ configure_default_user() {
     fi
 
     local discovery_url="https://${authelia_host}/.well-known/openid-configuration"
-    if ! curl -sf "${discovery_url}" > /dev/null 2>&1; then
+    if ! check_oidc_discovery "${discovery_url}"; then
         fatal "Cannot reach Authelia OIDC discovery at ${discovery_url}. Is Traefik configured with TLS?"
     fi
 

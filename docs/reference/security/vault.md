@@ -21,6 +21,15 @@ Requires:
 This command shows the current status of the Vault installation, including whether the pod is running,
 whether Vault is sealed or unsealed, and the URLs to access it.
 
+### Stale keys and re-initialization
+
+Vault keys are stored in the host secret store (`ldx/vault/init_json`, macOS Keychain; legacy
+`~/.cache/local-dev/vault/keys.json` is imported on first read). When the cluster is recreated (PVCs wiped), the
+stored keys no longer match the fresh server. `ldx vault install` detects this: if the server reports
+`.initialized=false` while keys exist in the store, it warns and re-initializes the server, storing the new keys
+(the stale legacy `keys.json` is removed). `ldx vault unseal` fails fast with a clear message in the same situation instead of a bare
+400. To re-initialize manually, delete the stored secret first (`ldx/vault/init_json`) and re-run `install`.
+
 ### `ldx vault unseal` (or `ldx-vault unseal`)
 
 This command unseals the Vault after a restart. Run it from any directory once `ldx` is installed

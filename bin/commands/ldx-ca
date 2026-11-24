@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+# ldx-help: infra Manage user-supplied CA certificates for the local platform
+
+set -euo pipefail
+
+# Locate the dev-rig checkout (LDX_HOME) from this command's real path.
+_LDX_SELF="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(dirname "${_LDX_SELF}")"
+export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${LDX_HOME}/bin/lib/common.sh"
+
+show_help() {
+    echo "Usage: $(basename "$0") <install|status|clear> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  install --dir <path> [--split]"
+    echo "                        Validate PEM files in <path> and install them as extra CAs."
+    echo "                        --split splits concatenated bundle files into individual certs."
+    echo "  status                Show mkcert and user-supplied CAs and ConfigMap state."
+    echo "  clear                 Remove user-supplied CAs (mkcert CA is left in place)."
+    echo ""
+    echo "User CAs are stored in ${CA_DIR} and mounted as the 'extra-cas' ConfigMap"
+    echo "by the bifrost and otel deployments (SSL_CERT_DIR). Installing or clearing"
+    echo "re-creates the ConfigMap and restarts any running bifrost/otel deployments."
+}
+
+# SHA-256 fingerprint of the first certificate in a PEM file, lowercase hex
+# without colons. Prints nothing and returns 1 on failure.
+cert_fingerprint() {
+    local file="$1"
+    local fp
+    fp=$(openssl x509 -in "$file" -noout -fingerprint -sha256 2>/dev/null) || return 1
+    fp="${fp#*=}"
+    fp="${fp//:/}"
+    fp="$(printf '%s' "$fp" | tr '[:upper:]' '[:lower:]')"
+    [ -n "$fp" ] || return 1
+    printf '%s' "$fp"
+}
+
+# Short, human-readable slug derived from the subject CN (e.g. "test-ca").
+cert_slug() {
+    local file="$1"
+    local subject cn slug
+    subject=$(openssl x509 -in "$file" -noout -subject 2>/dev/null) || return 1
+    cn="$(printf '%s\n' "$subject" | sed -n 's/.*CN *= *\(.*\)$/\1/p' | head -1)"
+    [ -n "$cn" ] || cn="ca"
+    slug="$(printf '%s' "$cn" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed -E 's/-+/-/g; s/^-|-$//g')"
+    [ -n "$slug" ] || slug="ca"
+    printf '%s' "$slug"
+}
+
+# Cache file name for a cert: <slug>-<shortfp>.pem. Derived from the cert
+# itself, never from the source file name.
+cache_name() {
+    local file="$1"
+    local slug fp
+    slug=$(cert_slug "$file" 2>/dev/null) || slug="ca"
+    fp=$(cert_fingerprint "$file" 2>/dev/null) || fp=""
+    if [ -n "$fp" ]; then
+        printf '%s-%s.pem' "$slug" "${fp:0:12}"
+    else
+        printf '%s.pem' "$slug"
+    fi
+}
+
+# Validate one PEM file. Returns 0 and prints a one-line summary on success;
+# returns 1 with a reason on stderr on failure.
+validate_ca_pem() {
+    local file="$1"
+    local subject issuer not_before not_after
+    subject=$(openssl x509 -in "$file" -noout -subject 2>/dev/null) || {
+        log_warn "$(basename "$file"): not a valid PEM certificate (openssl x509 failed)"
+        return 1
+    }
+    issuer=$(openssl x509 -in "$file" -noout -issuer 2>/dev/null) || {
+        log_warn "$(basename "$file"): could not read issuer"
+        return 1
+    }
+    not_before=$(openssl x509 -in "$file" -noout -startdate 2>/dev/null) || true
+    not_after=$(openssl x509 -in "$file" -noout -enddate 2>/dev/null) || true
+    printf '%s | %s | %s | %s\n' "$(cache_name "$file")" "$subject" "$not_before" "$not_after"
+    return 0
+}
+
+# Split a concatenated PEM bundle into individual certificate files in a
+# temp directory (<base>.<N>.pem). Prints the temp directory path; the caller
+# validates/installs the certs inside it and removes the directory.
+split_bundle_pem() {
+    local file="$1"
+    local base
+    base="$(basename "$file")"
+    base="${base%.*}"
+
+    local tmpdir
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/ca-split.XXXXXX")
+
+    awk -v out="$tmpdir" -v base="$base" '
+        /-----BEGIN CERTIFICATE-----/ { n++; inside=1; f=sprintf("%s/%s.%d.pem", out, base, n) }
+        inside { print > f }
+        /-----END CERTIFICATE-----/ { inside=0; close(f) }
+    ' "$file"
+
+    printf '%s\n' "$tmpdir"
+}
+
+# Re-create the extra-cas ConfigMap and roll bifrost/otel if they are running.
+refresh_extra_cas() {
+    local namespace
+    namespace="$(ldx_namespace otel)"
+
+    require_command "kubectl"
+    create_extra_cas_configmap "$namespace"
+
+    # Roll the deployments that mount the ConfigMap so the new CAs take effect.
+    local deployed
+    deployed=$(kubectl get deployments -n "$namespace" \
+        -o 'jsonpath={.items[*].metadata.name}' 2>/dev/null || true) || true
+    if [[ "$deployed" == *bifrost* ]]; then
+        log_info "Restarting bifrost so it picks up the new CAs..."
+        kubectl rollout restart deployment/bifrost -n "$namespace"
+        kubectl rollout status deployment/bifrost -n "$namespace" --timeout=120s \
+            || log_warn "bifrost rollout did not finish in time; check 'kubectl rollout status deployment/bifrost -n ${namespace}'."
+    fi
+    if [[ "$deployed" == *lgtm* ]]; then
+        log_info "Restarting otel so it picks up the new CAs..."
+        kubectl rollout restart deployment/lgtm -n "$namespace"
+        kubectl rollout status deployment/lgtm -n "$namespace" --timeout=120s \
+            || log_warn "otel rollout did not finish in time; check 'kubectl rollout status deployment/lgtm -n ${namespace}'."
+    fi
+}
+
+install_ca() {
+    local dir=""
+    local split=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dir)
+                dir="${2:?--dir requires a value}"
+                shift 2
+                ;;
+            --dir=*)
+                dir="${1#*=}"
+                shift
+                ;;
+            --split)
+                split=true
+                shift
+                ;;
+            *)
+                log_error "Unknown flag for install: $1"
+                show_help
+                exit 1
+                ;;
+        esac
+    done
+
+    [ -n "$dir" ] || { log_error "install requires --dir <path>"; show_help; exit 1; }
+    [ -d "$dir" ] || { log_error "Directory '${dir}' does not exist."; exit 1; }
+
+    require_command "openssl"
+
+    mkdir -p "$CA_DIR"
+
+    # Fingerprints of certs already installed (dedup by content, not file name).
+    declare -A seen_fps=()
+    local existing_file
+    for existing_file in "${CA_DIR}"/*.pem; do
+        [ -f "$existing_file" ] || continue
+        local existing_fp
+        existing_fp=$(cert_fingerprint "$existing_file" 2>/dev/null) || continue
+        [ -n "$existing_fp" ] && seen_fps["$existing_fp"]=1
+    done
+
+    # The mkcert root CA is always included alongside user CAs, so a user CA
+    # identical to it is not installed twice.
+    local mkcert_ca_root
+    mkcert_ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
+    local mkcert_root_cert="${mkcert_ca_root}/rootCA.pem"
+    if [ -f "$mkcert_root_cert" ]; then
+        local mkcert_fp
+        mkcert_fp=$(cert_fingerprint "$mkcert_root_cert" 2>/dev/null) || true
+        [ -n "$mkcert_fp" ] && seen_fps["$mkcert_fp"]=1
+    fi
+
+    local -a installed=()
+    local -a skipped=()
+    local -a already=()
+
+    # Validate one cert file and install it unless it is already present.
+    install_cert_file() {
+        local cert="$1"
+        local fp
+        fp=$(cert_fingerprint "$cert" 2>/dev/null) || fp=""
+        if [ -n "$fp" ] && [ -n "${seen_fps[$fp]+x}" ]; then
+            log_info "Skipping $(basename "$cert"): already installed."
+            already+=("$(basename "$cert")")
+            return 0
+        fi
+        local summary
+        if summary=$(validate_ca_pem "$cert"); then
+            local name
+            name=$(cache_name "$cert")
+            cp "$cert" "${CA_DIR}/${name}"
+            [ -n "$fp" ] && seen_fps["$fp"]=1
+            installed+=("$summary")
+        else
+            skipped+=("$(basename "$cert")")
+        fi
+    }
+
+    local file
+    for file in "$dir"/*.pem "$dir"/*.crt "$dir"/*.cer; do
+        [ -f "$file" ] || continue
+        local cert_count
+        cert_count=$(grep -c 'BEGIN CERTIFICATE' "$file" 2>/dev/null) || cert_count=0
+
+        if [ "$split" = true ] && [ "$cert_count" -gt 1 ]; then
+            # Concatenated bundle: split into individual certs and install each.
+            local split_dir
+            split_dir=$(split_bundle_pem "$file")
+            local cert
+            for cert in "$split_dir"/*.pem; do
+                [ -f "$cert" ] || continue
+                install_cert_file "$cert"
+            done
+            rm -rf "$split_dir"
+            continue
+        fi
+
+        if [ "$cert_count" -gt 1 ]; then
+            log_warn "$(basename "$file") contains ${cert_count} certificates; only the first will be used. Re-run with --split to import them individually."
+        fi
+
+        install_cert_file "$file"
+    done
+
+    if [ "${#installed[@]}" -eq 0 ]; then
+        if [ "${#skipped[@]}" -gt 0 ]; then
+            log_error "No valid CA certificates found in '${dir}'."
+            log_error "Skipped: ${skipped[*]}"
+            exit 1
+        fi
+        log_info "All certificates in '${dir}' are already installed; nothing to do."
+        return 0
+    fi
+
+    log_info "Installed ${#installed[@]} CA certificate(s) into ${CA_DIR}:"
+    for summary in "${installed[@]}"; do
+        echo "  ${summary}"
+    done
+    if [ "${#already[@]}" -gt 0 ]; then
+        log_info "Already installed, skipped: ${already[*]}"
+    fi
+    if [ "${#skipped[@]}" -gt 0 ]; then
+        log_warn "Skipped invalid file(s): ${skipped[*]}"
+    fi
+
+    refresh_extra_cas
+}
+
+status_ca() {
+    require_command "openssl"
+    require_command "kubectl"
+
+    local namespace
+    namespace="$(ldx_namespace otel)"
+
+    log_info "Extra CA certificates (namespace: ${namespace})"
+
+    # mkcert CA
+    local ca_root
+    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
+    local root_cert="${ca_root}/rootCA.pem"
+    if [ -f "$root_cert" ]; then
+        local subject fp
+        subject=$(openssl x509 -in "$root_cert" -noout -subject 2>/dev/null || echo "(unreadable)")
+        fp=$(cert_fingerprint "$root_cert" 2>/dev/null || true)
+        if [ -n "$fp" ]; then
+            echo "  mkcert:    ${root_cert} (${subject}) [${fp:0:12}]"
+        else
+            echo "  mkcert:    ${root_cert} (${subject})"
+        fi
+    else
+        echo "  mkcert:    not found (run 'mkcert -install' or 'ldx tls install')"
+    fi
+
+    # User CAs
+    local user_ca
+    local count=0
+    for user_ca in "${CA_DIR}"/*.pem; do
+        [ -f "$user_ca" ] || continue
+        count=$((count + 1))
+        local subject fp
+        subject=$(openssl x509 -in "$user_ca" -noout -subject 2>/dev/null || echo "(unreadable)")
+        fp=$(cert_fingerprint "$user_ca" 2>/dev/null || true)
+        if [ -n "$fp" ]; then
+            echo "  user:      $(basename "$user_ca") (${subject}) [${fp:0:12}]"
+        else
+            echo "  user:      $(basename "$user_ca") (${subject})"
+        fi
+    done
+    [ "$count" -eq 0 ] && echo "  user:      none (install with: ldx ca install --dir <path>)"
+
+    # ConfigMap state
+    local data_count
+    data_count=$(kubectl get configmap extra-cas -n "$namespace" \
+        -o 'jsonpath={.data}' 2>/dev/null | jq -r 'keys | length' 2>/dev/null) || data_count=""
+    if [ -n "$data_count" ]; then
+        echo "  ConfigMap: extra-cas (${namespace}) - ${data_count} CA file(s)"
+    else
+        echo "  ConfigMap: extra-cas (${namespace}) - not present"
+    fi
+}
+
+clear_ca() {
+    local count=0
+    local user_ca
+    for user_ca in "${CA_DIR}"/*.pem; do
+        [ -f "$user_ca" ] || continue
+        rm -f "$user_ca"
+        count=$((count + 1))
+    done
+
+    if [ "$count" -eq 0 ]; then
+        log_info "No user-supplied CAs to clear."
+        return 0
+    fi
+
+    log_info "Removed ${count} user-supplied CA certificate(s) from ${CA_DIR}."
+    refresh_extra_cas
+}
+
+case "${1:-}" in
+    install)
+        shift
+        install_ca "$@"
+        ;;
+    status)
+        status_ca
+        ;;
+    clear)
+        clear_ca
+        ;;
+    help|-h|--help)
+        show_help
+        ;;
+    "")
+        show_help
+        exit 1
+        ;;
+    *)
+        log_error "Unknown subcommand: $1"
+        show_help
+        exit 1
+        ;;
+esac

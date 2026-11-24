@@ -10,7 +10,7 @@ export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|keystore> [options]"
+    echo "Usage: $(basename "$0") <install|uninstall|status|keystore> [options]"
     echo ""
     echo "Commands:"
     echo "  install [options]  Generate certs, install into OS, and configure Traefik."
@@ -19,6 +19,7 @@ show_help() {
     echo "                       --domain, -d <name> Specify additional domain name(s) to include in certificate."
     echo "                                           Can be specified multiple times, or comma/space separated."
     echo "  uninstall          Remove certs and Traefik configuration."
+    echo "  status             Show certificate files, TLS secret, and TLSStore state."
     echo "  keystore           Create a Java keystore with the root CA."
 }
 
@@ -180,6 +181,42 @@ create_keystore() {
     log_info "See examples/java-keystore.md for usage instructions."
 }
 
+status_certs() {
+    require_command "kubectl"
+
+    local cert_file="${CERTS_DIR}/localhost.pem"
+    local key_file="${CERTS_DIR}/localhost-key.pem"
+
+    echo "TLS status"
+    echo "----------"
+
+    if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
+        echo "Cert files:  ${CERTS_DIR}/localhost.pem (present)"
+    else
+        echo "Cert files:  not found in ${CERTS_DIR}"
+    fi
+
+    local ca_root
+    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
+    if [ -n "$ca_root" ] && [ -f "${ca_root}/rootCA.pem" ]; then
+        echo "mkcert CA:   ${ca_root}/rootCA.pem (present)"
+    else
+        echo "mkcert CA:   not installed"
+    fi
+
+    if kubectl get secret default-tls-secret -n kube-system >/dev/null 2>&1; then
+        echo "Secret:      default-tls-secret (kube-system) - present"
+    else
+        echo "Secret:      default-tls-secret (kube-system) - not found"
+    fi
+
+    if kubectl get tlsstore default -n kube-system >/dev/null 2>&1; then
+        echo "TLSStore:    default (kube-system) - present"
+    else
+        echo "TLSStore:    default (kube-system) - not found"
+    fi
+}
+
 main() {
     if [ $# -eq 0 ]; then
         show_help
@@ -195,6 +232,9 @@ main() {
             ;;
         uninstall)
             uninstall_certs
+            ;;
+        status)
+            status_certs
             ;;
         keystore)
             create_keystore

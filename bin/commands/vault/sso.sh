@@ -28,7 +28,7 @@ sso_vault() {
     fi
 
     local discovery_url="https://${AUTHELIA_HOST}/.well-known/openid-configuration"
-    if ! curl -sf "${discovery_url}" > /dev/null 2>&1; then
+    if ! check_oidc_discovery "${discovery_url}"; then
         fatal "Cannot reach Authelia OIDC discovery at ${discovery_url}. Is Traefik configured with TLS?"
     fi
 

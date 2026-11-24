@@ -100,20 +100,6 @@ uninstall_bifrost() {
 # upgrade
 # ---------------------------------------------------------------------------
 
-# Image the running deployment specifies (empty if not installed).
-bifrost_running_image() {
-    kubectl get deployment bifrost -n "$NAMESPACE" \
-        -o jsonpath='{.spec.template.spec.containers[?(@.name=="bifrost")].image}' 2>/dev/null || true
-}
-
-# Tag of the running image (e.g. 'v2.6.0'); empty when the deployment is absent.
-bifrost_running_tag() {
-    local image
-    image=$(bifrost_running_image)
-    [ -n "$image" ] || return 1
-    printf '%s' "$image" | sed -n 's/.*:\(.*\)$/\1/p'
-}
-
 upgrade_bifrost() {
     require_command "kubectl"
 

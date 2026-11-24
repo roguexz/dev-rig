@@ -22,6 +22,10 @@ ldx k8s up redis postgres -f tuning.yaml
 `-f, --values <file>` copies the file into `~/.config/ldx/k8s-values/` keyed by namespace, so later plain `up` runs
 keep applying it.
 
+Only the services named on the command line get prepared: the local pgvector image build, legacy-release adoption,
+pre-apply hooks, post-apply hooks and the final summary all run for the requested services only. Already-installed
+services are left alone (they are still reconciled into the release).
+
 ### `ldx k8s down [services] [options]`
 
 Disables the named services and reconciles the release to what remains. With no services - or when the set becomes

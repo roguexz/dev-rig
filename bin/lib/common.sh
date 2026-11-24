@@ -93,6 +93,8 @@ inject_block() {
 export CACHE_DIR="${HOME}/.cache/local-dev"
 export CERTS_DIR="${CACHE_DIR}/certs"
 export VAULT_DIR="${CACHE_DIR}/vault"
+# User-supplied CA certificates (installed via 'ldx ca install').
+export CA_DIR="${CACHE_DIR}/ca"
 export RD_KUBE_CONTEXT="rancher-desktop"
 export LDX_CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/ldx"
 export LDX_CONFIG_FILE="${LDX_CONFIG_DIR}/config"
@@ -464,36 +466,99 @@ ldx_image_parts() {
     printf '%s %s' "$repo" "$tag"
 }
 
+# Check that Authelia's OIDC discovery endpoint responds. Prints the actual
+# curl failure reason (connection refused, TLS error, DNS failure, ...) instead
+# of a bare "cannot reach" so the user knows what to fix. Returns non-zero on
+# failure; the caller decides whether to fatal or stay advisory.
+check_oidc_discovery() {
+    local discovery_url="$1"
+    local tmp code err
+    tmp=$(mktemp "${TMPDIR:-/tmp}/oidc-discovery.XXXXXX")
+    code=$(curl -sS -o /dev/null -w '%{http_code}' "${discovery_url}" 2>"${tmp}") || true
+    err=$(cat "${tmp}")
+    rm -f "${tmp}"
+    if [ -n "$err" ]; then
+        log_warn "OIDC discovery check failed: ${err}"
+        return 1
+    fi
+    if [ "$code" != "200" ]; then
+        log_warn "OIDC discovery returned HTTP ${code} from ${discovery_url}"
+        return 1
+    fi
+    return 0
+}
+
+# helm --wait names only the resource it gave up on. Say which pods are stuck
+# and quote what the scheduler complained about, so a failed rollout needs no
+# follow-up kubectl to understand. Informational: exit status stays with the
+# caller.
+# Usage: report_unready_pods <namespace>
+report_unready_pods() {
+    local namespace="$1"
+
+    kubectl get pods -n "$namespace" --no-headers 2>/dev/null |
+        awk '{split($2, r, "/"); if (r[1] + 0 < r[2] + 0) printf "  %s  %s (%s)\n", $1, $3, $2}' |
+        { grep . || echo "  (nothing reports not-ready; check 'helm history' for a stale failure)"; }
+
+    kubectl get events -n "$namespace" --sort-by=.lastTimestamp 2>/dev/null |
+        awk '$1 == "Warning"' | tail -n 5 | sed 's/^/  /'
+}
+
 # Creates (or updates) the 'extra-cas' ConfigMap in the given namespace with
 # hash-named CA certificate files (for SSL_CERT_DIR). This adds local CAs
-# (like mkcert) to the system root store without replacing it, so public CAs
-# continue to come from the container image. The ConfigMap is small and stable
-# (only contains local CAs), so it rarely needs refreshing.
+# (like mkcert) and user-supplied CAs to the system root store without
+# replacing it, so public CAs continue to come from the container image.
+# The ConfigMap is small and stable (only contains local CAs), so it rarely
+# needs refreshing.
 # Usage: create_extra_cas_configmap <namespace>
 create_extra_cas_configmap() {
     local namespace="${1:?namespace is required}"
-
-    local ca_root
-    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
-    local root_cert="${ca_root}/rootCA.pem"
-
-    if [ ! -f "$root_cert" ]; then
-        log_warn "mkcert root CA not found at ${root_cert}; skipping extra CAs ConfigMap."
-        return 0
-    fi
 
     # Create a temp directory with hash-named CA files (OpenSSL format).
     local tmpdir
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/extra-cas.XXXXXX")
 
-    # Copy the mkcert CA and compute its hash for the filename.
-    cp "$root_cert" "${tmpdir}/mkcert-ca.pem"
-    local hash
-    hash=$(openssl x509 -hash -noout -in "$root_cert" 2>/dev/null || true)
-    if [ -n "$hash" ]; then
-        mv "${tmpdir}/mkcert-ca.pem" "${tmpdir}/${hash}.0"
+    # mkcert root CA (always included when present).
+    local ca_root
+    ca_root=$(mkcert -CAROOT 2>/dev/null || echo "")
+    local root_cert="${ca_root}/rootCA.pem"
+
+    local has_ca=false
+    if [ -f "$root_cert" ]; then
+        has_ca=true
+        cp "$root_cert" "${tmpdir}/mkcert-ca.pem"
+        local hash
+        hash=$(openssl x509 -hash -noout -in "$root_cert" 2>/dev/null || true)
+        if [ -n "$hash" ] && [ ! -f "${tmpdir}/${hash}.0" ]; then
+            mv "${tmpdir}/mkcert-ca.pem" "${tmpdir}/${hash}.0"
+        else
+            log_warn "Could not compute hash for mkcert CA; using plain filename."
+        fi
     else
-        log_warn "Could not compute hash for mkcert CA; using plain filename."
+        log_warn "mkcert root CA not found at ${root_cert}; skipping it."
+    fi
+
+    # User-supplied CAs installed via 'ldx ca install' (${CA_DIR}).
+    local user_ca
+    for user_ca in "${CA_DIR}"/*.pem; do
+        [ -f "$user_ca" ] || continue
+        has_ca=true
+        local user_name
+        user_name="$(basename "$user_ca")"
+        cp "$user_ca" "${tmpdir}/${user_name}"
+        local hash
+        hash=$(openssl x509 -hash -noout -in "$user_ca" 2>/dev/null || true)
+        if [ -n "$hash" ] && [ ! -f "${tmpdir}/${hash}.0" ]; then
+            mv "${tmpdir}/${user_name}" "${tmpdir}/${hash}.0"
+        else
+            log_warn "Could not compute hash for ${user_name}; using plain filename."
+        fi
+    done
+
+    if [ "$has_ca" = false ]; then
+        rm -rf "$tmpdir"
+        log_warn "No CA certificates found (mkcert or ldx ca); skipping extra CAs ConfigMap."
+        return 0
     fi
 
     log_info "Creating extra CAs ConfigMap for namespace '${namespace}'..."

@@ -384,12 +384,11 @@ status_authelia() {
         ready=$(kubectl get pods -n "$AUTHELIA_NAMESPACE" -l app.kubernetes.io/name=authelia -o 'jsonpath={..status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || ready="Unknown"
         log_info "Pod ready: ${ready}"
 
-        # Check OIDC discovery endpoint
+        # Check OIDC discovery endpoint; the helper reports the actual curl
+        # failure reason (TLS error, connection refused, DNS failure, ...).
         local issuer="https://${AUTHELIA_HOST}"
-        if curl -sf "${issuer}/.well-known/openid-configuration" > /dev/null 2>&1; then
+        if check_oidc_discovery "${issuer}/.well-known/openid-configuration"; then
             log_info "OIDC discovery: OK"
-        else
-            log_warn "OIDC discovery endpoint not reachable (Traefik may not have TLS configured yet)"
         fi
     fi
 }

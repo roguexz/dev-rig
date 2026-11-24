@@ -64,20 +64,6 @@ status_vault() {
     log_info "In-cluster URL: http://vault.${namespace}.svc.cluster.local:8200"
 }
 
-# helm --wait names only the resource it gave up on. Say which pods are stuck and
-# quote what the scheduler complained about, so a failed rollout needs no follow-up
-# kubectl to understand. Informational: exit status stays with the caller.
-report_unready_pods() {
-    local namespace="$1"
-
-    kubectl get pods -n "$namespace" --no-headers 2>/dev/null |
-        awk '{split($2, r, "/"); if (r[1] + 0 < r[2] + 0) printf "  %s  %s (%s)\n", $1, $3, $2}' |
-        { grep . || echo "  (nothing reports not-ready; check 'helm history' for a stale failure)"; }
-
-    kubectl get events -n "$namespace" --sort-by=.lastTimestamp 2>/dev/null |
-        awk '$1 == "Warning"' | tail -n 5 | sed 's/^/  /'
-}
-
 # Finds the Traefik Service ClusterIP so we can configure hostAliases in the
 # Vault pod. This allows Vault to reach Authelia through Traefik (so the Host
 # header matches the OIDC issuer) without relying on external DNS.

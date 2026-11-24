@@ -13,16 +13,62 @@ export LDX_HOME="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${LDX_HOME}/bin/lib/common.sh"
 
 show_help() {
-    echo "Usage: $(basename "$0") <install|uninstall|ca-bundle>"
+    echo "Usage: $(basename "$0") <install|uninstall|status|ca-bundle>"
     echo ""
     echo "Commands:"
     echo "  install       Install cert-manager via Helm and configure local ClusterIssuer."
     echo "  uninstall     Remove cert-manager and its configurations."
+    echo "  status         Show cert-manager release, ClusterIssuer, ClusterTrustBundle, and extra-cas ConfigMap state."
     echo "  ca-bundle <ns> Create/update the 'extra-cas' ConfigMap in namespace <ns>"
     echo "                 with hash-named local CA files (mkcert) for SSL_CERT_DIR."
     echo ""
     echo "install/uninstall are aliases for 'ldx k8s up/down --services certmanager'."
     echo "ca-bundle is a standalone utility used by other ldx commands."
+}
+
+status_certmanager() {
+    require_command "kubectl"
+    require_command "helm"
+    require_command "jq"
+
+    local cm_release="ldx-cert-manager"
+    local cm_namespace="cert-manager"
+    local app_namespace
+    app_namespace="$(ldx_namespace certmanager)"
+
+    echo "Cert-manager status"
+    echo "------------------"
+
+    if helm status "$cm_release" -n "$cm_namespace" >/dev/null 2>&1; then
+        echo "Release:    ${cm_release} (${cm_namespace}) - deployed"
+    else
+        echo "Release:    not installed (run 'install' to install it)"
+        return 0
+    fi
+
+    local issuer_status
+    issuer_status=$(kubectl get clusterissuer mkcert-issuer \
+        -o 'jsonpath={.status.conditions[0].type}={.status.conditions[0].status}' 2>/dev/null) || true
+    if [ -n "$issuer_status" ]; then
+        echo "ClusterIssuer: mkcert-issuer (${issuer_status})"
+    else
+        echo "ClusterIssuer: mkcert-issuer not found"
+    fi
+
+    if kubectl get clustertrustbundle mkcert-ca >/dev/null 2>&1; then
+        echo "ClusterTrustBundle: mkcert-ca (present)"
+    else
+        echo "ClusterTrustBundle: mkcert-ca not found"
+    fi
+
+    if kubectl get configmap extra-cas -n "$app_namespace" >/dev/null 2>&1; then
+        local ca_count
+        ca_count=$(kubectl get configmap extra-cas -n "$app_namespace" \
+            -o 'jsonpath={.data}' 2>/dev/null | jq -r 'length' 2>/dev/null) || true
+        echo "extra-cas ConfigMap: present in namespace '${app_namespace}' (${ca_count:-?} CA file(s))"
+    else
+        echo "extra-cas ConfigMap: not found in namespace '${app_namespace}'"
+    fi
 }
 
 case "${1:-}" in
@@ -31,6 +77,9 @@ case "${1:-}" in
         ;;
     uninstall)
         exec "${LDX_HOME}/bin/ldx" k8s down --services certmanager "${@:2}"
+        ;;
+    status)
+        status_certmanager
         ;;
     ca-bundle)
         require_command "kubectl"
