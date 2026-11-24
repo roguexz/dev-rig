@@ -5,6 +5,7 @@
 tap "hashicorp/tap"               # vault is not in homebrew-core
 
 brew "grype"                      # cvescan vulnerability scanner (homebrew-core)
+brew "bash"                       # ldx scripts require bash 4+ (macOS ships 3.2)
 brew "helm"                       # k8s chart installs (Rancher Desktop also ships one)
 brew "jq"                         # JSON glue
 brew "mkcert"                     # local CA / TLS certificates

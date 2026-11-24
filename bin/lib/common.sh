@@ -2,6 +2,18 @@
 
 set -euo pipefail
 
+# --- Shell floor --------------------------------------------------------------
+# macOS ships bash 3.2 in /bin/bash, frozen by Apple since 2007. It lacks
+# 'declare -A' and aborts under set -u when expanding an empty array, so the
+# toolkit requires bash 4+. The Homebrew formula depends on bash, so formula
+# installs get it automatically; a git checkout needs 'brew install bash'.
+# The check lives here because every command sources this file, including
+# direct invocations of bin/commands/* (issue #20).
+if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "[ERROR] ldx requires bash 4+ (this shell is ${BASH_VERSION:-not bash}). Install: brew install bash" >&2
+    exit 1
+fi
+
 # --- Config directory ---------------------------------------------------------
 # The repository's config/ directory holds runtime templates and Helm values
 # files that the CLI renders or applies (bifrost gateway config, vault Helm

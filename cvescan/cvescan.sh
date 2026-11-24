@@ -7,6 +7,14 @@
 
 set -euo pipefail
 
+# macOS ships bash 3.2 in /bin/bash, frozen by Apple; this scanner requires
+# bash 4+ (see bin/lib/common.sh). The LaunchDaemon PATH lists
+# /opt/homebrew/bin first so 'env bash' finds the Homebrew bash.
+if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "[ERROR] cvescan requires bash 4+ (this shell is ${BASH_VERSION:-not bash}). Install: brew install bash" >&2
+  exit 1
+fi
+
 # Configuration File Location
 CONFIG_FILE="/usr/local/etc/cvescan.conf"
 
@@ -650,7 +658,7 @@ HIGH_COUNT=0
 RAW_JSON="${LOG_DIR}/grype_raw.json"
 rm -f "$RAW_JSON"
 
-for target in "${VALID_TARGETS[@]}"; do
+for target in "${VALID_TARGETS[@]+"${VALID_TARGETS[@]}"}"; do
   echo "--- Scanning Target Directory: ${target} ---" >> "$CURRENT_LOG"
   "$GRYPE_BIN" dir:"${target}" -o table >> "$CURRENT_LOG" 2>&1 || SCAN_SUCCESS=false
   

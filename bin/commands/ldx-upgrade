@@ -275,7 +275,7 @@ main() {
         local -a filtered=()
         local svc want
         for svc in "${installed[@]}"; do
-            for want in "${requested[@]}"; do
+            for want in "${requested[@]+"${requested[@]}"}"; do
                 [ "$svc" = "$want" ] && filtered+=("$svc") && break
             done
         done

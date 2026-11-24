@@ -161,14 +161,31 @@ install_ca() {
 
     mkdir -p "$CA_DIR"
 
-    # Fingerprints of certs already installed (dedup by content, not file name).
-    declare -A seen_fps=()
+    # Fingerprints of certs already installed (dedup by content, not file
+    # name). Kept as a '|'-delimited string, not an associative array: macOS
+    # ships bash 3.2, whose 'declare' has no -A (issue #20).
+    local seen_fps="|"
+    fp_add() {
+        case "$seen_fps" in
+            *"|$1|"*) ;;
+            *) seen_fps="${seen_fps}${1}|" ;;
+        esac
+    }
+    fp_seen() {
+        case "$seen_fps" in
+            *"|$1|"*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
     local existing_file
     for existing_file in "${CA_DIR}"/*.pem; do
         [ -f "$existing_file" ] || continue
         local existing_fp
         existing_fp=$(cert_fingerprint "$existing_file" 2>/dev/null) || continue
-        [ -n "$existing_fp" ] && seen_fps["$existing_fp"]=1
+        if [ -n "$existing_fp" ]; then
+            fp_add "$existing_fp"
+        fi
     done
 
     # The mkcert root CA is always included alongside user CAs, so a user CA
@@ -179,7 +196,9 @@ install_ca() {
     if [ -f "$mkcert_root_cert" ]; then
         local mkcert_fp
         mkcert_fp=$(cert_fingerprint "$mkcert_root_cert" 2>/dev/null) || true
-        [ -n "$mkcert_fp" ] && seen_fps["$mkcert_fp"]=1
+        if [ -n "$mkcert_fp" ]; then
+            fp_add "$mkcert_fp"
+        fi
     fi
 
     local -a installed=()
@@ -191,7 +210,7 @@ install_ca() {
         local cert="$1"
         local fp
         fp=$(cert_fingerprint "$cert" 2>/dev/null) || fp=""
-        if [ -n "$fp" ] && [ -n "${seen_fps[$fp]+x}" ]; then
+        if [ -n "$fp" ] && fp_seen "$fp"; then
             log_info "Skipping $(basename "$cert"): already installed."
             already+=("$(basename "$cert")")
             return 0
@@ -201,7 +220,9 @@ install_ca() {
             local name
             name=$(cache_name "$cert")
             cp "$cert" "${CA_DIR}/${name}"
-            [ -n "$fp" ] && seen_fps["$fp"]=1
+            if [ -n "$fp" ]; then
+                fp_add "$fp"
+            fi
             installed+=("$summary")
         else
             skipped+=("$(basename "$cert")")

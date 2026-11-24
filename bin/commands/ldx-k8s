@@ -976,8 +976,8 @@ apply_release() {
         ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
         ${recorded[@]+"${recorded[@]}"} \
         ${APPLY_VALUES[@]+"${APPLY_VALUES[@]}"} \
-        "${set_args[@]}" \
-        "${image_args[@]}" \
+        ${set_args[@]+"${set_args[@]}"} \
+        ${image_args[@]+"${image_args[@]}"} \
         --force-conflicts \
         --wait; then
         log_error "Helm upgrade failed. Pods that are not ready:"
@@ -1297,7 +1297,7 @@ k8s_diff() {
     helm diff upgrade "$RELEASE" "$CHART_DIR" \
         --namespace "$NAMESPACE" \
         ${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"} \
-        "${set_args[@]}"
+        ${set_args[@]+"${set_args[@]}"}
 }
 
 k8s_services() {
