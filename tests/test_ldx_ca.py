@@ -17,9 +17,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CA_CMD = REPO_ROOT / "bin" / "commands" / "ldx-ca"
 
 
-def run_ca(args, env, cwd=None):
+def run_ca(args, env, cwd=None, bash="bash"):
     return subprocess.run(
-        ["bash", str(CA_CMD), *args],
+        [bash, str(CA_CMD), *args],
         env=env,
         cwd=cwd or REPO_ROOT,
         capture_output=True,
@@ -301,6 +301,41 @@ class CaInstallFingerprintDedup(unittest.TestCase):
 
             ca_dir = home / ".cache" / "local-dev" / "ca"
             self.assertEqual(len(list(ca_dir.glob("*.pem"))), 1)
+
+
+class CaRequiresBash4(unittest.TestCase):
+    """Issue #20 policy: bash 4+ required. Under macOS system bash 3.2 the
+    command must refuse with the install hint, not crash on 'declare -A'."""
+
+    def system_bash_major(self):
+        result = subprocess.run(
+            ["/bin/bash", "-c", "echo ${BASH_VERSINFO[0]}"],
+            capture_output=True, text=True,
+        )
+        return int(result.stdout.strip() or 0)
+
+    def test_refuses_system_bash_with_actionable_message(self):
+        if sys.platform != "darwin" or self.system_bash_major() >= 4:
+            self.skipTest("system bash here is 4+; nothing to refuse")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            home = tmp_path / "home"
+            home.mkdir()
+            bin_dir, _ = make_fakes(tmp_path)
+            (home / "tmp").mkdir()
+
+            dir_with_ca = tmp_path / "ca-src"
+            dir_with_ca.mkdir()
+            (dir_with_ca / "test-ca.pem").write_text("irrelevant; refusal happens first\n")
+
+            env = make_env(home, bin_dir)
+            result = run_ca(["install", "--dir", str(dir_with_ca)], env, bash="/bin/bash")
+
+            output = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires bash 4+", output)
+            self.assertNotIn("invalid option", output)
 
 
 if __name__ == "__main__":
